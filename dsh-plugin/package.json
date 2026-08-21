@@ -14,7 +14,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Tonoken3/distill-kura.git",
+    "url": "git+https://github.com/lna-lab/distill-kura.git",
     "directory": "dsh-plugin"
   },
   "dependencies": {
