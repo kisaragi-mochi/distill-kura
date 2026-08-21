@@ -25,6 +25,24 @@ from dataclasses import dataclass, field
 
 INDEX = "MEMORY.md"
 
+
+class InvalidSlug(ValueError):
+    """A name that does not designate a memory in this store."""
+
+
+def contained(root: str, path: str) -> bool:
+    """True when `path` really is inside `root`, after following symlinks.
+
+    Defence in depth behind `slug_set()`. String prefixes are not enough: a symlink
+    inside the store can point anywhere, and `..` collapses only after normalisation.
+    """
+    try:
+        root_real = os.path.realpath(root)
+        cand = os.path.realpath(path)
+        return os.path.commonpath([root_real, cand]) == root_real
+    except (OSError, ValueError):
+        return False
+
 _FRONT = """---
 name: {slug}
 description: {desc}
@@ -55,6 +73,7 @@ class Store:
         if self.charter is None and os.path.exists(os.path.join(self.path, "charter.md")):
             self.charter = os.path.join(self.path, "charter.md")
         self._titles: dict[str, str] | None = None
+        self._slugs_cache: tuple[tuple[int, int], frozenset[str]] | None = None
 
     @property
     def index_path(self) -> str:
@@ -73,13 +92,28 @@ class Store:
         return open(p, encoding="utf-8", errors="ignore").read() if os.path.exists(p) else ""
 
     def slugs(self) -> list[str]:
-        out = [os.path.basename(p)[:-3]
-               for p in glob.glob(os.path.join(self.path, "*.md"))
-               if os.path.basename(p) != INDEX and not os.path.basename(p).startswith("_")]
-        out += ["_study/" + os.path.basename(p)[:-3]
-                for p in glob.glob(os.path.join(self.path, "_study", "*.md"))
-                if not os.path.basename(p).startswith("_")]
-        return sorted(out)
+        """Every memory this store holds.
+
+        A file whose real path leaves the store — a symlink pointing elsewhere — is not
+        a memory of this store and is left out, so no lookup can reach it. `doctor()`
+        reports what was excluded: dropping it silently would be its own failure."""
+        found = [(os.path.basename(p)[:-3], p)
+                 for p in glob.glob(os.path.join(self.path, "*.md"))
+                 if os.path.basename(p) != INDEX and not os.path.basename(p).startswith("_")]
+        found += [("_study/" + os.path.basename(p)[:-3], p)
+                  for p in glob.glob(os.path.join(self.path, "_study", "*.md"))
+                  if not os.path.basename(p).startswith("_")]
+        return sorted(name for name, p in found if contained(self.path, p))
+
+    def escaping(self) -> list[str]:
+        """Files that look like memories but resolve outside the store."""
+        found = [(os.path.basename(p)[:-3], p)
+                 for p in glob.glob(os.path.join(self.path, "*.md"))
+                 if os.path.basename(p) != INDEX and not os.path.basename(p).startswith("_")]
+        found += [("_study/" + os.path.basename(p)[:-3], p)
+                  for p in glob.glob(os.path.join(self.path, "_study", "*.md"))
+                  if not os.path.basename(p).startswith("_")]
+        return sorted(name for name, p in found if not contained(self.path, p))
 
     @staticmethod
     def _uncommented(text: str) -> str:
@@ -91,6 +125,31 @@ class Store:
         instead: real indexes group several memories on one line
         (`- topic — [A](a.md)/[B](b.md)`), and a prefix rule drops them all."""
         return re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+    def slug_set(self) -> frozenset[str]:
+        """The names this store will answer to — nothing else, ever.
+
+        Every lookup resolves INTO this set, so no caller can name a path instead of a
+        memory. That is the whole containment story, and it is structural rather than a
+        list of forbidden characters: `../other-store/secret`, an absolute path and a
+        symlink alias are all simply *not members*.
+
+        The hole this closes was real: `resolve()` used to accept any name whose
+        `<store>/<name>.md` happened to exist, so `GET /memory/..%2Fprivate%2Fsecret`
+        returned another store's memory, and `[[../private/secret]]` walked there.
+
+        Cached against the directory mtimes so recall's link-walking does not re-glob
+        per hop, while a newly poured memory is still visible immediately.
+        """
+        try:
+            stamp = (os.stat(self.path).st_mtime_ns,
+                     os.stat(os.path.join(self.path, "_study")).st_mtime_ns
+                     if os.path.isdir(os.path.join(self.path, "_study")) else 0)
+        except OSError:
+            stamp = (0, 0)
+        if self._slugs_cache is None or self._slugs_cache[0] != stamp:
+            self._slugs_cache = (stamp, frozenset(self.slugs()))
+        return self._slugs_cache[1]
 
     def known_slugs(self) -> list[str]:
         """Slugs as the index names them (what a model may echo back)."""
@@ -108,35 +167,67 @@ class Store:
                 self._titles.setdefault(t.strip().lower(), slug.strip())
         return self._titles
 
+    @staticmethod
+    def _clean(name: str) -> str:
+        n = (name or "").strip().strip("[]()`\"' ")
+        return n[:-3] if n.endswith(".md") else n
+
+    def resolve_exact(self, name: str) -> str | None:
+        """The name as given, or nothing. For an EXPLICIT read — a slug from a person, a
+        `[[link]]`, or a `kura_read` call — where "unknown" is the honest answer and
+        guessing at a neighbour would return a memory nobody asked for."""
+        n = self._clean(name)
+        return n if n and n in self.slug_set() else None
+
     def resolve(self, name: str) -> str | None:
-        """Models misspell slugs and sometimes answer with titles. Snap to a real file:
-        exact → index title → case-insensitive → best word overlap (Jaccard ≥ 0.4)."""
-        n = (name or "").replace(".md", "").strip().strip("[]() ")
+        """Snap a MODEL'S answer to a real memory: exact → index title →
+        case-insensitive → best word overlap (Jaccard >= 0.4).
+
+        Fuzzy on purpose — a model misspells slugs (`ssd-tier-inference-mission` for
+        `ssd-tier-mission`) and sometimes answers with the index title instead. Every
+        candidate comes from `slug_set()`, so however wrong the guess is, it can only
+        land on a memory of THIS store."""
+        n = self._clean(name)
         if not n:
             return None
-        if os.path.exists(self.file_of(n)):
+        known = self.slug_set()
+        if n in known:
             return n
         t = self.titles().get(n.lower())
-        if t and os.path.exists(self.file_of(t)):
+        if t and t in known:
             return t
-        all_ = self.slugs()
-        low = {s.lower(): s for s in all_}
+        low = {s.lower(): s for s in known}
         if n.lower() in low:
             return low[n.lower()]
         want = {w for w in re.split(r"[-_\s/]+", n.lower()) if w}
         best, score = None, 0.0
-        for s in all_:
+        for s in sorted(known):                    # sorted: ties resolve deterministically
             have = {w for w in re.split(r"[-_/]+", s.lower()) if w}
             j = len(want & have) / max(1, len(want | have))
             if j > score:
                 best, score = s, j
         return best if score >= 0.4 else None
 
-    def read(self, slug: str) -> str:
-        s = self.resolve(slug)
-        if not s:
+    def _open(self, slug: str) -> str:
+        """Read a resolved slug. Refuses rather than raises: a misconfigured symlink is
+        not a reason to abort a conversation, and `doctor()` is where it surfaces."""
+        path = self.file_of(slug)
+        if not contained(self.path, path):         # belt and braces behind slug_set()
             return ""
-        return open(self.file_of(s), encoding="utf-8", errors="ignore").read()
+        try:
+            return open(path, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            return ""
+
+    def read(self, slug: str) -> str:
+        """Read via the fuzzy resolver. Used by recall and link-walking."""
+        s = self.resolve(slug)
+        return self._open(s) if s else ""
+
+    def read_exact(self, slug: str) -> str:
+        """Read only the memory that was actually named. Used by every explicit read."""
+        s = self.resolve_exact(slug)
+        return self._open(s) if s else ""
 
     def frontmatter(self, slug: str) -> dict:
         """The leading `---` block, flattened. `type` is lifted out of `metadata:` when
@@ -216,6 +307,7 @@ class Store:
                                   type=type_, body=body.rstrip() + "\n"))
         os.replace(tmp, path)
         self._titles = None
+        self._slugs_cache = None
 
         d1 = (hook or description).replace("\n", " ").strip()
         t1 = (title or "").replace("\n", " ").strip()
@@ -294,6 +386,9 @@ class Store:
             "islands": sorted(n for n in files if not out.get(n) and not back.get(n)),
             "not_in_index": sorted(set(files) - indexed),
             "index_orphans": sorted(indexed - set(files)),
+            # Files that look like memories but resolve outside the store (symlinks).
+            # Excluded from every lookup, and named here so the exclusion is visible.
+            "escaping": self.escaping(),
             "hubs": sorted(((len(v), k) for k, v in back.items()), reverse=True)[:5],
             "index_lines": sum(1 for l in idx.splitlines() if l.startswith("- [")),
             "index_tokens_est": len(idx) // 2,

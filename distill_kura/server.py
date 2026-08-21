@@ -123,10 +123,14 @@ def _make_handler(reg: Registry):
                     "charter": (open(st.charter, encoding="utf-8").read() if st.charter else ""),
                     "modes": [m for m, t in reg.modes.items() if t == st.name]})
             if path.startswith("/memory/"):
+                # EXACT: an explicit read answers for the memory that was named, or 404.
+                # Fuzzy matching here would hand back a neighbour nobody asked for, and
+                # a name is also the one place a caller could try to name a path.
                 slug = urllib.parse.unquote(path.split("/memory/", 1)[1])
-                t = st.read(slug)
+                t = st.read_exact(slug)
                 return self._send(200 if t else 404,
-                                  {"store": st.name, "slug": st.resolve(slug), "text": t})
+                                  {"store": st.name, "slug": st.resolve_exact(slug),
+                                   "text": t})
             self._send(404, {"error": "not found", "path": path})
 
         # ── POST ─────────────────────────────────────────────────────────
