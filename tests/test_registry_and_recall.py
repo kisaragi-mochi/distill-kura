@@ -139,6 +139,14 @@ def test_recall_picks_by_meaning_and_walks_links(tmp_path):
     assert "ssd-tier-mission" in d["context"]
 
 
+def test_picks_are_tidied_of_md_suffixes_and_brackets(tmp_path):
+    """Models answer with `slug`, `slug.md` or `[slug]`; the caller should not care."""
+    s = a_store(tmp_path)
+    d = recall(s, StubThinker('["ssd-tier-mission.md", "[cooling]"]'), "q", hops=0)
+    assert d["picked"] == ["ssd-tier-mission", "cooling"]
+    assert d["walked"] == ["ssd-tier-mission", "cooling"]
+
+
 def test_recall_salvages_a_slug_from_prose(tmp_path):
     """Models answer in prose maybe one time in three. A real slug in the text is a pick,
     whatever shape it arrived in."""

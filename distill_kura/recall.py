@@ -29,6 +29,13 @@ PICK_SYS = (
 )
 
 
+def _clean(name: str) -> str:
+    """Tidy one pick. Models answer with `slug`, `slug.md`, `[slug]`, `path/slug.md` —
+    all the same intent, and the caller should not have to know which shape arrived."""
+    n = str(name).strip().strip("[]()`\"' ")
+    return n[:-3] if n.endswith(".md") else n
+
+
 def pick_by_meaning(store: Store, thinker: Endpoint, question: str, top: int) -> list[str] | None:
     raw = thinker.ask(PICK_SYS.format(label=store.label) + store.index_text(), question,
                       max_tokens=500)
@@ -38,7 +45,7 @@ def pick_by_meaning(store: Store, thinker: Endpoint, question: str, top: int) ->
     if m:
         try:
             got = json.loads(m.group(0))
-            picked = [str(x) for x in got if isinstance(x, str)][:top]
+            picked = [_clean(x) for x in got if isinstance(x, str)][:top]
             if picked:
                 return picked
         except ValueError:
