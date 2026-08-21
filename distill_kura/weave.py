@@ -61,6 +61,18 @@ MULTI = re.compile(r"\]\([^)]+\.md\)")
 # is written in 26 Japanese characters or 96 English ones; a character limit silently
 # means "one sentence" in one language and "one word" in another.
 DEFAULT_TRIGGER_TOKENS = 24
+
+# Bumped whenever the trimming algorithm changes. The hook ledger reuses a cached line
+# when the description and the budget are unchanged — which silently includes "and the
+# code that wrote it", so without a version the trimmer can be improved and nothing
+# happens. Observed exactly that: a fix for dropped ★ markers changed nothing until the
+# ledger was invalidated.
+LEDGER_VERSION = 2
+
+# Markers that carry the point of a line. A trimmer that drops them keeps the words and
+# loses the meaning: ⚠️ says "this will bite you again", ★ says "this is the important
+# one". They cost one character and are the highest-value signal in the format.
+MARKERS = ("⚠", "★")
 DEFAULT_FRESH_DAYS = 14.0
 DEFAULT_PINNED_TYPES = ("feedback", "user")
 BACKUPS_KEPT = 20
@@ -82,7 +94,9 @@ needed. So this line is not a summary — it is what makes a reader think "ah, T
 Keep, in this order of priority:
   · numbers with their units, and before→after pairs
   · proper nouns, identifiers, file and command names
-  · ⚠️ landmines and the conclusion that was reached
+  · ⚠️ and ★ markers exactly as they appear — they say "this will bite again" and
+    "this is the important one", and they cost one character
+  · landmines and the conclusion that was reached
 Drop: connective prose, restatements of the title, anything that would fit another memory.
 
 Answer with the trigger text ONLY — no label, no quotes, no trailing period.
@@ -324,6 +338,14 @@ class Loom:
         # It has to carry SOMETHING specific: a number, an identifier, or a warning.
         return bool(re.search(r"\d|[A-Za-z]{3}|⚠", t))
 
+    @staticmethod
+    def _keep_markers(desc: str, trigger: str) -> str:
+        """Put back a marker the compression dropped."""
+        for mark in MARKERS:
+            if mark in desc and mark not in trigger:
+                trigger = ("⚠️" if mark == "⚠" else mark) + trigger
+        return trigger
+
     def _make_trigger(self, title: str, desc: str) -> tuple[str, bool]:
         """→ (trigger, came_from_model)."""
         if self.scribe:
@@ -334,10 +356,10 @@ class Loom:
             if out:
                 cand = re.sub(r"\s+", " ", out.strip().strip("`\"\'")).strip()
                 cand = cand.splitlines()[0] if cand else ""
-                cand = self._balance(cand)
+                cand = self._keep_markers(desc, self._balance(cand))
                 if self._acceptable(cand, title):
                     return cand, True
-        return self._mechanical(desc), False
+        return self._keep_markers(desc, self._mechanical(desc)), False
 
     # ── weaving ──────────────────────────────────────────────────────────
     def weave(self, generate: bool = True) -> Cloth:
@@ -383,7 +405,8 @@ class Loom:
             # getting byte-identical output.)
             if (entry and entry.get("hook")
                     and entry.get("desc_sha1") == _sha1(desc)
-                    and entry.get("tokens") == self.trigger_tokens):
+                    and entry.get("tokens") == self.trigger_tokens
+                    and entry.get("v") == LEDGER_VERSION):
                 stats["hooks_reused"] += 1
                 out.append(f"{bullet}[{title}]({slug}.md) — {entry['hook']}")
                 continue
@@ -397,7 +420,8 @@ class Loom:
             if not from_model:
                 stats["hooks_mechanical"] += 1
             hooks[slug] = {"hook": trigger, "title": title, "desc_sha1": _sha1(desc),
-                           "tokens": self.trigger_tokens, "by": "model" if from_model else "mechanical"}
+                           "tokens": self.trigger_tokens, "v": LEDGER_VERSION,
+                           "by": "model" if from_model else "mechanical"}
             dirty = True
             out.append(f"{bullet}[{title}]({slug}.md) — {trigger}")
 

@@ -170,6 +170,39 @@ def test_trimming_does_not_cut_mid_word_when_a_break_is_near(tmp_path):
     assert out.endswith("土壌") or out.endswith("進化の土壌")
 
 
+def test_markers_survive_compression(tmp_path):
+    """⚠️ says "this will bite again" and ★ says "this is the important one". A trimmer
+    that keeps the words and drops the marker has thrown away the point of the line."""
+    s = a_store(tmp_path, n_old=1)
+    for slug, desc in (("warned", "⚠️ crossing this boundary dies silently with no error "
+                                  "at all, every single time, and it will happen again"),
+                       ("starred", "★ the real conclusion here is that the surround matters "
+                                   "more than the detail, which took a blind test to learn")):
+        s.remember(slug, desc, "body")
+        os.utime(s.file_of(slug), (time.time() - 400 * 86400,) * 2)
+    cloth = Loom(s, scribe=None, trigger_tokens=8).weave().text
+    assert "⚠" in [l for l in cloth.splitlines() if "(warned.md)" in l][0]
+    assert "★" in [l for l in cloth.splitlines() if "(starred.md)" in l][0]
+
+
+def test_improving_the_trimmer_invalidates_the_ledger(tmp_path):
+    """The ledger reuses a line when the description and budget are unchanged — which
+    silently includes "and the code that wrote it". Without a version, the trimmer can
+    be fixed and nothing changes."""
+    from distill_kura.weave import LEDGER_VERSION
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.weave()
+    import json as _json
+    ledger = _json.load(open(loom.hooks_path, encoding="utf-8"))
+    assert all(e["v"] == LEDGER_VERSION for e in ledger.values())
+    for e in ledger.values():
+        e["v"] = LEDGER_VERSION - 1
+        e["hook"] = "a stale line from an older trimmer"
+    _json.dump(ledger, open(loom.hooks_path, "w", encoding="utf-8"))
+    assert "a stale line from an older trimmer" not in loom.weave().text
+
+
 def test_weaving_twice_changes_nothing(tmp_path):
     s = a_store(tmp_path, n_old=3)
     loom = Loom(s, scribe=None)
