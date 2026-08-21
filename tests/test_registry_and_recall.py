@@ -66,7 +66,171 @@ talking = "eq"
     assert reg.store().name == "maker"            # default
     assert reg.store("eq").name == "eq"           # by store name
     assert reg.store("talking").name == "eq"      # by mode name
-    assert reg.store_for_mode("nonexistent").name == "maker"   # unknown mode → default
+
+
+def test_an_unknown_mode_raises_instead_of_answering_from_the_default(tmp_path):
+    """The old behaviour turned a typo in a mode name into "a different household's
+    memory answered, fluently" — the opposite of failing loudly, and invisible from
+    outside. The fallback still exists, under a name that admits what it does."""
+    for n in ("maker", "eq"):
+        Store(name=n, path=str(tmp_path / n)).init_files()
+    cfg = write_config(tmp_path, f"""
+[server]
+default = "maker"
+[stores.maker]
+path = "{tmp_path / 'maker'}"
+[stores.eq]
+path = "{tmp_path / 'eq'}"
+[modes]
+talking = "eq"
+""")
+    reg = Registry.load(cfg)
+    try:
+        reg.store_for_mode("takling")
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("an unknown mode must not silently answer from another store")
+    assert reg.store_for_mode_or_default("takling").name == "maker"
+
+
+def test_a_mode_named_after_a_different_store_is_refused(tmp_path):
+    for n in ("maker", "eq"):
+        Store(name=n, path=str(tmp_path / n)).init_files()
+    cfg = write_config(tmp_path, f"""
+[stores.maker]
+path = "{tmp_path / 'maker'}"
+[stores.eq]
+path = "{tmp_path / 'eq'}"
+[modes]
+eq = "maker"
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "collides" in str(e)
+    else:
+        raise AssertionError("an ambiguous selector must not load")
+
+
+def test_a_typo_in_a_store_key_fails_at_load(tmp_path):
+    """`readnoly = true` used to land in `extra` and do nothing: a store that reads as
+    protected and is not."""
+    cfg = write_config(tmp_path, f"""
+[stores.main]
+path = "{tmp_path / 'main'}"
+readnoly = true
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "readnoly" in str(e)
+    else:
+        raise AssertionError("an unknown store key must not be accepted silently")
+
+
+def test_an_x_prefixed_key_is_allowed_through(tmp_path):
+    cfg = write_config(tmp_path, f"""
+[stores.main]
+path = "{tmp_path / 'main'}"
+x_my_extension = "hello"
+""")
+    reg = Registry.load(cfg)
+    assert reg.stores["main"].extra["x_my_extension"] == "hello"
+
+
+def test_a_wrong_type_fails_at_load(tmp_path):
+    cfg = write_config(tmp_path, f"""
+[stores.main]
+path = "{tmp_path / 'main'}"
+readonly = "yes"
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "must be bool" in str(e)
+    else:
+        raise AssertionError("a wrong type must not load")
+
+
+def test_two_stores_may_not_share_one_directory(tmp_path):
+    (tmp_path / "one").mkdir()
+    cfg = write_config(tmp_path, f"""
+[stores.a]
+path = "{tmp_path / 'one'}"
+[stores.b]
+path = "{tmp_path / 'one'}"
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "same directory" in str(e)
+    else:
+        raise AssertionError("aliased stores must not load")
+
+
+def test_a_store_inside_another_store_is_refused(tmp_path):
+    (tmp_path / "outer" / "inner").mkdir(parents=True)
+    cfg = write_config(tmp_path, f"""
+[stores.outer]
+path = "{tmp_path / 'outer'}"
+[stores.inner]
+path = "{tmp_path / 'outer' / 'inner'}"
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "nested" in str(e)
+    else:
+        raise AssertionError("nested stores must not load")
+
+
+def test_a_symlinked_store_alias_is_refused(tmp_path):
+    (tmp_path / "real").mkdir()
+    os.symlink(tmp_path / "real", tmp_path / "alias")
+    cfg = write_config(tmp_path, f"""
+[stores.a]
+path = "{tmp_path / 'real'}"
+[stores.b]
+path = "{tmp_path / 'alias'}"
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "same directory" in str(e)
+    else:
+        raise AssertionError("a symlink alias must not load as a second store")
+
+
+def test_a_journal_root_may_not_contain_a_store(tmp_path):
+    """The distiller would re-ingest memories as raw material and file model-written
+    text as the human's words, which breaks the one guarantee the gate gives."""
+    (tmp_path / "notes" / "kura").mkdir(parents=True)
+    cfg = write_config(tmp_path, f"""
+[stores.main]
+path = "{tmp_path / 'notes' / 'kura'}"
+[distill.journals]
+text = "{tmp_path / 'notes'}"
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "overlaps" in str(e)
+    else:
+        raise AssertionError("a journal root containing a store must not load")
+
+
+def test_path_overlap_can_be_accepted_explicitly(tmp_path):
+    (tmp_path / "notes" / "kura").mkdir(parents=True)
+    cfg = write_config(tmp_path, f"""
+[server]
+allow_path_overlap = true
+[stores.main]
+path = "{tmp_path / 'notes' / 'kura'}"
+[distill.journals]
+text = "{tmp_path / 'notes'}"
+""")
+    assert Registry.load(cfg).stores["main"].name == "main"
 
 
 def test_a_mode_pointing_nowhere_fails_at_load(tmp_path):

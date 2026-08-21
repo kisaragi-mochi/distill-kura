@@ -156,15 +156,58 @@ test("degraded retrieval is announced, never hidden", async () => {
   } finally { srv.close(); }
 });
 
-test("bound to a preset: no switch tool, and a store argument cannot escape", async () => {
+test("naming a store binds the agent without a second flag", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    // A preset that names a store means to be bound to it. Requiring `allowSwitch:false`
+    // as well is a default that fails open.
+    const ctx = fakeCtx();
+    apply(ctx, { url, store: "eq" });
+    assert.equal(ctx.registered.has("kura_use"), false);
+    assert.equal(ctx.registered.has("kura_list"), false);
+  } finally { srv.close(); }
+});
+
+test("a bound agent is not told which other kura exist", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url, store: "maker" });
+    assert.equal(ctx.registered.has("kura_list"), false);
+    for (const tool of ctx.registered.values()) {
+      assert.ok(!(tool.parameters && "store" in tool.parameters), tool.name);
+    }
+  } finally { srv.close(); }
+});
+
+test("a free agent keeps the switch and the listing", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url });
+    assert.ok(ctx.registered.has("kura_use"));
+    assert.ok(ctx.registered.has("kura_list"));
+    assert.ok("store" in ctx.registered.get("kura_recall").parameters);
+  } finally { srv.close(); }
+});
+
+test("bound to a preset: a store argument cannot escape", async () => {
   const { srv, url, seen } = await fakeKura();
   try {
     const ctx = fakeCtx();
     apply(ctx, { url, store: "maker", allowSwitch: false });
-    assert.equal(ctx.registered.has("kura_use"), false);
     await ctx.registered.get("kura_recall").execute({ question: "q", store: "eq" }, {});
     assert.ok(seen.some((p) => p.includes("store=maker")));
     assert.ok(!seen.some((p) => p.includes("store=eq")));
+  } finally { srv.close(); }
+});
+
+test("a store named WITH allowSwitch true stays switchable, if you ask for it", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url, store: "maker", allowSwitch: true });
+    assert.ok(ctx.registered.has("kura_use"));
   } finally { srv.close(); }
 });
 

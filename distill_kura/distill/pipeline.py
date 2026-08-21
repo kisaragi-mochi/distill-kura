@@ -49,10 +49,28 @@ class Distiller:
                  chunk_chars: int = CHUNK_CHARS):
         self.reg = reg
         self.store = store
-        self.models = reg.models
+        self.models = reg.models_for(store)      # never the shared set behind a profile
         cfg = (reg.raw.get("distill") or {})
         scfg = store.extra.get("distill") if isinstance(store.extra.get("distill"), dict) else {}
-        self.journals = journals or scfg.get("journals") or cfg.get("journals") or {}
+        # Key presence, not truthiness. `journals = {}` under a store used to fall
+        # through to the global roots because an empty dict is falsey — so "this store
+        # inherits nothing" silently meant "this store inherits everything".
+        inherit = scfg.get("inherit_global_journals",
+                           cfg.get("inherit_global_journals", len(reg.stores) < 2))
+        if journals is not None:
+            self.journals = journals
+        elif "journals" in scfg:
+            self.journals = dict(scfg["journals"])
+            if inherit:
+                self.journals = {**(cfg.get("journals") or {}), **self.journals}
+        elif inherit:
+            self.journals = dict(cfg.get("journals") or {})
+        else:
+            # More than one store and no per-store journals: refuse to guess. Feeding
+            # every store from the same root is how one mode's conversations end up
+            # distilled into another mode's memory.
+            self.journals = {}
+        self.exclude_roots = [st.path for st in reg.stores.values()]
         self.language = language or scfg.get("language") or cfg.get("language") or "English"
         self.slots = int(scfg.get("scribe_slots") or cfg.get("scribe_slots") or scribe_slots)
         self.chunk_chars = int(scfg.get("chunk_chars") or cfg.get("chunk_chars") or chunk_chars)
@@ -256,8 +274,11 @@ class Distiller:
             desc = dm.group(1).strip() if dm else slug
             title = tm.group(1).strip() if tm else ""
             new_body = re.sub(r"^(DESC|TITLE):.*$", "", body, flags=re.M).strip()
-        r = self.store.remember(slug_out, desc, new_body,
-                                type_=kind.group(1) if kind else "project", title=title)
+        # The pour has been through the gate, so it uses the verified door: a store set
+        # to `distiller-only` accepts this and refuses a bare tool call.
+        r = self.store.pour_verified(slug_out, desc, new_body,
+                                     type_=kind.group(1) if kind else "project",
+                                     title=title)
         if r.get("ok"):
             os.rename(p, p + ".poured")
             self._store_text = None
@@ -370,7 +391,7 @@ class Distiller:
 
     # ── the pass ─────────────────────────────────────────────────────────
     def files(self, session: str | None = None) -> list[str]:
-        fs = discover_all(self.journals)
+        fs = discover_all(self.journals, exclude_roots=self.exclude_roots)
         return [f for f in fs if session in f] if session else fs
 
     def sip_one(self, session: str | None = None) -> tuple[list[Segment], str, str] | None:

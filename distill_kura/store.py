@@ -54,24 +54,47 @@ metadata:
 """
 
 
+# Who may write, in three states rather than a boolean.
+#
+# The boolean documented one thing and did another: `readonly = true` was described as
+# "tools may not write; the distiller's verified pour may", and in fact refused the pour
+# as well — a store advertised as maintained-by-the-distiller was frozen solid.
+DIRECT_ALLOWED = "direct-allowed"    # a tool call or the CLI may write
+DISTILLER_ONLY = "distiller-only"    # only a draft that passed the evidence gate
+FROZEN = "frozen"                    # nothing may write
+WRITE_POLICIES = (DIRECT_ALLOWED, DISTILLER_ONLY, FROZEN)
+
+
 @dataclass
 class Store:
     name: str
     path: str
     label: str = ""
-    readonly: bool = False
+    readonly: bool | None = None       # deprecated: true now means DISTILLER_ONLY
+    write_policy: str = DIRECT_ALLOWED
+    model_profile: str | None = None    # which [model_profiles.<name>] this store may use
     persona: str | None = None          # path to persona.json (defaults to <path>/persona.json)
     charter: str | None = None          # path to charter.md  (defaults to <path>/charter.md)
     extra: dict = field(default_factory=dict)
 
     # ── paths ────────────────────────────────────────────────────────────
     def __post_init__(self) -> None:
-        self.path = os.path.abspath(os.path.expanduser(self.path))
+        self.path = os.path.realpath(os.path.abspath(os.path.expanduser(self.path)))
         self.label = self.label or self.name
+        if self.write_policy not in WRITE_POLICIES:
+            raise ValueError(f"[stores.{self.name}] write_policy must be one of "
+                             f"{list(WRITE_POLICIES)}, got {self.write_policy!r}")
+        if self.readonly is not None:
+            # Honour the documented meaning, not the old behaviour.
+            self.write_policy = DISTILLER_ONLY if self.readonly else DIRECT_ALLOWED
         if self.persona is None and os.path.exists(os.path.join(self.path, "persona.json")):
             self.persona = os.path.join(self.path, "persona.json")
+        elif self.persona:
+            self.persona = os.path.realpath(os.path.expanduser(self.persona))
         if self.charter is None and os.path.exists(os.path.join(self.path, "charter.md")):
             self.charter = os.path.join(self.path, "charter.md")
+        elif self.charter:
+            self.charter = os.path.realpath(os.path.expanduser(self.charter))
         self._titles: dict[str, str] | None = None
         self._slugs_cache: tuple[tuple[int, int], frozenset[str]] | None = None
 
@@ -285,12 +308,40 @@ class Store:
         return order
 
     # ── writing ──────────────────────────────────────────────────────────
+    def remember_direct(self, slug: str, description: str, body: str,
+                        type_: str = "project", hook: str | None = None,
+                        title: str | None = None) -> dict:
+        """A write that did NOT come through the distiller's evidence gate — a tool call,
+        the CLI, a human. Allowed only under `direct-allowed`."""
+        if self.write_policy != DIRECT_ALLOWED:
+            return {"ok": False, "error": f"store '{self.name}' is {self.write_policy}: "
+                                          f"direct writes are refused; memories enter "
+                                          f"through the distiller's evidence gate"}
+        return self._write(slug, description, body, type_, hook, title)
+
+    def pour_verified(self, slug: str, description: str, body: str,
+                      type_: str = "project", hook: str | None = None,
+                      title: str | None = None) -> dict:
+        """A write from a draft that passed the gate. Refused only when `frozen`.
+
+        A separate method rather than a `verified=True` argument on purpose: the
+        capability then shows up in the shape of the code, and no caller can acquire it
+        by flipping a flag it happens to have in scope."""
+        if self.write_policy == FROZEN:
+            return {"ok": False, "error": f"store '{self.name}' is frozen: nothing may write"}
+        return self._write(slug, description, body, type_, hook, title)
+
     def remember(self, slug: str, description: str, body: str, type_: str = "project",
                  hook: str | None = None, title: str | None = None) -> dict:
+        """Deprecated alias for `remember_direct`, kept so existing callers keep working."""
+        return self.remember_direct(slug, description, body, type_, hook, title)
+
+    def _write(self, slug: str, description: str, body: str, type_: str = "project",
+               hook: str | None = None, title: str | None = None) -> dict:
         """Write ONE fact; add one index line. Existing file → body replaced and the
-        index line refreshed (a stale index line keeps speaking the old fact)."""
-        if self.readonly:
-            return {"ok": False, "error": f"store '{self.name}' is read-only"}
+        index line refreshed (a stale index line keeps speaking the old fact).
+
+        Policy is checked by the callers above; this is the mechanism only."""
         slug = re.sub(r"[^a-z0-9-]+", "-", slug.lower()).strip("-")
         if not slug:
             return {"ok": False, "error": "slug required"}
@@ -392,7 +443,8 @@ class Store:
             "hubs": sorted(((len(v), k) for k, v in back.items()), reverse=True)[:5],
             "index_lines": sum(1 for l in idx.splitlines() if l.startswith("- [")),
             "index_tokens_est": len(idx) // 2,
-            "readonly": self.readonly,
+            "write_policy": self.write_policy,
+            "model_profile": self.model_profile,
             "persona": self.persona,
             "charter": self.charter,
         }

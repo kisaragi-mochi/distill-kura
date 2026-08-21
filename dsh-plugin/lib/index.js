@@ -67,7 +67,10 @@ const DEFAULTS = {
   store: "",           // "" = the server's default; set it per preset to bind a mode
   label: "the kura",
   readonly: true,      // writing belongs to the distiller's evidence gate
-  allowSwitch: true,   // offer kura_use so one agent can move between kura at runtime
+  // allowSwitch has NO fixed default: it follows `store`. A preset that names a store
+  // means to be bound to it, and having to remember a second flag to get that is a
+  // default that fails open. Set it explicitly to override.
+  allowSwitch: undefined,
   timeoutMs: 120_000,
   prefill: true,       // keep the index resident in the system prompt
   promptOrder: -50,    // before the persona — see the header note on prefix caches
@@ -81,6 +84,7 @@ const TEXT = {
 
 function settle(config) {
   const c = { ...DEFAULTS, ...(config || {}) };
+  if (c.allowSwitch === undefined) c.allowSwitch = c.store === "";
   // Rule 1: refuse loudly. A typo here must never present as "memory is empty today".
   if (typeof c.url !== "string" || !/^https?:\/\//.test(c.url)) {
     throw new Error(`distill-kura: url must be an http(s) URL, got ${JSON.stringify(c.url)}`);
@@ -186,6 +190,20 @@ function mapCache(cfg, state) {
   };
 }
 
+/**
+ * Strip the `store` parameter from a bound agent's tools.
+ *
+ * A bound agent cannot use it — `target()` ignores it — so leaving it in the schema
+ * only invites the model to try, and every turn pays for describing a parameter that
+ * does nothing. (Least disclosure, not a security boundary: a process that can reach
+ * the HTTP port can name any store. See docs/TRUST.md.)
+ */
+function withoutStoreParam(tool) {
+  if (!tool.parameters || !("store" in tool.parameters)) return tool;
+  const { store, ...rest } = tool.parameters;
+  return { ...tool, parameters: rest };
+}
+
 function tools(cfg, state) {
   const target = (store) => (state.bound ? cfg.store : store || state.current);
 
@@ -262,7 +280,10 @@ function tools(cfg, state) {
       },
     }),
 
-    defineTool({
+  ];
+
+  if (!state.bound) {
+    list.push(defineTool({
       name: "kura_list",
       description:
         "List the kura this server holds, how many memories each has, and which agent mode maps " +
@@ -281,8 +302,8 @@ function tools(cfg, state) {
         });
         return [`current: ${cur}`, ...rows].join("\n");
       },
-    }),
-  ];
+    }));
+  }
 
   if (cfg.prefill) {
     list.push(defineTool({
@@ -363,7 +384,7 @@ function tools(cfg, state) {
     }));
   }
 
-  return list;
+  return state.bound ? list.map(withoutStoreParam) : list;
 }
 
 /**
@@ -384,7 +405,7 @@ function apply(ctx, config) {
   // Bound = pinned to one kura for this agent: the preset IS the mode switch.
   const state = {
     current: cfg.store,
-    bound: cfg.store !== "" && cfg.allowSwitch === false,
+    bound: cfg.store !== "" && !cfg.allowSwitch,
     map: { ok: false, text: "", etag: "", at: 0 },
   };
   const cache = mapCache(cfg, state);

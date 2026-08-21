@@ -191,6 +191,15 @@ TOOLS: list[dict] = [
         },
     },
 ]
+if STORE:
+    # Bound to one kura: least disclosure. The other stores' names, labels and counts
+    # are not this agent's business, and `store`/`kura_use` are dead weight in a schema
+    # the model reads every turn. (Not a security boundary — that is process separation.
+    # See docs/TRUST.md.)
+    TOOLS = [t for t in TOOLS if t["name"] not in ("kura_use", "kura_list")]
+    for _t in TOOLS:
+        _t["inputSchema"].get("properties", {}).pop("store", None)
+
 if READONLY:
     # Read-only removes the tool from the listing AND refuses the call (see call_tool).
     # Hiding a tool is not enforcement: a host that remembers an earlier listing, or a
@@ -215,6 +224,8 @@ def call_tool(name: str, args: dict) -> str:
     store = _store_arg(args)
 
     if name == "kura_list":
+        if STORE:
+            return f"This agent is bound to the '{STORE}' kura."
         d = http("GET", "/stores")
         cur = store or d.get("default")
         lines = [f"current: {cur}"]

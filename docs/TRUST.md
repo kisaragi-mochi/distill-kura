@@ -1,0 +1,136 @@
+# Trust zones — what a store boundary is, and what it is not
+
+Read this before putting anything you would not publish into a kura.
+
+## The claim, stated exactly
+
+Several kura behind one server are **independent as routing**: separate memories,
+separate index, separate distiller watermark, separate model profile if you configure
+one. A bound agent cannot wander between them, and a name cannot become a path.
+
+They are **not a confidentiality boundary.** The server has no authentication. Any
+process that can reach its port can name any store it holds; any process that can read
+the directory can read the memories. The bound-agent machinery keeps a *model* inside
+its lane — it does not keep a *process* out.
+
+Both halves matter. The first is what makes modes useful. The second is why the
+following is not optional.
+
+## The rule
+
+**One trust level per process.** Do not put a private store and a less-trusted store in
+the same registry, and do not point a less-trusted agent at a server that holds one.
+
+```
+                 ┌── shared / neutral ──────────┐   ┌── private ─────────────────┐
+  config         │ kura-shared.toml             │   │ kura-private.toml          │
+  process        │ port 8085 (or a unix socket) │   │ port 8086, different user   │
+  stores         │ shared-notes, scratch        │   │ project-alpha               │
+  models         │ any endpoint you like        │   │ a local endpoint only       │
+  agents         │ any                          │   │ the private preset only     │
+                 └──────────────────────────────┘   └────────────────────────────┘
+```
+
+Concretely:
+
+- A separate `kura.toml` per trust level. **Do not even list a private store's name in a
+  shared config** — a name, a label and a memory count are themselves information.
+- A separate process and port per trust level. A unix domain socket behind a reverse
+  proxy is better than a TCP port if you have the option.
+- A separate OS user, or a container, where the levels really differ. File permissions
+  are the boundary that actually holds.
+- Never mount a private store's directory into a less-trusted process, workspace or
+  container.
+- Never put a private config inside a repository a less-trusted agent can read.
+- Bind every agent: `store: "…"` in the plugin (which now binds by itself), or
+  `KURA_STORE=…` for the MCP bridge.
+- Set `write_policy` deliberately per store — see below.
+
+## Why not one process with access control
+
+A permission layer inside a single process would have to be trusted by everything in
+that process, and this is a small dependency-free core whose value is that you can read
+all of it. An OS user boundary is stronger, older and easier to verify than any token
+check we could add. If you need multi-tenant serving with authentication, put a proxy in
+front and keep one kura process per tenant behind it.
+
+## Write authority
+
+`write_policy` decides who may add a memory:
+
+| policy | a tool call or the CLI | the distiller's verified pour |
+|---|---|---|
+| `direct-allowed` (default) | yes | yes |
+| `distiller-only` | **no** | yes |
+| `frozen` | no | **no** |
+
+`distiller-only` is the right setting for anything an agent reads from constantly: every
+memory then has to pass the evidence gate, and a model with a spare tool call cannot
+write a fact into the store. `frozen` is for an archive you are keeping but not growing.
+
+The deprecated `readonly = true` maps to `distiller-only`, which is what it always
+claimed to mean. It used to refuse the pour as well, so a store advertised as
+distiller-maintained was frozen solid and nothing said so.
+
+## Journal intake is a boundary too
+
+Separating memories buys nothing if both stores drink from the same journal. With more
+than one store configured, the distiller **refuses to guess**: bind each store to its
+own root.
+
+```toml
+[stores.maker.distill.journals]
+dsh = "~/dsh/sessions-maker"
+
+[stores.eq.distill.journals]
+dsh = { root = "~/dsh/sessions", exclude_glob = ["**/maker-*/**"] }
+```
+
+The registry also refuses, at load, a journal root that contains a store: the distiller
+would re-ingest memories as raw material and file model-written text as the human's
+words, which breaks the one guarantee the evidence gate gives. Override with
+`[server] allow_path_overlap = true` only if you understand exactly why you want it.
+
+## Model intake is a boundary too
+
+One shared `thinker` sees **every** store's entire index on every recall, and one shared
+`brain`/`scribe` sees every journal and every draft. Separating directories does nothing
+about that. Bind a profile:
+
+```toml
+[model_profiles.private.thinker]
+url = "http://127.0.0.1:8100/v1"
+model = "private-thinker"
+
+[stores.project]
+path = "~/kura/project"
+model_profile = "private"
+```
+
+An undefined profile is a load error, never a quiet fall back to the shared endpoint —
+that fallback is exactly how a private index reaches a model it was never meant to see.
+
+Remember what an endpoint is: a hosted API sees whatever you send it. "Local model" is a
+property of the URL, not of the config key.
+
+## What is checked for you, at load
+
+The registry refuses to start when any of these is true:
+
+- two stores resolve to the same directory (including via a symlink)
+- one store lives inside another
+- a journal root and a store root overlap
+- a mode names a different store than one that shares its name
+- a store table carries an unknown key or a wrong type
+- a store names a model profile that does not exist
+
+And at runtime: a name can only resolve to a memory the store holds, an explicit read is
+exact, and a file whose real path leaves the store is excluded and reported by `doctor()`
+as `escaping`.
+
+## What is still on you
+
+- process, user and file-permission separation
+- not listing private store names in shared configs
+- choosing endpoints that match the store's trust level
+- backing a kura up to its **own private** repository, never the code repository

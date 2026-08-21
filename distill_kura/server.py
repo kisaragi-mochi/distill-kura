@@ -146,12 +146,16 @@ def _make_handler(reg: Registry):
             if err:
                 return self._send(404, err)
             if path.startswith("/recall"):
-                return self._send(200, recall(st, reg.models.thinker, p.get("question", ""),
+                return self._send(200, recall(st, reg.models_for(st).thinker,
+                                              p.get("question", ""),
                                               int(p.get("hops", 1)), int(p.get("top", 3)),
                                               int(p.get("chars", 6000))))
             if path.startswith("/remember"):
-                r = st.remember(p.get("slug", ""), p.get("description", ""), p.get("body", ""),
-                                p.get("type", "project"), p.get("hook"), p.get("title"))
+                # A tool call or a script: a DIRECT write, refused unless the store's
+                # policy allows one. The distiller's verified pour is a different door.
+                r = st.remember_direct(p.get("slug", ""), p.get("description", ""),
+                                       p.get("body", ""), p.get("type", "project"),
+                                       p.get("hook"), p.get("title"))
                 return self._send(200 if r.get("ok") else 403, r)
             self._send(404, {"error": "not found", "path": path})
 

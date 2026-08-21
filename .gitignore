@@ -8,3 +8,12 @@ node_modules/
 .pytest_cache/
 # a live kura's workshop should never be committed
 _still/
+
+# A live store must never be committed to the code repository. Back a kura up in its
+# own PRIVATE repository — it holds what someone decided, what annoyed them, and what
+# they came back to.
+/memory/
+/kura.toml
+/kura.local.toml
+.env
+.env.*

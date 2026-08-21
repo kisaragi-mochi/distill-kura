@@ -281,13 +281,56 @@ def source_for(path: str) -> Source | None:
     return None
 
 
-def discover_all(roots: dict[str, str]) -> list[str]:
-    """roots: {"claude": "~/.claude/projects/x", "dsh": "…/dsh/sessions"} → newest first.
-    Newest journals first: what was decided today is worth the most."""
+def _inside(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([os.path.realpath(path), os.path.realpath(root)]) \
+            == os.path.realpath(root)
+    except (ValueError, OSError):
+        return False
+
+
+def discover_all(roots: dict, exclude_roots: list[str] | None = None) -> list[str]:
+    """Journals to drink from, newest first — today's decisions are worth the most.
+
+    `roots` maps a source kind to either a path or a table::
+
+        {"dsh": "~/dsh/sessions"}
+        {"dsh": {"root": "~/dsh/sessions-maker",
+                 "include_glob": ["**/session.jsonl.zstd"],
+                 "exclude_glob": ["**/scratch/**"]}}
+
+    Per-source globs exist because one sessions directory usually holds every mode's
+    conversations. Pointing two stores at it distils all of them into both: the memory
+    directories are separate but the INTAKE is shared, and contamination happens there.
+
+    `exclude_roots` (the store directories) is defence in depth: a journal root that
+    contains a store would re-ingest memories as if a human had written them, which
+    launders model-written text into [USER] evidence. The registry refuses that overlap
+    at load; this catches it again at discovery.
+    """
     files: list[str] = []
-    for kind, root in roots.items():
+    for kind, spec in (roots or {}).items():
         src = SOURCES.get(kind)
-        root = os.path.expanduser(root)
-        if src and os.path.isdir(root):
-            files += src.discover(root)
+        if not src:
+            continue
+        if isinstance(spec, dict):
+            root = os.path.expanduser(str(spec.get("root", "")))
+            include = spec.get("include_glob") or []
+            exclude = spec.get("exclude_glob") or []
+        else:
+            root, include, exclude = os.path.expanduser(str(spec)), [], []
+        if not root or not os.path.isdir(root):
+            continue
+        found = src.discover(root)
+        if include:
+            keep: list[str] = []
+            for pat in include:
+                keep += glob.glob(os.path.join(root, pat), recursive=True)
+            found = [f for f in found if f in set(keep)]
+        for pat in exclude:
+            dropped = set(glob.glob(os.path.join(root, pat), recursive=True))
+            found = [f for f in found if f not in dropped]
+        files += found
+    for root in (exclude_roots or []):
+        files = [f for f in files if not _inside(f, root)]
     return sorted(set(files), key=os.path.getmtime, reverse=True)

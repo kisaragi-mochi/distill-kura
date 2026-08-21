@@ -137,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg["fresh_days"] = a.fresh_days
         if getattr(a, "trigger_tokens", None) is not None:
             cfg["trigger_tokens"] = a.trigger_tokens
-        scribe = None if (a.cmd == "prefill" or a.no_model) else reg.models.scribe
+        scribe = None if (a.cmd == "prefill" or a.no_model) else reg.models_for(store).scribe
         loom = prefill_mod.loom_for(store, cfg, scribe=scribe)
 
         if a.cmd == "prefill":
@@ -182,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if a.cmd == "recall":
-        d = do_recall(store, reg.models.thinker, a.question, a.hops, a.top)
+        d = do_recall(store, reg.models_for(store).thinker, a.question, a.hops, a.top)
         if a.json:
             print(json.dumps(d, ensure_ascii=False))
         else:
@@ -193,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "remember":
         body = sys.stdin.read() if a.body == "-" else a.body
-        r = store.remember(a.slug, a.description, body, a.type, title=a.title)
+        r = store.remember_direct(a.slug, a.description, body, a.type, title=a.title)
         print(json.dumps(r, ensure_ascii=False))
         return 0 if r.get("ok") else 1
 

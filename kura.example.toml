@@ -62,7 +62,12 @@ effort = "low"          # low | medium | high — sent in every dialect at once
 [stores.main]
 path = "~/kura/main"
 label = "main memory"
-# readonly = true        # tools may read; only the distiller's gate may write
+# write_policy = "distiller-only"   # direct-allowed | distiller-only | frozen
+#   direct-allowed  a tool call or the CLI may write (the default)
+#   distiller-only  only a draft that passed the evidence gate. Recommended for any
+#                   store an agent reads from constantly
+#   frozen          nothing may write. For an archive you keep but do not grow
+# model_profile = "private"         # bind this store's own endpoints (see below)
 # persona = "~/kura/main/persona.json"   # pointer only: rendering personas is the host's job
 
 [stores.maker]
@@ -82,6 +87,17 @@ label = "EQ mode — talking things through"
 default = "main"
 maker = "maker"
 eq = "eq"
+
+
+# ── model profiles ──────────────────────────────────────────────────────────
+# One shared [models] set means one endpoint sees EVERY store's index, journal and
+# draft — so separating stores on disk buys nothing against the model. A store naming a
+# profile gets that profile and nothing else. An undefined profile is a load error,
+# never a quiet fall back to the shared endpoint.
+#
+# [model_profiles.private.thinker]
+# url = "http://127.0.0.1:8100/v1"
+# model = "private-thinker"
 
 
 # ── the resident map ────────────────────────────────────────────────────────
@@ -115,13 +131,24 @@ language = "English"        # the language memories are WRITTEN in
 scribe_slots = 4            # concurrent compositions (match your server's slots)
 chunk_chars = 200_000       # one batch; aim at what the brain swallows in one gulp
 
+# A root may also be a table, because one sessions directory usually holds every mode's
+# conversations and you rarely want all of them in one kura:
+#   dsh = { root = "~/dsh/sessions", exclude_glob = ["**/scratch/**"] }
+
 [distill.journals]
 claude = "~/.claude/projects/my-project"
 # dsh  = "~/dsh/sessions"
 # text = "~/notes"
 
-# Per-store overrides, when one kura is fed differently from another:
+# ⚠️ With MORE THAN ONE store configured, a store inherits nothing from [distill.journals]
+# unless you say so — feeding two kura from one root distils each mode's conversations
+# into both. Bind each store to its own root instead:
 # [stores.eq.distill]
 # language = "日本語"
+# inherit_global_journals = false      # explicit is better; this is the default above 1 store
 # [stores.eq.distill.journals]
 # text = "~/notes/dialogue"
+
+# A journal root that CONTAINS a store is refused at load: the distiller would re-ingest
+# memories as raw material and file model-written text as the human's words. Override
+# only if you know exactly why: [server] allow_path_overlap = true

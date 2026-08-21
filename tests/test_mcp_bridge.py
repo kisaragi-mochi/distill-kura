@@ -130,11 +130,40 @@ def test_bound_bridge_ignores_a_store_argument():
         srv.shutdown()
 
 
+def test_a_bound_bridge_does_not_advertise_the_other_kura():
+    """Least disclosure: the other stores' names, labels and counts are not this agent's
+    business, and `store` is dead weight in a schema the model reads every turn. Not a
+    security boundary — that is process separation (docs/TRUST.md)."""
+    srv, url = start()
+    try:
+        out = speak(url, [INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}],
+                    env={"KURA_STORE": "maker"})
+        names = [t["name"] for t in out[1]["result"]["tools"]]
+        assert "kura_list" not in names and "kura_use" not in names
+        for t in out[1]["result"]["tools"]:
+            assert "store" not in t["inputSchema"].get("properties", {}), t["name"]
+    finally:
+        srv.shutdown()
+
+
+def test_a_free_bridge_keeps_the_listing_and_the_store_argument():
+    srv, url = start()
+    try:
+        out = speak(url, [INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])
+        names = [t["name"] for t in out[1]["result"]["tools"]]
+        assert "kura_list" in names and "kura_use" in names
+    finally:
+        srv.shutdown()
+
+
 def test_bound_bridge_refuses_to_switch():
+    """The tool is not listed, but a host that cached an older listing can still call
+    it by name — so the call itself has to refuse too."""
     srv, url = start()
     try:
         out = speak(url, [INIT, call("kura_use", {"store": "eq"})], env={"KURA_STORE": "maker"})
-        assert "cannot switch" in out[1]["result"]["content"][0]["text"]
+        text = out[1]["result"]["content"][0]["text"]
+        assert "cannot switch" in text or "unknown tool" in text or "refused" in text
     finally:
         srv.shutdown()
 

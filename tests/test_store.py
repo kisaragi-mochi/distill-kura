@@ -51,12 +51,50 @@ def test_index_title_is_never_a_truncated_description(tmp_path):
     assert not long.startswith(title)
 
 
-def test_readonly_store_refuses_writes(tmp_path):
+def test_write_policy_distiller_only_refuses_a_direct_write_and_accepts_a_pour(tmp_path):
+    """The documented meaning of the old `readonly = true`: tools may not write, the
+    distiller's verified pour may. The boolean refused BOTH, so a store advertised as
+    maintained-by-the-distiller was frozen solid and nothing said so."""
     s = make(tmp_path)
-    s.readonly = True
-    r = s.remember("nope", "d", "b")
-    assert not r["ok"] and "read-only" in r["error"]
+    s.write_policy = "distiller-only"
+    r = s.remember_direct("nope", "d", "b")
+    assert not r["ok"] and "direct writes are refused" in r["error"]
     assert not os.path.exists(s.file_of("nope"))
+    ok = s.pour_verified("poured", "came through the gate", "body")
+    assert ok["ok"] and os.path.exists(s.file_of("poured"))
+
+
+def test_write_policy_frozen_refuses_both_doors(tmp_path):
+    s = make(tmp_path)
+    s.write_policy = "frozen"
+    assert not s.remember_direct("a", "d", "b")["ok"]
+    assert not s.pour_verified("b", "d", "b")["ok"]
+    assert s.slugs() == []
+
+
+def test_write_policy_direct_allowed_is_the_default(tmp_path):
+    s = make(tmp_path)
+    assert s.write_policy == "direct-allowed"
+    assert s.remember_direct("a", "d", "b")["ok"]
+    assert s.pour_verified("c", "d", "b")["ok"]
+
+
+def test_the_deprecated_readonly_flag_means_distiller_only(tmp_path):
+    """Not frozen: `readonly` was always documented as "the distiller may still write"."""
+    s = Store(name="ro", path=str(tmp_path / "ro"), readonly=True)
+    s.init_files()
+    assert s.write_policy == "distiller-only"
+    assert not s.remember_direct("x", "d", "b")["ok"]
+    assert s.pour_verified("x", "d", "b")["ok"]
+
+
+def test_an_unknown_write_policy_fails_at_construction(tmp_path):
+    try:
+        Store(name="x", path=str(tmp_path / "x"), write_policy="readonly-ish")
+    except ValueError as e:
+        assert "write_policy must be one of" in str(e)
+    else:
+        raise AssertionError("a misspelled policy must not construct")
 
 
 def test_resolve_snaps_misspelled_and_titled_names(tmp_path):

@@ -218,6 +218,13 @@ curl -s localhost:8085/s/eq/doctor          # path form, for clients that only v
 The stores share no memories, no index, and no distiller watermark. Switching mode
 genuinely changes what is remembered — not the same memory in a different voice.
 
+**Independent as routing, not as confidentiality.** The server has no authentication, so
+any process that can reach its port can name any store it holds. Binding an agent keeps
+a *model* in its lane; it does not keep a *process* out. One trust level per process —
+[`docs/TRUST.md`](docs/TRUST.md) is short and worth reading before a private store goes
+in. It also covers the two boundaries that are easy to miss: two stores drinking from
+one journal root, and two stores behind one model endpoint.
+
 ### With DeepSeek Harness
 
 DSH switches **persona and tools** by agent preset. distill-kura switches **memory** by
@@ -340,7 +347,7 @@ index drift. It is the eye the metabolism needs.
 | route | what it does |
 |---|---|
 | `POST /recall` | `{question, hops, top, chars, store\|mode}` → picked, walked, context |
-| `POST /remember` | `{slug, description, body, type, title}` — refused on a read-only store |
+| `POST /remember` | `{slug, description, body, type, title}` — a DIRECT write, refused unless `write_policy = "direct-allowed"` |
 | `GET /index` | the raw index |
 | `GET /prefill` | the resident block, ready to inject (`&format=text` for a hook) |
 | `GET /memory/<slug>` | one memory in full |
@@ -384,13 +391,15 @@ A few decisions that look odd until you hit the thing they prevent:
 ## Tests
 
 ```bash
-python3 -m pytest tests -q                              # 83 tests, no model required
-cd dsh-plugin && npm test                               # 20 more for the plugin
+python3 -m pytest tests -q                              # 122 tests, no model required
+cd dsh-plugin && npm test                               # 24 more for the plugin
 ```
 
 The gate is tested adversarially: every case is a way a real model actually tried to
-smuggle something past it. The end-to-end test runs a full distil→drain cycle against a
-scripted model server on a real socket.
+smuggle something past it. `test_containment.py` is written the same way — every case is
+an escape attempt, not a happy path — because it guards a hole that was real: a store
+used to answer for any file whose path you could spell. The end-to-end test runs a full
+distil→drain cycle against a scripted model server on a real socket.
 
 ## License
 
