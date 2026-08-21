@@ -25,7 +25,9 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Endpoint:
-    url: str = "http://127.0.0.1:8000/v1"
+    # No built-in default: an unset url used to silently become 127.0.0.1:8000, so a
+    # half-written config sent traffic to whatever happened to be listening there.
+    url: str = ""
     model: str = "default"
     api_key_env: str | None = None
     timeout: float = 120.0
@@ -51,6 +53,8 @@ class Endpoint:
             timeout: float | None = None, temperature: float | None = None) -> str | None:
         """Returns the answer text, or None when the endpoint is unreachable.
         Callers treat None as "degrade gracefully" (never as an empty answer)."""
+        if not self.url:
+            return None                 # unconfigured is unreachable, not "somewhere else"
         body = {
             "model": self.model,
             "messages": [{"role": "system", "content": system},
@@ -77,6 +81,8 @@ class Endpoint:
             return None
 
     def alive(self) -> bool:
+        if not self.url:
+            return False
         try:
             req = urllib.request.Request(self.url.rstrip("/") + "/models")
             if self.api_key_env and os.environ.get(self.api_key_env):

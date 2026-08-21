@@ -19,16 +19,19 @@ the idle time.
 from __future__ import annotations
 
 import glob
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from ..recall import recall as kura_recall
 from ..registry import Registry
-from ..store import Store
+from ..store import FROZEN, Store
 from . import prompts
 from .gate import attributes_to_human, gate, norm, salvage
 from .seeds import Seeds
@@ -239,24 +242,69 @@ class Distiller:
             flags += "   🧠the agent's judgement (not an outside fact)"
         if d.get("extends"):
             flags += f"   ↑extends {d['extends']}"
+        body = ((f"EXTENDS: {d['extends']}\n" if d.get("extends")
+                 else f"TITLE: {d.get('title') or d['slug']}\nDESC: {d['description']}\n")
+                + f"\n{d['body']}\n")
         with open(p, "w", encoding="utf-8") as f:
             f.write(f"<!-- distilled {datetime.now(timezone.utc).isoformat()[:19]}Z\n"
                     f"     source: {os.path.basename(source)}\n"
                     f"     kind: {d['kind']}   evidence classes: {','.join(d['classes'])}{flags}\n"
-                    f"     evidence:\n{ev}\n-->\n"
-                    + (f"EXTENDS: {d['extends']}\n" if d.get("extends")
-                       else f"TITLE: {d.get('title') or d['slug']}\nDESC: {d['description']}\n")
-                    + f"\n{d['body']}\n")
+                    f"     gate: {self._mark(body)}\n"
+                    f"     evidence:\n{ev}\n-->\n" + body)
         return p
 
     # ── ⑦ pour ───────────────────────────────────────────────────────────
+    # ── the gate's mark ──────────────────────────────────────────────────
+    #
+    # `distiller-only` has to mean "this text passed the evidence gate", and file
+    # existence in `_still/drafts/` is not that: a hand-written draft dropped in the
+    # directory poured straight into a store whose direct door refuses everything.
+    # So the gate signs what it staged, and the pour re-checks the signature.
+    #
+    # Honest about its limit: the key sits next to the drafts, so a principal who can
+    # write the directory can usually read the key too. This stops an agent with a file
+    # tool and an accident, not someone with the filesystem. The boundary there is still
+    # permissions — docs/TRUST.md says so.
+    def _gate_key(self) -> bytes:
+        path = os.path.join(self.still, "gate.key")
+        try:
+            with open(path, "rb") as f:
+                key = f.read()
+            if len(key) >= 32:
+                return key
+        except OSError:
+            pass
+        key = secrets.token_bytes(32)
+        os.makedirs(self.still, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(key)
+        return key
+
+    @staticmethod
+    def _draft_body(raw: str) -> str:
+        return re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S).strip()
+
+    def _mark(self, body: str) -> str:
+        return hmac.new(self._gate_key(), body.strip().encode("utf-8"),
+                        hashlib.sha256).hexdigest()[:32]
+
     def pour(self, slug: str) -> dict:
+        # A draft is named by a bare slug. Joined as a path, `../../../out/o` read a file
+        # from anywhere on the filesystem into the store and renamed the original.
+        if slug != os.path.basename(slug) or slug in ("", ".", ".."):
+            return {"ok": False, "why": "a draft is named by a bare slug, not a path"}
         p = os.path.join(self.drafts_dir, f"{slug}.md")
         if not os.path.exists(p):
             return {"ok": False, "why": "no such draft"}
         raw = open(p, encoding="utf-8").read()
         if "🚫" in raw.split("-->")[0]:
             return {"ok": False, "why": "credits the human with no [USER] evidence; not poured"}
+        m = re.search(r"gate:\s*([0-9a-f]{32})", raw.split("-->")[0])
+        if not m or not hmac.compare_digest(m.group(1), self._mark(self._draft_body(raw))):
+            return {"ok": False,
+                    "why": "this draft carries no valid gate mark — it was not staged by "
+                           "the distiller, or its body was edited afterwards"}
         body = re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S)
         kind = re.search(r"kind:\s*(\w+)", raw)
         ext = re.search(r"^EXTENDS:\s*(\S+)$", body, re.M)
@@ -332,10 +380,13 @@ class Distiller:
                     continue
                 if j["verdict"] == "FIX" and j.get("new_body"):
                     raw = open(p, encoding="utf-8").read()
-                    keep = raw.split("-->")[0] + "-->\n"
                     first = re.search(r"^(EXTENDS|TITLE|DESC):.*$", raw, re.M)
-                    open(p, "w", encoding="utf-8").write(
-                        keep + (first.group(0) + "\n\n" if first else "") + j["new_body"] + "\n")
+                    body = (first.group(0) + "\n\n" if first else "") + j["new_body"] + "\n"
+                    # The scribe rewrote the body with the evidence in front of it, so it
+                    # is still gated — but the mark has to follow the text it signs.
+                    keep = re.sub(r"gate:\s*[0-9a-f]{32}", f"gate: {self._mark(body)}",
+                                  raw.split("-->")[0]) + "-->\n"
+                    open(p, "w", encoding="utf-8").write(keep + body)
                     fixed.append(j["slug"])
                     _log(f"  ✎ fix  {j['slug']} — {j['why'][:70]}")
                 r = self.pour(j["slug"])
@@ -343,7 +394,7 @@ class Distiller:
                     poured.append(j["slug"])
                     _log(f"  ○ pour {j['slug']}")
                 else:
-                    _log(f"  ⚠ not poured {j['slug']} — {r.get('why')}")
+                    _log(f"  ⚠ not poured {j['slug']} — {r.get('why') or r.get('error')}")
         return {"ok": True, "poured": len(poured), "fixed": len(fixed), "tossed": len(tossed),
                 "left": len(glob.glob(os.path.join(self.drafts_dir, "*.md")))}
 
@@ -365,6 +416,11 @@ class Distiller:
         return None
 
     def tidy(self, limit: int = 6) -> dict:
+        # The index is read on every recall and every prefill, and this is the only path
+        # that puts MODEL-authored prose into it. On a frozen store it must not run.
+        if self.store.write_policy == FROZEN:
+            return {"ok": False, "why": f"store '{self.store.name}' is frozen: "
+                                        f"the index is not repaired"}
         lines = self.store.index_text().splitlines()
         targets = []
         for i, l in enumerate(lines):

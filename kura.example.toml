@@ -113,7 +113,10 @@ fresh_days = 14             # memories this recent keep their full line ("still 
 pinned_types = ["feedback", "user"]   # these types always keep their full line
 trigger_tokens = 24         # budget for one compressed line, in tokens, not characters
 # verbatim_after = "## Appendix"      # copy everything from this heading on, untouched
-# cloth_path = "…/_still/index.woven.md"   # where the woven cloth is written
+# cloth_path = "…/_still/index.woven.md"   # where the woven cloth is written.
+#   Must be under the store's _still/ or entirely outside the store: pointing it at a
+#   store-root .md destroys that memory, one weave at a time. A frozen store refuses a
+#   cloth inside it at all — put it outside to keep a resident map for an archive.
 # header = "…"              # your own preamble. It may not contain anything that ticks
 
 # Per-store overrides work here too:

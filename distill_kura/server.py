@@ -167,7 +167,7 @@ def serve(reg: Registry, host: str | None = None, port: int | None = None) -> No
     print(f"蔵 distill-kura on {host}:{port}", flush=True)
     for n, s in reg.stores.items():
         mark = " (default)" if n == reg.default else ""
-        ro = " [read-only]" if s.readonly else ""
+        ro = "" if s.write_policy == "direct-allowed" else f" [{s.write_policy}]"
         modes = [m for m, t in reg.modes.items() if t == n]
         print(f"  · {n}{mark}{ro}: {len(s.slugs())} memories at {s.path}"
               + (f"  modes={modes}" if modes else ""), flush=True)

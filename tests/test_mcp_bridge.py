@@ -247,3 +247,19 @@ def test_kura_map_serves_the_whole_index():
         assert any(c.startswith("GET /prefill") for c in FakeKura.calls)
     finally:
         srv.shutdown()
+
+
+def test_a_whitespace_store_name_is_refused_rather_than_unbinding():
+    """`KURA_STORE=" "` collapsed to free mode, and a preset that meant to bind returned
+    another kura's confidential memory."""
+    srv, url = start()
+    try:
+        e = {**os.environ, "KURA_URL": url, "PYTHONPATH": ROOT, "KURA_STORE": " "}
+        p = subprocess.run([sys.executable, "-m", "distill_kura.mcp"],
+                           input=json.dumps(INIT) + "\n", capture_output=True, text=True,
+                           env=e, timeout=60)
+        assert p.returncode != 0
+        assert "whitespace" in p.stderr
+        assert p.stdout.strip() == ""      # it never served a single frame
+    finally:
+        srv.shutdown()

@@ -80,6 +80,11 @@ which is the honest answer past a few hundred memories.
 **Never** hand-edit the woven cloth. It is derived; the next weave overwrites it. Edit
 the canonical `MEMORY.md`, or the memory itself, and re-weave.
 
+**Never** hand-write a draft into `_still/drafts/` and expect it to pour on a
+`distiller-only` store: the gate signs what it stages and the pour checks the signature.
+Write the memory with `kura remember` on a `direct-allowed` store, or let the distiller
+produce it.
+
 ## Scheduling by hand, and exit codes
 
 ```bash

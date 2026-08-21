@@ -192,3 +192,148 @@ model_profile = "solo"
 """)
     m = Registry.load(cfg).models_for(Registry.load(cfg).store("p"))
     assert m.brain.model == "one" and m.scribe.model == "one"
+
+
+# ── the edges an adversarial pass found in the first isolation fix ──────────
+
+def test_a_profile_that_leaves_a_role_out_fails_at_load(tmp_path):
+    """Models chains thinker -> brain -> scribe, so a role missing at the head landed on
+    the built-in default endpoint. A profile defining only `brain` sent a store's whole
+    CONFIDENTIAL index to an endpoint named nowhere in the file — the exact fallback the
+    feature exists to forbid."""
+    Store(name="project", path=str(tmp_path / "project")).init_files()
+    cfg = write_config(tmp_path, f"""
+[models.thinker]
+url = "http://127.0.0.1:18022/v1"
+[model_profiles.private.brain]
+url = "http://127.0.0.1:18021/v1"
+[stores.project]
+path = "{tmp_path / 'project'}"
+model_profile = "private"
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "thinker.url" in str(e)
+    else:
+        raise AssertionError("a partial profile must not load")
+
+
+def test_an_endpoint_with_no_url_is_unreachable_not_somewhere_else(tmp_path):
+    from distill_kura.thinker import Endpoint
+    assert Endpoint().url == ""
+    assert Endpoint().ask("s", "u") is None      # never a guess at 127.0.0.1:8000
+    assert Endpoint().alive() is False
+
+
+def test_two_journal_roots_may_not_nest(tmp_path):
+    """`_check_paths` compared journal roots against store roots only, so the outer
+    store drank the inner store's entire intake."""
+    for d in ("s1", "s2", "logs/eq"):
+        os.makedirs(tmp_path / d, exist_ok=True)
+    cfg = write_config(tmp_path, f"""
+[stores.maker]
+path = "{tmp_path / 's1'}"
+[stores.maker.distill.journals]
+text = "{tmp_path / 'logs'}"
+[stores.eq]
+path = "{tmp_path / 's2'}"
+[stores.eq.distill.journals]
+text = "{tmp_path / 'logs' / 'eq'}"
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "nested" in str(e)
+    else:
+        raise AssertionError("nested journal roots must not load")
+
+
+def test_the_table_form_of_a_journal_root_is_checked_too(tmp_path):
+    """`_real(str(root))` stringified the dict, so the documented table form skipped the
+    store-overlap refusal entirely."""
+    os.makedirs(tmp_path / "s1")
+    cfg = write_config(tmp_path, f"""
+[stores.main]
+path = "{tmp_path / 's1'}"
+[distill.journals]
+text = {{ root = "{tmp_path / 's1'}" }}
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "overlaps" in str(e)
+    else:
+        raise AssertionError("a table-form journal root overlapping a store must not load")
+
+
+def test_a_string_where_a_boolean_belongs_fails_at_load(tmp_path):
+    """`inherit_global_journals = "false"` is a STRING, therefore truthy: the store
+    inherited the global intake it had explicitly declined."""
+    for n in ("s1", "s2"):
+        Store(name=n, path=str(tmp_path / n)).init_files()
+    cfg = write_config(tmp_path, f"""
+[stores.s1]
+path = "{tmp_path / 's1'}"
+[stores.s1.distill]
+inherit_global_journals = "false"
+[stores.s2]
+path = "{tmp_path / 's2'}"
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "inherit_global_journals must be bool" in str(e)
+    else:
+        raise AssertionError("a truthy string must not pass for a boolean")
+
+
+def test_a_hardlinked_memory_in_a_journal_root_is_not_drunk(tmp_path):
+    """Path exclusion is not enough: a hardlink to a memory sitting in an otherwise clean
+    journal root is a different path to the same inode. It was sipped as [USER] evidence —
+    model-written memory laundered into the human's words."""
+    st = Store(name="s", path=str(tmp_path / "s"))
+    st.init_files()
+    st.remember("mem", "d", "MODEL-WRITTEN MEMORY BODY")
+    jr = tmp_path / "jr"
+    jr.mkdir()
+    (jr / "note.md").write_text("a real human note\n", encoding="utf-8")
+    os.link(st.file_of("mem"), jr / "hardlinked-memory.md")
+    found = discover_all({"text": str(jr)}, exclude_roots=[st.path])
+    # Compare BASENAMES: pytest names tmp_path after the test, so this very test's
+    # directory contains the word "hardlinked" and a whole-path substring check passes
+    # no matter what the code does.
+    names = [os.path.basename(f) for f in found]
+    assert names == ["note.md"]
+
+
+def test_a_store_with_no_name_is_refused(tmp_path):
+    os.makedirs(tmp_path / "s1")
+    cfg = write_config(tmp_path, f"""
+[stores.""]
+path = "{tmp_path / 's1'}"
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "needs a name" in str(e)
+    else:
+        raise AssertionError("an unaddressable store must not load")
+
+
+def test_a_contradictory_write_config_is_refused(tmp_path):
+    """The deprecated key was applied last and always won, so tightening a store while a
+    stale `readonly = false` sat in the file produced a fully writable one."""
+    os.makedirs(tmp_path / "s1")
+    cfg = write_config(tmp_path, f"""
+[stores.main]
+path = "{tmp_path / 's1'}"
+write_policy = "frozen"
+readonly = false
+""")
+    try:
+        Registry.load(cfg)
+    except ValueError as e:
+        assert "readonly" in str(e) and "write_policy" in str(e)
+    else:
+        raise AssertionError("a contradictory write config must not load")

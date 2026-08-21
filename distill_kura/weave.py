@@ -45,7 +45,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from .store import Store
+from .store import FROZEN, Store, contained
 from .thinker import Endpoint
 from .tokens import estimate
 
@@ -161,6 +161,19 @@ class Loom:
             raise ValueError(
                 f"the woven cloth would overwrite the canonical index ({store.index_path}). "
                 "Weave to a different file.")
+        inside = contained(store.path, self.out_path)
+        if inside and not contained(store.still, self.out_path):
+            # `cloth_path` pointed at a store-root `.md` silently ate a memory, one weave
+            # at a time, while the stats block said `written: true` and looked healthy.
+            # The cloth is derived; it belongs in the workshop, never in a memory slot.
+            raise ValueError(
+                f"the cloth would be written into a memory slot ({self.out_path}); "
+                f"weaving there destroys that memory. Put it under {store.still}, "
+                f"or outside the store entirely.")
+        if inside and store.write_policy == FROZEN:
+            raise ValueError(f"store '{store.name}' is frozen: nothing may be written "
+                             f"inside it, including the woven cloth. Point `cloth_path` "
+                             f"outside the store to keep a resident map for an archive.")
 
     # ── how old is a memory, really ──────────────────────────────────────
     #

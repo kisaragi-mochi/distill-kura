@@ -333,4 +333,26 @@ def discover_all(roots: dict, exclude_roots: list[str] | None = None) -> list[st
         files += found
     for root in (exclude_roots or []):
         files = [f for f in files if not _inside(f, root)]
+    # Path exclusion is not enough: a HARDLINK to a memory, sitting in an otherwise clean
+    # journal root, is a different path to the same inode. It walked through and was
+    # sipped as [USER] evidence — model-written memory laundered into the human's words,
+    # which is the one thing the evidence gate exists to prevent. Compare identities.
+    ids = set()
+    for root in (exclude_roots or []):
+        for p in glob.glob(os.path.join(root, "**", "*.md"), recursive=True):
+            try:
+                st = os.stat(p)
+                ids.add((st.st_dev, st.st_ino))
+            except OSError:
+                continue
+    if ids:
+        keep = []
+        for f in files:
+            try:
+                st = os.stat(f)
+            except OSError:
+                continue
+            if (st.st_dev, st.st_ino) not in ids:
+                keep.append(f)
+        files = keep
     return sorted(set(files), key=os.path.getmtime, reverse=True)

@@ -68,14 +68,35 @@ NESTED_KEYS = {"distill", "prefill"}
 _TYPES = {"path": str, "label": str, "readonly": bool, "write_policy": str,
           "persona": str, "charter": str, "model_profile": str,
           "distill": dict, "prefill": dict}
+# The nested tables need checking too: `inherit_global_journals = "false"` is a STRING,
+# therefore truthy, so a store inherited the global intake it had explicitly declined.
+_DISTILL_TYPES = {"inherit_global_journals": bool, "journals": dict, "language": str,
+                  "scribe_slots": int, "chunk_chars": int}
+_PREFILL_TYPES = {"window_tokens": int, "budget_fraction": float, "hard_fraction": float,
+                  "fresh_days": (int, float), "pinned_types": list, "trigger_tokens": int,
+                  "verbatim_after": str, "cloth_path": str, "header": str}
+
+
+def _check_table(where: str, table: dict, types: dict) -> None:
+    for k, v in (table or {}).items():
+        want = types.get(k)
+        if want is None:
+            continue
+        if isinstance(want, tuple):
+            ok = isinstance(v, want) and not isinstance(v, bool)
+        else:
+            ok = isinstance(v, want) and (want is bool or not isinstance(v, bool))
+        if not ok:
+            names = want.__name__ if not isinstance(want, tuple) else \
+                " or ".join(t.__name__ for t in want)
+            raise ValueError(f"[{where}] {k} must be {names}, "
+                             f"got {type(v).__name__} ({v!r})")
 
 
 def _check_types(name: str, sc: dict) -> None:
-    for k, v in sc.items():
-        want = _TYPES.get(k)
-        if want is not None and not isinstance(v, want):
-            raise ValueError(f"[stores.{name}] {k} must be {want.__name__}, "
-                             f"got {type(v).__name__} ({v!r})")
+    _check_table(f"stores.{name}", sc, _TYPES)
+    _check_table(f"stores.{name}.distill", sc.get("distill") or {}, _DISTILL_TYPES)
+    _check_table(f"stores.{name}.prefill", sc.get("prefill") or {}, _PREFILL_TYPES)
 
 
 def _real(path: str) -> str:
@@ -118,7 +139,18 @@ def _check_paths(stores: dict[str, Store], raw: dict) -> None:
             (f"stores.{n}.distill", (raw.get("stores") or {}).get(n, {}).get("distill") or {})
             for n in names]:
         for kind, root in (cfg.get("journals") or {}).items():
-            journals[f"{scope}.journals.{kind}"] = _real(str(root))
+            # The documented table form (`{root = "..."}`) stringified into "{'root':
+            # '...'}" and matched nothing, so it skipped this check entirely.
+            r = root.get("root", "") if isinstance(root, dict) else root
+            journals[f"{scope}.journals.{kind}"] = _real(str(r))
+    items = sorted(journals.items())
+    for i, (wa, ra) in enumerate(items):
+        for wb, rb in items[i + 1:]:
+            if ra != rb and (_inside(ra, rb) or _inside(rb, ra)):
+                raise ValueError(
+                    f"[{wa}] = {ra} and [{wb}] = {rb} are nested: the outer store would "
+                    f"drink the inner store's whole intake, which is the contamination "
+                    f"separate memory directories were supposed to prevent.")
     for where, root in journals.items():
         for n, real in reals.items():
             if _inside(real, root) or _inside(root, real):
@@ -152,6 +184,9 @@ class Registry:
             raw = {}
         stores: dict[str, Store] = {}
         for name, sc in (raw.get("stores") or {}).items():
+            if not str(name).strip():
+                raise ValueError("a store needs a name: [stores.\"\"] can never be selected, "
+                                 "because an empty selector means \"the default store\".")
             if "path" not in sc:
                 raise ValueError(f"[stores.{name}] needs `path`")      # fail loudly at load
             unknown = set(sc) - STORE_KEYS - NESTED_KEYS
@@ -164,6 +199,13 @@ class Registry:
                     f"Known: {sorted(STORE_KEYS | NESTED_KEYS)}. "
                     f"Use an `x_`-prefixed name for your own extensions.")
             _check_types(name, sc)
+            if "readonly" in sc and "write_policy" in sc:
+                # The deprecated key was applied AFTER the new one and always won, so an
+                # operator tightening a store while a stale `readonly = false` sat in the
+                # file got a fully writable store, signalled by one word in a JSON dump.
+                raise ValueError(
+                    f"[stores.{name}] sets both `readonly` and `write_policy`. "
+                    f"`readonly` is deprecated and would win. Keep write_policy alone.")
             stores[name] = Store(name=name,
                                  **{k: v for k, v in sc.items() if k in STORE_KEYS},
                                  extra={k: v for k, v in sc.items() if k in NESTED_KEYS
@@ -192,8 +234,19 @@ class Registry:
         if not models_cfg and os.environ.get("KURA_THINKER_URL"):      # legacy env
             models_cfg = {"thinker": {"url": os.environ["KURA_THINKER_URL"],
                                       "model": os.environ.get("KURA_THINKER_MODEL", "default")}}
-        profiles = {name: Models.from_config(cfg)
-                    for name, cfg in (raw.get("model_profiles") or {}).items()}
+        profiles = {}
+        for pname, pcfg in (raw.get("model_profiles") or {}).items():
+            # Models.from_config chains thinker -> brain -> scribe, so a role missing at
+            # the head lands on Endpoint()'s built-in default. A profile defining only
+            # `brain` sent the private index to an endpoint named nowhere in the file —
+            # the exact fallback this feature exists to forbid.
+            head = (pcfg or {}).get("thinker") or {}
+            if not head.get("url"):
+                raise ValueError(
+                    f"[model_profiles.{pname}] must define thinker.url. A role left out "
+                    f"falls back to the built-in default endpoint, which is how a "
+                    f"private index reaches a shared model.")
+            profiles[pname] = Models.from_config(pcfg)
         for n, st in stores.items():
             want = st.model_profile
             if want and want not in profiles:

@@ -45,7 +45,12 @@ import urllib.parse
 import urllib.request
 
 KURA = os.environ.get("KURA_URL", "http://127.0.0.1:8085").rstrip("/")
-STORE = os.environ.get("KURA_STORE", "").strip()        # "" = free mode
+_RAW_STORE = os.environ.get("KURA_STORE")
+STORE = (_RAW_STORE or "").strip()                      # "" = free mode
+if _RAW_STORE is not None and _RAW_STORE != "" and not STORE:
+    # A preset that meant to bind, bound to nothing: whitespace collapsed to free mode
+    # and the other kura's memories came back through it.
+    sys.exit("KURA_STORE is set to whitespace. Unset it for free mode, or name a store.")
 LABEL = os.environ.get("KURA_LABEL", "the kura")
 READONLY = os.environ.get("KURA_READONLY", "1") not in ("", "0", "false", "no")
 WRITE_LOG = os.environ.get("KURA_WRITE_LOG", "")

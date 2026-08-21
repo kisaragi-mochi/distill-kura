@@ -340,6 +340,9 @@ class Store:
                         title: str | None = None) -> dict:
         """A write that did NOT come through the distiller's evidence gate — a tool call,
         the CLI, a human. Allowed only under `direct-allowed`."""
+        if self.write_policy == FROZEN:
+            # Do not point the caller at a door that is also shut.
+            return {"ok": False, "error": f"store '{self.name}' is frozen: nothing may write"}
         if self.write_policy != DIRECT_ALLOWED:
             return {"ok": False, "error": f"store '{self.name}' is {self.write_policy}: "
                                           f"direct writes are refused; memories enter "
@@ -363,12 +366,26 @@ class Store:
         """Deprecated alias for `remember_direct`, kept so existing callers keep working."""
         return self.remember_direct(slug, description, body, type_, hook, title)
 
+    def _still_ourselves(self) -> bool:
+        """The directory we were constructed against is still that directory.
+
+        `path` is resolved once, at construction. Swapping the directory for a symlink
+        afterwards (`rmdir scratch; ln -s private scratch`) points every later write at
+        somewhere else while the Store object looks unchanged — a store with a permissive
+        policy becomes a writable alias of a protected one. Cheap to re-check, so it is
+        re-checked on the way into every write."""
+        return os.path.realpath(self.path) == self.path
+
     def _write(self, slug: str, description: str, body: str, type_: str = "project",
                hook: str | None = None, title: str | None = None) -> dict:
         """Write ONE fact; add one index line. Existing file → body replaced and the
         index line refreshed (a stale index line keeps speaking the old fact).
 
         Policy is checked by the callers above; this is the mechanism only."""
+        if not self._still_ourselves():
+            return {"ok": False, "error": f"store '{self.name}' no longer resolves to the "
+                                          f"directory it was opened on ({self.path}); "
+                                          f"refusing to write through the substitution"}
         slug = re.sub(r"[^a-z0-9-]+", "-", slug.lower()).strip("-")
         if not slug:
             return {"ok": False, "error": "slug required"}
@@ -480,8 +497,10 @@ class Store:
         }
 
     def init_files(self, label: str | None = None) -> None:
-        """Create an empty but valid store."""
+        """Create an empty but valid store. Refuses to write an index into a frozen one."""
         os.makedirs(os.path.join(self.path, "_still"), exist_ok=True)
+        if self.write_policy == FROZEN and not os.path.exists(self.index_path):
+            return
         if not os.path.exists(self.index_path):
             open(self.index_path, "w", encoding="utf-8").write(
                 f"# {label or self.label} — index\n"

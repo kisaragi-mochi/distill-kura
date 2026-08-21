@@ -395,7 +395,7 @@ A few decisions that look odd until you hit the thing they prevent:
 ## Tests
 
 ```bash
-python3 -m pytest tests -q                              # 122 tests, no model required
+python3 -m pytest tests -q                              # 145 tests, no model required
 cd dsh-plugin && npm test                               # 24 more for the plugin
 ```
 

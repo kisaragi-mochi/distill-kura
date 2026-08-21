@@ -28,6 +28,12 @@ and `[[links]]`, where every candidate comes from the slug set — a deliberate 
 from "links exact only", because in-store fuzzy resolution demonstrably connects real
 links (`[[brain-memory]]` → `_study/brain-memory`) and cannot leave the store.
 
+**Every path that writes into a store asks the policy.** Not just `remember_direct` and
+`pour_verified` — an adversarial pass found `tidy()`, `Loom.persist()` and `init_files()`
+writing into a frozen store, and `kura weave --no-model` destroying a memory's body via
+`cloth_path`. When you add a code path that touches a store directory, the question to
+answer in review is not "is this a memory?" but "would this run on a frozen store?".
+
 Do not add a permission layer inside the process. An OS user boundary is stronger, older
 and easier to verify than any token check this core could carry, and pretending otherwise
 would invite people to rely on it.
@@ -75,7 +81,7 @@ distill_kura/
     pipeline.py  the pass: sip → spot → gate → novelty → compose → stage → drain
 dsh-plugin/      the DeepSeek Harness plugin (JavaScript)
 examples/        a runnable config, two demo stores, DSH preset wiring
-tests/           122 tests, no model needed
+tests/           145 tests, no model needed
 ```
 
 ## House style

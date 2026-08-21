@@ -64,9 +64,23 @@ front and keep one kura process per tenant behind it.
 | `distiller-only` | **no** | yes |
 | `frozen` | no | **no** |
 
+`frozen` means **no memory and no index changes**. The workshop under `_still/` may still
+be written — the read log, and a woven cloth if you point `cloth_path` outside the store
+— because those are derived artifacts, not memory. A frozen store refuses to have a cloth
+woven *inside* it at all, so an archive that should keep a resident map needs
+`cloth_path` set somewhere else.
+
 `distiller-only` is the right setting for anything an agent reads from constantly: every
 memory then has to pass the evidence gate, and a model with a spare tool call cannot
-write a fact into the store. `frozen` is for an archive you are keeping but not growing.
+write a fact into the store.
+
+**What that door actually checks.** The gate signs each draft it stages, and the pour
+verifies the signature, so a file dropped into `_still/drafts/` by hand does not pour and
+a staged draft edited afterwards stops pouring. Be clear about the limit: the key lives
+next to the drafts, so a principal who can write that directory can usually read the key
+too. This stops an agent with a file tool, and it stops an accident. It does not stop
+someone who has the filesystem — nothing in this process can, which is the point of the
+section above. `frozen` is for an archive you are keeping but not growing.
 
 The deprecated `readonly = true` maps to `distiller-only`, which is what it always
 claimed to mean. It used to refuse the pour as well, so a store advertised as
