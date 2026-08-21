@@ -12,6 +12,26 @@ Python ≥ 3.11. No dependencies is a feature — it lets the whole thing be dro
 to any host, and it keeps the trust surface small for something that decides what an
 agent believes.
 
+## Boundaries
+
+`docs/TRUST.md` states what a store boundary is and is not, and the honesty of that
+statement is load-bearing. Two rules follow from it and must not be weakened:
+
+**Every lookup resolves INTO `slug_set()`.** Never build a path from a caller-supplied
+name and check whether it exists — that was the hole: `GET /memory/..%2Fprivate%2Fsecret`
+returned another store's memory. Containment is membership in a set, not a blocklist of
+characters. `contained()` (realpath + commonpath) sits behind it as defence in depth.
+
+**Explicit reads are exact; only a MODEL's pick is fuzzy.** `read_exact()` for a slug from
+a person, a `kura_read` call, or an HTTP route. Fuzzy `resolve()` stays for thinker picks
+and `[[links]]`, where every candidate comes from the slug set — a deliberate deviation
+from "links exact only", because in-store fuzzy resolution demonstrably connects real
+links (`[[brain-memory]]` → `_study/brain-memory`) and cannot leave the store.
+
+Do not add a permission layer inside the process. An OS user boundary is stronger, older
+and easier to verify than any token check this core could carry, and pretending otherwise
+would invite people to rely on it.
+
 ## The one rule that outranks the others
 
 **No model output becomes a stored fact without a mechanical check.**
@@ -35,7 +55,8 @@ invisible — the cloth looks perfectly healthy.
 
 ```
 distill_kura/
-  store.py       one kura: files, index, [[links]], doctor. No model calls at all.
+  store.py       one kura: files, index, [[links]], doctor, write policy, containment.
+                 No model calls at all.
   recall.py      recognition: whole index → picked slugs → walk links → context
   registry.py    stores + modes + model roles, loaded from kura.toml
   thinker.py     one OpenAI-compatible client; three roles (thinker/brain/scribe)
@@ -54,7 +75,7 @@ distill_kura/
     pipeline.py  the pass: sip → spot → gate → novelty → compose → stage → drain
 dsh-plugin/      the DeepSeek Harness plugin (JavaScript)
 examples/        a runnable config, two demo stores, DSH preset wiring
-tests/           83 tests, no model needed
+tests/           122 tests, no model needed
 ```
 
 ## House style

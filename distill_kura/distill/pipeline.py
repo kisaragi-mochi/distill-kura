@@ -98,10 +98,15 @@ class Distiller:
 
     # ── store text, for echo suppression ─────────────────────────────────
     def store_text(self) -> str:
+        """Everything the store says, for echo suppression.
+
+        Built from the store's own memories rather than by globbing the directory: a
+        file the store excludes (a symlink out of it) is not part of what this store
+        says, and letting its text in here would let outside content suppress a
+        legitimate candidate."""
         if self._store_text is None:
-            buf = [open(p, encoding="utf-8", errors="ignore").read()
-                   for p in glob.glob(os.path.join(self.store.path, "*.md"))]
-            self._store_text = norm("\n".join(buf))
+            self._store_text = norm("\n".join(self.store.read_exact(sl)
+                                               for sl in self.store.slugs()))
         return self._store_text
 
     # ── ② spot ───────────────────────────────────────────────────────────
@@ -282,7 +287,9 @@ class Distiller:
         if r.get("ok"):
             os.rename(p, p + ".poured")
             self._store_text = None
-        return {**r, "extended" if ext else "created": slug_out}
+        # `created` already means "the file did not exist"; naming the slug here too
+        # overwrote that answer with a string.
+        return {**r, "poured_into": slug_out, "extended": bool(ext)}
 
     def judge_draft(self, path: str) -> dict:
         raw = open(path, encoding="utf-8").read()

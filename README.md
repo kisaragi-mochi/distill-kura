@@ -368,6 +368,9 @@ front of it.
   buys, and the failure that motivated each mechanism.
 - **[docs/OPERATING.md](docs/OPERATING.md)** — running it resident, schedulers and exit
   codes, backups, what to watch.
+- **[docs/TRUST.md](docs/TRUST.md)** — what a store boundary is and is not, write
+  policies, and the two boundaries that are easy to miss (shared journals, shared
+  models). Read it before a private store goes in.
 
 A few decisions that look odd until you hit the thing they prevent:
 
