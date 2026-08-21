@@ -22,7 +22,10 @@ function fakeKura() {
     if (req.url.startsWith("/stores")) {
       res.end(JSON.stringify({
         default: "maker",
-        stores: { maker: { label: "m", memories: 1 }, eq: { label: "e", memories: 2 } },
+        stores: {
+          maker: { label: "m", memories: 1, write_policy: "direct-allowed" },
+          eq: { label: "e", memories: 2, write_policy: "distiller-only" },
+        },
         modes: { talking: "eq" },
       }));
     } else if (req.url.startsWith("/recall")) {
@@ -335,5 +338,18 @@ test("the map section and its timer are both disposable", async () => {
     for (const d of ctx.disposers) d.dispose();
     assert.equal(ctx.sections.size, 0);
     assert.equal(ctx.registered.size, 0);
+  } finally { srv.close(); }
+});
+
+test("the listing shows the STORE's policy, not this client's switch", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    // Hiding a write tool does not make a store read-only; saying so would claim a
+    // protection the server is not providing.
+    const ctx = fakeCtx();
+    apply(ctx, { url, readonly: false });
+    const out = await ctx.registered.get("kura_list").execute({}, {});
+    assert.match(out, /\[distiller-only\]/);
+    assert.ok(!out.includes("[direct-allowed]"));
   } finally { srv.close(); }
 });

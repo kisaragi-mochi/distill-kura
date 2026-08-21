@@ -41,8 +41,10 @@ class FakeKura(BaseHTTPRequestHandler):
                                        "<<<END KURA-MAP>>>\n", "etag": "e1"})
         if self.path.startswith("/stores"):
             return self._json({"default": "maker",
-                               "stores": {"maker": {"label": "m", "memories": 1},
-                                          "eq": {"label": "e", "memories": 2}},
+                               "stores": {"maker": {"label": "m", "memories": 1,
+                                                    "write_policy": "direct-allowed"},
+                                          "eq": {"label": "e", "memories": 2,
+                                                 "write_policy": "distiller-only"}},
                                "modes": {"talking": "eq"}})
         self._json({"text": "a memory"})
 
@@ -164,6 +166,19 @@ def test_bound_bridge_refuses_to_switch():
         out = speak(url, [INIT, call("kura_use", {"store": "eq"})], env={"KURA_STORE": "maker"})
         text = out[1]["result"]["content"][0]["text"]
         assert "cannot switch" in text or "unknown tool" in text or "refused" in text
+    finally:
+        srv.shutdown()
+
+
+def test_the_listing_shows_the_store_policy_not_the_client_switch():
+    """A client that hides its write tool has not made the store read-only. Showing the
+    client's own switch there would say a store is protected when only this agent is."""
+    srv, url = start()
+    try:
+        out = speak(url, [INIT, call("kura_list", {})], env={"KURA_READONLY": "0"})
+        text = out[1]["result"]["content"][0]["text"]
+        assert "[distiller-only]" in text          # eq, from the server
+        assert "[direct-allowed]" not in text      # the default is not worth the noise
     finally:
         srv.shutdown()
 

@@ -298,7 +298,9 @@ function tools(cfg, state) {
           const modes = Object.entries(d.modes || {}).filter(([, t]) => t === n).map(([m]) => m);
           return `  ${n === cur ? "*" : "·"} ${n}: ${s.label} — ${s.memories} memories` +
             (modes.length ? `, modes=${JSON.stringify(modes)}` : "") +
-            (s.readonly ? " [read-only]" : "");
+            // The STORE's policy, from the server. This plugin's own `readonly` only
+            // hides the write tool; it does not make the store refuse anything.
+            (s.write_policy && s.write_policy !== "direct-allowed" ? ` [${s.write_policy}]` : "");
         });
         return [`current: ${cur}`, ...rows].join("\n");
       },

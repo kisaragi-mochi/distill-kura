@@ -234,7 +234,10 @@ def call_tool(name: str, args: dict) -> str:
             lines.append(f"  {'*' if n == cur else '·'} {n}: {s.get('label')} — "
                          f"{s.get('memories')} memories"
                          + (f", modes={modes}" if modes else "")
-                         + (" [read-only]" if s.get("readonly") else ""))
+                         # The store's own policy, not this bridge's: a client that
+                         # hides its write tool has not made the store read-only.
+                         + (f" [{s.get('write_policy')}]"
+                            if s.get("write_policy") not in (None, "direct-allowed") else ""))
         return "\n".join(lines)
 
     if name == "kura_use":
