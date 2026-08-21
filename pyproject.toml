@@ -24,8 +24,8 @@ dependencies = []          # standard library only, on purpose
 kura = "distill_kura.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/OWNER/distill-kura"
-Issues = "https://github.com/OWNER/distill-kura/issues"
+Homepage = "https://github.com/Tonoken3/distill-kura"
+Issues = "https://github.com/Tonoken3/distill-kura/issues"
 
 [tool.setuptools.packages.find]
 include = ["distill_kura*"]

@@ -59,7 +59,7 @@ evidence confirms them.
 ## Quick start
 
 ```bash
-git clone https://github.com/OWNER/distill-kura && cd distill-kura
+git clone https://github.com/Tonoken3/distill-kura && cd distill-kura
 pip install -e .                       # or just run: python3 -m distill_kura.cli
 
 cp kura.example.toml kura.toml         # edit: one model endpoint is enough to start
