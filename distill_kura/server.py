@@ -1,0 +1,150 @@
+"""The kura's one mouth: a small HTTP service over the whole registry.
+
+Every route takes an optional store selector, so one process serves as many kura
+as you configure and a client can switch modes per request:
+
+    POST /recall            {"question": ..., "hops": 1, "store"|"mode": "eq"}
+    POST /remember          {"slug","description","body","type","hook","title","store"}
+    GET  /index             ?store=maker
+    GET  /doctor            ?store=maker          (?all=1 → every store at once)
+    GET  /memory/<slug>     ?store=maker
+    GET  /profile           ?store=eq             the store's charter + persona pointer
+    GET  /stores            what exists, which mode maps where, which models
+    GET  /health
+
+Path-prefixed forms work too — `POST /s/eq/recall`, `GET /s/eq/index` — which is
+handy for clients that can only vary a base URL per mode.
+
+Stdlib only, threaded, no auth: bind to 127.0.0.1 unless you know what you are doing.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from .recall import recall
+from .registry import Registry
+
+
+def _make_handler(reg: Registry):
+    class H(BaseHTTPRequestHandler):
+        server_version = "distill-kura"
+
+        def log_message(self, *a):
+            pass
+
+        # ── plumbing ─────────────────────────────────────────────────────
+        def _send(self, code: int, obj):
+            b = obj.encode() if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+
+        def _split(self, path: str) -> tuple[str, str, dict]:
+            """→ (route, store-selector, query). Understands /s/<store>/<route>."""
+            u = urllib.parse.urlsplit(path)
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
+            p = u.path
+            sel = q.get("store") or q.get("mode") or ""
+            m = re.match(r"/s/([^/]+)(/.*)?$", p)
+            if m:
+                sel = urllib.parse.unquote(m.group(1))
+                p = m.group(2) or "/"
+            return p, sel, q
+
+        def _store(self, sel: str):
+            try:
+                return reg.store(sel or None), None
+            except KeyError:
+                return None, {"error": f"unknown store or mode: {sel!r}",
+                              "stores": sorted(reg.stores), "modes": reg.modes}
+
+        # ── GET ──────────────────────────────────────────────────────────
+        def do_GET(self):
+            path, sel, q = self._split(self.path)
+            if path.startswith("/health"):
+                d = reg.stores[reg.default]
+                return self._send(200, {
+                    "ok": True, "default": reg.default,
+                    "stores": {n: len(s.slugs()) for n, s in reg.stores.items()},
+                    # `memories` and `dir` describe the DEFAULT store, so a client
+                    # written against a single-kura service keeps working unchanged.
+                    "memories": len(d.slugs()), "dir": d.path})
+            if path.startswith("/stores"):
+                return self._send(200, reg.describe())
+            if path.startswith("/doctor"):
+                # Bare /doctor answers for the DEFAULT store, like every other route.
+                # Returning a per-store mapping here instead would silently change the
+                # shape of the reply for any existing single-store client.
+                if q.get("all") not in (None, "", "0", "false"):
+                    return self._send(200, {n: s.doctor() for n, s in reg.stores.items()})
+                st, err = self._store(sel)
+                return self._send(404, err) if err else self._send(200, st.doctor())
+            st, err = self._store(sel)
+            if err:
+                return self._send(404, err)
+            if path.startswith("/index"):
+                t = st.index_text()
+                return self._send(200, {"store": st.name, "index": t, "tokens_est": len(t) // 2})
+            if path.startswith("/profile"):
+                # Persona lives on the HOST side (in DSH: the `persona` plugin and the
+                # agent preset). We only record WHICH persona belongs with this kura and
+                # hand the pointer over — we never render or inject it.
+                return self._send(200, {
+                    "store": st.name, "label": st.label,
+                    "persona_path": st.persona,
+                    "persona_exists": bool(st.persona and os.path.exists(st.persona)),
+                    "charter": (open(st.charter, encoding="utf-8").read() if st.charter else ""),
+                    "modes": [m for m, t in reg.modes.items() if t == st.name]})
+            if path.startswith("/memory/"):
+                slug = urllib.parse.unquote(path.split("/memory/", 1)[1])
+                t = st.read(slug)
+                return self._send(200 if t else 404,
+                                  {"store": st.name, "slug": st.resolve(slug), "text": t})
+            self._send(404, {"error": "not found", "path": path})
+
+        # ── POST ─────────────────────────────────────────────────────────
+        def do_POST(self):
+            path, sel, _ = self._split(self.path)
+            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                p = json.loads(self.rfile.read(n) or b"{}")
+            except ValueError:
+                return self._send(400, {"error": "bad json"})
+            sel = sel or p.get("store") or p.get("mode") or ""
+            st, err = self._store(sel)
+            if err:
+                return self._send(404, err)
+            if path.startswith("/recall"):
+                return self._send(200, recall(st, reg.models.thinker, p.get("question", ""),
+                                              int(p.get("hops", 1)), int(p.get("top", 3)),
+                                              int(p.get("chars", 6000))))
+            if path.startswith("/remember"):
+                r = st.remember(p.get("slug", ""), p.get("description", ""), p.get("body", ""),
+                                p.get("type", "project"), p.get("hook"), p.get("title"))
+                return self._send(200 if r.get("ok") else 403, r)
+            self._send(404, {"error": "not found", "path": path})
+
+    return H
+
+
+def serve(reg: Registry, host: str | None = None, port: int | None = None) -> None:
+    host, port = host or reg.host, port or reg.port
+    print(f"蔵 distill-kura on {host}:{port}", flush=True)
+    for n, s in reg.stores.items():
+        mark = " (default)" if n == reg.default else ""
+        ro = " [read-only]" if s.readonly else ""
+        modes = [m for m, t in reg.modes.items() if t == n]
+        print(f"  · {n}{mark}{ro}: {len(s.slugs())} memories at {s.path}"
+              + (f"  modes={modes}" if modes else ""), flush=True)
+    m = reg.models
+    print(f"  thinker={m.thinker.model}@{m.thinker.url}"
+          + ("" if m.describe()["single_model"] else
+             f" brain={m.brain.model}@{m.brain.url} scribe={m.scribe.model}@{m.scribe.url}"),
+          flush=True)
+    ThreadingHTTPServer((host, port), _make_handler(reg)).serve_forever()

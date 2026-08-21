@@ -1,0 +1,26 @@
+# Preset "eq" — the listening self.
+#
+# Same shape as maker, different kura. The two stores share no memories, no index and
+# no distiller watermark, so what this agent remembers is genuinely a different set of
+# things — not the same memory with a different tone of voice.
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: |
+      You are here to talk things through. When something is described rather than
+      asked, answer with your reading of it and stop; offer to act, do not act.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+- id: kura-eq
+  name: distill-kura
+  config:
+    url: http://127.0.0.1:8085
+    store: eq
+    label: the EQ kura
+    readonly: true
+    allowSwitch: false

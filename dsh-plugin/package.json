@@ -1,0 +1,29 @@
+{
+  "name": "dsh-distill-kura",
+  "version": "0.1.0",
+  "description": "Distilled long-term memory (蔵/kura) for DeepSeek Harness — recall by meaning, one kura per agent mode",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "memory",
+    "long-term-memory",
+    "rag",
+    "kura"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/distill-kura.git",
+    "directory": "dsh-plugin"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.7"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --import ./test/register.mjs --test test/plugin.test.mjs"
+  }
+}

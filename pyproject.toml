@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "distill-kura"
+version = "0.1.0"
+description = "Distilled long-term memory for agents: recall by meaning, write only what evidence supports"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Lna-Lab" }]
+keywords = ["memory", "llm", "agent", "rag", "long-term-memory", "dsh-plugin"]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []          # standard library only, on purpose
+
+[project.scripts]
+kura = "distill_kura.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/OWNER/distill-kura"
+Issues = "https://github.com/OWNER/distill-kura/issues"
+
+[tool.setuptools.packages.find]
+include = ["distill_kura*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

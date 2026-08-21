@@ -1,0 +1,107 @@
+# distill-kura — one file describes every kura this machine serves.
+#
+# Copy to `kura.toml` (or point at it with $KURA_CONFIG / `kura -c`).
+# With no config at all, $KURA_DIR (default ./memory) becomes a single store
+# named `main`, so you can try the tool before you configure anything.
+
+[server]
+host = "127.0.0.1"     # no auth: keep it on loopback unless you add one in front
+port = 8085
+default = "main"       # which kura answers when a request names none
+
+
+# ── models ──────────────────────────────────────────────────────────────────
+# Three ROLES, not three machines:
+#   thinker — picks index lines by meaning at recall time. Runs on every recall,
+#             so it wants to be small and fast. Quality bar: can it tell that
+#             "SSD inference chips" and "run the model from an SSD tier" are the
+#             same subject? A 4B-class local model usually can.
+#   brain   — the distiller's reader. Swallows a whole batch of journal and names
+#             what deserves to be remembered. Wants context length and patience.
+#   scribe  — the distiller's writer. Composes the memory in your language and
+#             later re-reads drafts to pour/fix/toss them. Wants judgement and
+#             good prose in the target language.
+#
+# DEFAULT: declare only [models.thinker] and one model does all three jobs.
+# UPGRADE: give brain and/or scribe their own endpoint — a bigger local model, or
+# an online API. Any OpenAI-compatible /chat/completions works; the key is read
+# from the named environment variable and never stored in this file.
+
+[models.thinker]
+url = "http://127.0.0.1:8000/v1"
+model = "local-model"
+effort = "low"          # low | medium | high — sent in every dialect at once
+# api_key_env = "LOCAL_LLM_KEY"   # some local servers demand a key even unauthenticated
+
+# ── upgrade examples (delete what you do not use) ───────────────────────────
+# A stronger local model for the reading work:
+# [models.brain]
+# url = "http://127.0.0.1:8011/v1"
+# model = "big-local"
+# effort = "medium"       # `low` makes some models go quiet on list-making work
+#
+# An online API for the writing work:
+# [models.scribe]
+# url = "https://api.anthropic.com/v1"      # any OpenAI-compatible endpoint
+# model = "claude-sonnet-5"
+# api_key_env = "ANTHROPIC_API_KEY"
+# temperature = 0.4
+#
+# A slow, deep local model as the scribe (this is the setup the design came from:
+# a huge CPU-only model writes, a fast GPU model reads):
+# [models.scribe]
+# url = "http://127.0.0.1:8096/v1"
+# model = "big-cpu-model"
+# effort = "low"          # deep models can spend the whole budget thinking
+
+
+# ── the kura ────────────────────────────────────────────────────────────────
+# One directory each. They do not share memories, an index, or a distiller
+# watermark — switching mode really does change what is remembered.
+
+[stores.main]
+path = "~/kura/main"
+label = "main memory"
+# readonly = true        # tools may read; only the distiller's gate may write
+# persona = "~/kura/main/persona.json"   # pointer only: rendering personas is the host's job
+
+[stores.maker]
+path = "~/kura/maker"
+label = "maker mode — building things"
+
+[stores.eq]
+path = "~/kura/eq"
+label = "EQ mode — talking things through"
+
+
+# ── modes ───────────────────────────────────────────────────────────────────
+# An agent mode (a DSH preset name, a Claude Code profile, whatever your host
+# calls it) → the kura it speaks from. A request may name either side.
+
+[modes]
+default = "main"
+maker = "maker"
+eq = "eq"
+
+
+# ── the distiller ───────────────────────────────────────────────────────────
+# Where the raw material comes from. Keys are source adapters:
+#   claude = a directory of Claude Code .jsonl transcripts
+#   dsh    = a DSH sessions directory (session.jsonl.zstd; needs the `zstd` binary)
+#   text   = a directory of .md/.txt/.log notes
+
+[distill]
+language = "English"        # the language memories are WRITTEN in
+scribe_slots = 4            # concurrent compositions (match your server's slots)
+chunk_chars = 200_000       # one batch; aim at what the brain swallows in one gulp
+
+[distill.journals]
+claude = "~/.claude/projects/my-project"
+# dsh  = "~/dsh/sessions"
+# text = "~/notes"
+
+# Per-store overrides, when one kura is fed differently from another:
+# [stores.eq.distill]
+# language = "日本語"
+# [stores.eq.distill.journals]
+# text = "~/notes/dialogue"

@@ -1,0 +1,32 @@
+# The MCP bridge, for hosts (or presets) that prefer MCP over a native plugin.
+#
+# ⚠️ A service row MUST sit inside a group carrying an `isolate` realm. A bare row
+#    publishes into the ROOT realm; a second preset publishing the same serverName
+#    then collides and the mount is rejected — taking the session with it.
+#
+# KURA_STORE binds this bridge to one kura. Leave it out and the tools take an
+# optional `store` argument, plus `kura_use` to switch for the session.
+
+- id: kura-bridge
+  name: cordis:group
+  group: true
+  isolate:
+    kuraBridge: true
+  config:
+    - id: mcp-kura
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: kura
+        transport: stdio
+        command: python3
+        args:
+          - -m
+          - distill_kura.mcp
+        env:
+          PYTHONPATH: /path/to/distill-kura
+          KURA_URL: http://127.0.0.1:8085
+          KURA_STORE: eq            # omit to let the agent choose per call
+          KURA_LABEL: the EQ kura
+          KURA_READONLY: '1'
+        toolCallTimeoutMs: 300000
+        failOnStartupError: false   # a memory that is down must not block the session

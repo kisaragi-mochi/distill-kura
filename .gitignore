@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+node_modules/
+.pytest_cache/
+# a live kura's workshop should never be committed
+_still/

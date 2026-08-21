@@ -1,0 +1,29 @@
+# Preset "maker" — the building self.
+#
+# Persona is the harness's business (dsh-persona / AGENTS.md). What this file adds is
+# the memory that belongs with that persona: the `maker` kura, and nothing else.
+#
+# `store: maker` + `allowSwitch: false` binds this agent to one kura. Binding is the
+# point: a preset switch is the mode switch. Leave allowSwitch at its default (true)
+# if you would rather let the agent move between kura with `kura_use`.
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: |
+      You build things here. Measure before claiming, name the seam when something
+      breaks across one, and say plainly when you do not know.
+
+- id: agent-instructions            # reads AGENTS.md from the workspace
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+- id: kura-maker
+  name: distill-kura
+  config:
+    url: http://127.0.0.1:8085
+    store: maker
+    label: the maker kura
+    readonly: true                  # writing goes through the distiller's gate
+    allowSwitch: false              # bound: this preset IS the mode
