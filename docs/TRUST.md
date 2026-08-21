@@ -128,9 +128,33 @@ And at runtime: a name can only resolve to a memory the store holds, an explicit
 exact, and a file whose real path leaves the store is excluded and reported by `doctor()`
 as `escaping`.
 
+## What a path check cannot see: hardlinks
+
+`contained()` resolves symlinks, and a symlink out of the store is excluded. A **hardlink
+is different in kind**: it is a first-class name for an inode, not a pointer to another
+path, so `realpath()` stays inside the store and the file genuinely *is* a file in the
+store. Content placed there is served — correctly, by the rules — and it keeps serving
+the target's future edits.
+
+```bash
+ln  /other/store/secret.md  ~/kura/public/looks-innocent.md   # served by `public`
+ln -s /other/store/secret.md ~/kura/public/looks-innocent.md  # excluded, reported
+```
+
+This is not a gap in name resolution; it is what "putting a file into the store
+directory" means. The boundary for it is **filesystem permissions** — which is the whole
+reason for one trust level per user and process. `doctor()` reports every memory with
+`st_nlink > 1` under `hardlinked` so it is at least visible; they are not excluded,
+because snapshot backups and `rsync --link-dest` give every file a second link and a
+store that went dark under a backup tool would be the worse failure.
+
+If it matters to you: keep the stores on separate filesystems (a hardlink cannot cross
+one), or under separate users.
+
 ## What is still on you
 
-- process, user and file-permission separation
+- process, user and file-permission separation (this is what stops a hardlink, a copy,
+  or anything else placed directly into a store directory)
 - not listing private store names in shared configs
 - choosing endpoints that match the store's trust level
 - backing a kura up to its **own private** repository, never the code repository

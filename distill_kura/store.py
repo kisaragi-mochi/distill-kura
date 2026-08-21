@@ -128,6 +128,33 @@ class Store:
                   if not os.path.basename(p).startswith("_")]
         return sorted(name for name, p in found if contained(self.path, p))
 
+    def hardlinked(self) -> list[str]:
+        """Memories whose file has another name somewhere else on the filesystem.
+
+        `contained()` cannot see this and neither can any path check: a hardlink is a
+        first-class name for an inode, not a pointer to a second path, so
+        `realpath(<store>/x.md)` stays inside the store and the file genuinely IS in the
+        store. Content placed this way is served — correctly, by the rules — and it keeps
+        serving the target's future edits.
+
+        That is not a hole in name resolution; it is what "putting a file in the store
+        directory" means. The boundary for it is filesystem permissions, which is why
+        `docs/TRUST.md` insists on one trust level per user and process. What this
+        project can do is refuse to be quiet about it.
+
+        Reported, never excluded: legitimate setups have `st_nlink > 1` on every file
+        (`rsync --link-dest`, snapshot backups), and a store that went dark under a
+        backup tool would be a far worse failure than the one it was guarding against.
+        """
+        out = []
+        for name in self.slugs():
+            try:
+                if os.stat(self.file_of(name)).st_nlink > 1:
+                    out.append(name)
+            except OSError:
+                continue
+        return out
+
     def escaping(self) -> list[str]:
         """Files that look like memories but resolve outside the store."""
         found = [(os.path.basename(p)[:-3], p)
@@ -440,6 +467,9 @@ class Store:
             # Files that look like memories but resolve outside the store (symlinks).
             # Excluded from every lookup, and named here so the exclusion is visible.
             "escaping": self.escaping(),
+            # Files with a second name elsewhere. Not excluded (backup tools make these
+            # routinely) but named, because a path check cannot see them at all.
+            "hardlinked": self.hardlinked(),
             "hubs": sorted(((len(v), k) for k, v in back.items()), reverse=True)[:5],
             "index_lines": sum(1 for l in idx.splitlines() if l.startswith("- [")),
             "index_tokens_est": len(idx) // 2,

@@ -129,6 +129,29 @@ def test_a_symlink_out_of_the_store_is_not_a_memory(tmp_path):
     assert pub.doctor()["escaping"] == ["alias"]
 
 
+def test_a_hardlink_is_reported_even_though_it_cannot_be_refused(tmp_path):
+    """Found by an adversarial pass over the fix itself.
+
+    A hardlink has no second path to resolve, so `contained()` passes and the file
+    genuinely is in the store — content placed this way is served, correctly by the
+    rules, and keeps serving the target's future edits. Refusing every `st_nlink > 1`
+    file would take a store dark under any snapshot backup, which is the worse failure.
+    So it is reported rather than excluded, and `docs/TRUST.md` says plainly that the
+    boundary here is filesystem permissions, not name resolution."""
+    pub, prv = two_stores(tmp_path)
+    os.link(prv.file_of("secret"), os.path.join(pub.path, "hardpriv.md"))
+    pub._slugs_cache = None
+    d = pub.doctor()
+    assert "hardpriv" in d["hardlinked"]
+    assert d["escaping"] == []          # a path check genuinely cannot see this
+    assert "hardpriv" in pub.slugs()    # and it really is a file in this store
+
+
+def test_ordinary_memories_are_not_reported_as_hardlinked(tmp_path):
+    pub, _ = two_stores(tmp_path)
+    assert pub.doctor()["hardlinked"] == []
+
+
 def test_study_subdirectory_memories_still_work(tmp_path):
     """The one legitimate slug containing a separator must keep working — a fix that
     breaks `_study/foo` has traded a hole for an outage."""
