@@ -24,3 +24,5 @@
     label: the EQ kura
     readonly: true
     allowSwitch: false
+    prefill: true
+    promptOrder: -50

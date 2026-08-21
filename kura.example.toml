@@ -84,6 +84,26 @@ maker = "maker"
 eq = "eq"
 
 
+# ── the resident map ────────────────────────────────────────────────────────
+# The index as a standing block in the system prompt, so the agent always knows what is
+# known — and, more importantly, what is not. `kura weave` builds it; `kura prefill`
+# prints it; the DSH plugin injects it.
+
+[prefill]
+window_tokens = 131072      # the agent's context window. DECLARE it — a wrong guess overflows
+budget_fraction = 0.05      # soft target: the index should cost about this much of the window
+hard_fraction = 0.20        # over this, the map is replaced by a stub. Never truncated
+fresh_days = 14             # memories this recent keep their full line ("still vivid")
+pinned_types = ["feedback", "user"]   # these types always keep their full line
+trigger_tokens = 24         # budget for one compressed line, in tokens, not characters
+# verbatim_after = "## Appendix"      # copy everything from this heading on, untouched
+# cloth_path = "…/_still/index.woven.md"   # where the woven cloth is written
+# header = "…"              # your own preamble. It may not contain anything that ticks
+
+# Per-store overrides work here too:
+# [stores.eq.prefill]
+# fresh_days = 30
+
 # ── the distiller ───────────────────────────────────────────────────────────
 # Where the raw material comes from. Keys are source adapters:
 #   claude = a directory of Claude Code .jsonl transcripts

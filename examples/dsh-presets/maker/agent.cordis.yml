@@ -27,3 +27,9 @@
     label: the maker kura
     readonly: true                  # writing goes through the distiller's gate
     allowSwitch: false              # bound: this preset IS the mode
+    prefill: true                   # keep the index resident in the system prompt
+    promptOrder: -50                # BEFORE the persona: the persona carries a clock,
+                                    # and a prefix cache dies from the first changed
+                                    # byte on. The big stable block goes in front of
+                                    # the thing that ticks.
+    refreshMs: 120000

@@ -25,6 +25,12 @@ assumed.
 
 Prompts may *help a model pass the gate honestly*. They may not *replace* it.
 
+The same rule has a second face in `weave.py`: **compression may shorten a description,
+but it may never lose, reorder or invent a link.** That is checked mechanically on every
+weave and raises `WeaveError` if violated. Do not downgrade it to a warning. A memory
+missing from the map does not exist as far as the agent is concerned, and the loss is
+invisible — the cloth looks perfectly healthy.
+
 ## Layout
 
 ```
@@ -34,6 +40,9 @@ distill_kura/
   registry.py    stores + modes + model roles, loaded from kura.toml
   thinker.py     one OpenAI-compatible client; three roles (thinker/brain/scribe)
   server.py      the HTTP mouth, store-selectable on every route
+  weave.py       the loom: the index compressed into the three-layer resident cloth
+  prefill.py     the standing block a host injects. Byte-stable by contract
+  tokens.py      per-script token estimation (fitted, not guessed)
   mcp.py         MCP stdio bridge (stdlib only, single file, droppable anywhere)
   cli.py         `kura`
   distill/
@@ -45,7 +54,7 @@ distill_kura/
     pipeline.py  the pass: sip → spot → gate → novelty → compose → stage → drain
 dsh-plugin/      the DeepSeek Harness plugin (JavaScript)
 examples/        a runnable config, two demo stores, DSH preset wiring
-tests/           44 tests, no model needed
+tests/           83 tests, no model needed
 ```
 
 ## House style
@@ -75,6 +84,20 @@ disposer goes on `ctx.effect()`. Unloading leaves no debris.
 **Policy lives outside the tool.** Read-only is enforced by a monotonic
 `ctx.tools.guard()`, not by an `if` inside the tool body — a guard's denial cannot be
 overturned by another listener.
+
+## Changing anything the agent reads every turn
+
+The resident block is byte-stable by contract. A prefix cache dies from the first
+changed byte onward (measured: identical 0.14 s, one word added at the front 0.66 s), so:
+
+- Nothing volatile goes in the block. `prefill.build()` refuses a header containing a
+  date, a clock or a session id, at build time.
+- A warning about the map goes in the JSON, never in the text.
+- The DSH prompt section's `text` provider is **synchronous** and runs on every model
+  step. It returns a cached string; the fetch happens in the background. Returning a
+  Promise renders `[object Promise]` into the prompt.
+- If the block cannot be built, emit the honest note — never an empty string, and never
+  a truncated map.
 
 ## Changing prompts
 

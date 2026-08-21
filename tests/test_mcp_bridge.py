@@ -36,6 +36,9 @@ class FakeKura(BaseHTTPRequestHandler):
 
     def do_GET(self):
         FakeKura.calls.append("GET " + self.path)
+        if self.path.startswith("/prefill"):
+            return self._json({"text": "<<<KURA-MAP store=maker>>>\n- [A](a.md) — t\n"
+                                       "<<<END KURA-MAP>>>\n", "etag": "e1"})
         if self.path.startswith("/stores"):
             return self._json({"default": "maker",
                                "stores": {"maker": {"label": "m", "memories": 1},
@@ -171,3 +174,32 @@ def test_an_unreachable_kura_is_an_error_not_a_crash():
     out = speak("http://127.0.0.1:1", [INIT, call("kura_recall", {"question": "q"})])
     assert out[1]["result"]["isError"] is True
     assert "cannot reach" in out[1]["result"]["content"][0]["text"]
+
+
+# ── the resident map over MCP ───────────────────────────────────────────────
+
+def test_initialize_carries_instructions_that_fit_a_2kb_cap():
+    """`instructions` is the only standing-text channel MCP has, and it is a MAY: Claude
+    Code injects it and truncates at 2KB, VS Code and Goose inject it, Claude Desktop,
+    claude.ai and DSH's own mcp-client ignore it. So it must be short, and it must not
+    try to carry the index."""
+    srv, url = start()
+    try:
+        out = speak(url, [INIT])
+        text = out[0]["result"]["instructions"]
+        assert len(text.encode()) < 2048
+        assert "not remembered YET" in text
+        assert "kura_map" in text
+    finally:
+        srv.shutdown()
+
+
+def test_kura_map_serves_the_whole_index():
+    srv, url = start()
+    try:
+        out = speak(url, [INIT, call("kura_map", {})])
+        assert out[1]["result"]["isError"] is False
+        assert "KURA-MAP" in out[1]["result"]["content"][0]["text"]
+        assert any(c.startswith("GET /prefill") for c in FakeKura.calls)
+    finally:
+        srv.shutdown()

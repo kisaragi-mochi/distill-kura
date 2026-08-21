@@ -9,6 +9,7 @@ the model.
 | config | `config:` block in the cordis patch | environment variables |
 | switching | `store:` per preset, plus `kura_use` at runtime | `KURA_STORE` per preset, plus `kura_use` |
 | works elsewhere | DSH only | any MCP host (Claude Code, editors, …) |
+| resident index | ✅ a `systemPrompt.section`, refreshed in the background | ⚠️ only a short pointer via `instructions` (2KB cap, and several hosts ignore it) — the map itself comes from the `kura_map` tool |
 
 ## The mode switch
 
@@ -43,6 +44,22 @@ See `mcp-bridge.cordis.yml`. A service row must sit inside a group carrying an
 `isolate` realm; a bare row publishes into the root realm, collides with any other
 preset publishing the same name, and the mount is rejected — which takes the whole
 session down with it.
+
+## The resident index
+
+The native plugin registers the index as a prompt section, so the agent sees the map on
+every turn without calling anything. Two things about it are not cosmetic:
+
+- `promptOrder: -50` puts it **before** the persona. A prefix cache is lost from the
+  first changed byte onward, and the persona usually carries a clock (`{{now}}` from
+  `dsh-now`), so it changes every minute. The map is the largest block and changes a few
+  times a day — it belongs in front.
+- The section's text provider is synchronous by harness contract and runs on every model
+  step, so the plugin serves a cached string and refreshes over HTTP in the background.
+  Until the first fetch lands (and whenever the kura is down) it serves an explicit "the
+  map is missing, not empty" note rather than an empty string.
+
+Keep the cloth current with `kura weave` on a timer; see `docs/OPERATING.md`.
 
 ## Checking it took
 

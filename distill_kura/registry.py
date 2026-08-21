@@ -34,6 +34,13 @@ With no config at all, `$KURA_DIR` (or `./memory`) becomes a single store named
     yuki = "main"
     maker = "maker"
     eq = "eq"
+
+    [prefill]                            # the index as a standing system-prompt block
+    window_tokens = 131072               # the agent's context window
+    budget_fraction = 0.05               # keep the index under this share of it
+    fresh_days = 14                      # memories touched this recently keep full lines
+    pinned_types = ["feedback", "user"]  # these types always keep full lines
+    trigger_tokens = 24                  # budget for one trimmed line
 """
 from __future__ import annotations
 
@@ -112,6 +119,16 @@ class Registry:
         except KeyError:
             return self.stores[self.default]
 
+    @property
+    def prefill_cfg(self) -> dict:
+        return dict(self.raw.get("prefill") or {})
+
+    def prefill_cfg_for(self, store: Store) -> dict:
+        """Global `[prefill]`, overridden per store by `[stores.<name>.prefill]`."""
+        cfg = self.prefill_cfg
+        own = store.extra.get("prefill")
+        return {**cfg, **own} if isinstance(own, dict) else cfg
+
     def describe(self) -> dict:
         return {
             "default": self.default,
@@ -120,5 +137,6 @@ class Registry:
                            "charter": bool(s.charter)} for n, s in self.stores.items()},
             "modes": self.modes,
             "models": self.models.describe(),
+            "prefill": self.prefill_cfg,
             "config": self.config_path,
         }

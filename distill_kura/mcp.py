@@ -24,6 +24,16 @@ Conventions that are not decoration:
     thinker was unreachable and quality silently degraded — never hide that
   · read-only by default: writing belongs to the distiller's gate, not to a model
     with a spare tool call
+
+The resident map, over MCP:
+  MCP has exactly one way for a server to put standing text in front of the model — the
+  `instructions` field of the initialize result — and the spec says a client MAY use it.
+  Measured support: Claude Code injects it (and TRUNCATES it at 2KB), VS Code/Copilot and
+  Goose inject it; Claude Desktop, claude.ai and DSH's own mcp-client ignore it entirely.
+  A 9,000-token index therefore CANNOT travel this way.
+  So `instructions` carries a short pointer, and the map itself is offered as the
+  `kura_map` tool, which any host can call. For a host that can inject properly, use the
+  native DSH plugin or paste `kura prefill` into the system prompt.
 """
 from __future__ import annotations
 
@@ -40,6 +50,24 @@ LABEL = os.environ.get("KURA_LABEL", "the kura")
 READONLY = os.environ.get("KURA_READONLY", "1") not in ("", "0", "false", "no")
 WRITE_LOG = os.environ.get("KURA_WRITE_LOG", "")
 PROTOCOL_VERSION = "2025-06-18"
+
+# Kept deliberately short: Claude Code truncates server instructions at 2KB, and a
+# truncated instruction is a sentence that stops mid-thought in the model's context.
+INSTRUCTIONS = """{label} is a long-term memory (a "kura") for this household or project.
+
+It is not a search index of documents: it holds distilled facts — decisions that were
+made, measurements that were taken, landmines that will recur — one fact per memory,
+linked to each other.
+
+· Call kura_recall whenever the question touches what was decided, measured, or done
+  here before. Recall works by MEANING, so ask it in plain language; the words need not
+  match anything.
+· An empty result means it is not remembered YET. Say so plainly. Never fill the gap
+  with a plausible invention — a confident guess about this household is the one failure
+  mode this memory exists to prevent.
+· Call kura_map to see the whole index at once when you need to know WHAT EXISTS rather
+  than look one thing up.
+"""
 
 _session_store = STORE       # `kura_use` moves this in free mode
 
@@ -102,6 +130,18 @@ TOOLS: list[dict] = [
                            "store": {"type": "string", "description": "Which kura. Omit for the current one."}},
             "required": ["slug"],
         },
+    },
+    {
+        "name": "kura_map",
+        "description": (
+            f"Show the whole index of {LABEL} — every memory's one-line recognition "
+            "trigger, in one answer. Use it when you need to see WHAT EXISTS rather than "
+            "look something up: before claiming a topic was never discussed, when "
+            "choosing which memory to open, or right after switching kura. It is a map, "
+            "not the contents: open a memory with kura_read for the detail."),
+        "inputSchema": {"type": "object",
+                        "properties": {"store": {"type": "string",
+                                                 "description": "Which kura. Omit for the current one."}}},
     },
     {
         "name": "kura_doctor",
@@ -211,6 +251,10 @@ def call_tool(name: str, args: dict) -> str:
         d = http("GET", f"/memory/{slug}" + _q(store))
         return d.get("text") or f"(no memory called {args.get('slug')!r} in {store or 'the default kura'})"
 
+    if name == "kura_map":
+        d = http("GET", "/prefill" + _q(store))
+        return d.get("text") or "(the index could not be read — the map is missing, not empty)"
+
     if name == "kura_doctor":
         return json.dumps(http("GET", "/doctor" + _q(store)), ensure_ascii=False, indent=1)
 
@@ -258,7 +302,8 @@ def main() -> None:
         if method == "initialize":
             reply(mid, {"protocolVersion": params.get("protocolVersion") or PROTOCOL_VERSION,
                         "capabilities": {"tools": {"listChanged": False}},
-                        "serverInfo": {"name": "kura", "version": "0.1.0"}})
+                        "serverInfo": {"name": "kura", "version": "0.1.0"},
+                        "instructions": INSTRUCTIONS.format(label=LABEL)})
         elif method == "ping":
             reply(mid, {})
         elif method == "tools/list":

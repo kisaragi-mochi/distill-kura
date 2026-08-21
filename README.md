@@ -72,6 +72,13 @@ curl -s -X POST localhost:8085/recall -H 'content-type: application/json' \
      -d '{"question":"what did we decide about the archive disk?","hops":1}'
 ```
 
+Wear the index, so the agent always knows what is known:
+
+```bash
+kura weave                             # build the three-layer cloth
+kura prefill                           # the block to put in the system prompt
+```
+
 Feed it your agent transcripts:
 
 ```bash
@@ -83,6 +90,100 @@ kura distill night    # stay resident and do it whenever things go quiet
 
 Nothing enters the store until `drain` (or a hand-run `pour`). Drafts carry their
 evidence in an HTML comment, so you can always see *why* a memory exists.
+
+---
+
+## The resident map
+
+Recall-by-tool answers *"what do you know about X?"* — but only once the agent has
+decided to ask. It never answers the question the agent does not think to ask: **is
+there anything here at all?** An agent that cannot see the map does not know what it is
+missing, so it guesses, and a confident guess about your household is precisely the
+failure this project exists to prevent.
+
+So the index is also worn: a standing block in the system prompt, on every turn.
+
+```bash
+kura weave      # re-weave the index into the three-layer cloth
+kura prefill    # print the block a host should inject
+```
+
+### Three layers, because detail only pays for recent things
+
+A blind A/B test — 20 questions, fat index vs slimmed index, scored without knowing
+which was which — settled the shape:
+
+| band | fat | slim |
+|---|---|---|
+| overall | 9 | 11 |
+| recent events | **4** | 1 |
+| doctrine | 1 | **4** |
+| cross-domain leaps | 1 | **4** |
+
+The doctrine lines were byte-identical in both indexes, and the slim index still won
+that band: **a lighter surround makes the standing lines work better.** Detail is not
+the source of insight. It earns its place only where things are still moving.
+
+| layer | rule | line |
+|---|---|---|
+| pinned | frontmatter `type` in `pinned_types` | kept in full |
+| fresh | changed within `fresh_days` | kept in full |
+| trigger | everything else | compressed to ~`trigger_tokens` |
+
+Trigger lines are written by the `scribe` model and cached in a ledger keyed on the
+description *and* the budget, so a re-weave in the steady state costs nothing. With no
+model reachable the loom trims mechanically instead — a memory system must not go blank
+because a GPU is down.
+
+**Age is not mtime.** `cp -r`, a restore or a checkout resets every timestamp, the whole
+index turns "fresh", nothing is trimmed, and the mechanism has silently switched itself
+off. So the loom prefers a date written *inside* the memory, and distrusts any mtime
+that a fifth of the store shares with one calendar day.
+
+### Where it goes, and why that is a cache decision
+
+```yaml
+- id: kura
+  name: distill-kura
+  config: { store: eq, promptOrder: -50 }   # before the persona
+```
+
+A prefix cache is lost from the first changed byte onward — measured on one local
+server: an identical 4,029-token preamble reprices from 0.68 s to 0.14 s, appending at
+the **end** stays 0.14 s, and **one word added at the front costs the whole cache
+(0.66 s)**. The persona commonly carries a clock, so it changes every minute; the map is
+the largest block in the prompt and changes a few times a day. The big stable thing goes
+in front of the thing that ticks.
+
+The block itself therefore contains no date, no clock, no counter — and `build()`
+refuses a header that does, at build time rather than through mysteriously slow turns
+three weeks later.
+
+### It never hands over half a map
+
+| situation | what the agent gets |
+|---|---|
+| all well | the map, between `<<<KURA-MAP>>>` markers |
+| over `budget_fraction` | the **whole** map, and a warning in the JSON (never in the text — a banner is volatile content) |
+| over `hard_fraction` | a **stub** with no index lines, saying the map is missing rather than empty |
+| kura unreachable | an explicit note that the map is missing, never an empty string |
+
+A truncated map is the worst artifact available: it looks complete, and every memory
+below the cut appears not to exist. `weave` will shorten the fresh window to fit, but it
+will never drop a line — and if no setting reaches the budget it says so, keeps the
+better map, and tells you where the weight is.
+
+### Getting it into a host
+
+| host | mechanism |
+|---|---|
+| DSH | native plugin — a `systemPrompt.section`, refreshed in the background |
+| Claude Code, VS Code, Goose | MCP `instructions` carries a short pointer (**2KB cap**); the map itself comes from the `kura_map` tool or a session hook running `kura prefill` |
+| Claude Desktop, claude.ai | ignore `instructions` entirely — use `kura_map` |
+| anything else | `GET /prefill?format=text`, or `kura prefill` in a shell hook |
+
+The MCP `instructions` field is a `MAY` in the spec, and a 9,000-token index cannot
+travel through a 2KB cap regardless, so this project does not pretend otherwise.
 
 ---
 
@@ -240,7 +341,8 @@ index drift. It is the eye the metabolism needs.
 |---|---|
 | `POST /recall` | `{question, hops, top, chars, store\|mode}` → picked, walked, context |
 | `POST /remember` | `{slug, description, body, type, title}` — refused on a read-only store |
-| `GET /index` | the whole index, for a client that wants it resident |
+| `GET /index` | the raw index |
+| `GET /prefill` | the resident block, ready to inject (`&format=text` for a hook) |
 | `GET /memory/<slug>` | one memory in full |
 | `GET /doctor` | health of one store (`?all=1` for every store) |
 | `GET /stores` | stores, modes, and which model fills each role |
@@ -282,7 +384,8 @@ A few decisions that look odd until you hit the thing they prevent:
 ## Tests
 
 ```bash
-python3 -m pytest tests -q     # 44 tests, no model required
+python3 -m pytest tests -q                              # 83 tests, no model required
+cd dsh-plugin && npm test                               # 20 more for the plugin
 ```
 
 The gate is tested adversarially: every case is a way a real model actually tried to

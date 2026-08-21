@@ -164,6 +164,68 @@ is a metabolism, not a one-time cleanup: hand-fixing ten lines proves the rot re
 
 ---
 
+## 6b. The resident map: recall you did not have to ask for
+
+**The failure.** Tool-based recall only fires once the agent decides to ask. Asked about
+something the household had measured, an agent that had not thought to call the tool
+answered from general knowledge — fluently, and wrongly. It had no way to know there was
+anything to look up. The gap is not retrieval quality; it is that the agent cannot see
+the shape of what it knows.
+
+**The mechanism.** The index is also worn: a standing block in the system prompt, every
+turn. That is affordable exactly when the index is small — the spring-source condition,
+measured at 4.6% of the window when this was first built (it has since grown to 6.9%,
+which is what forced the loom).
+
+**Three layers, and why not just "trim everything".** A blind A/B test (20 questions,
+fat vs slimmed index, scored without knowing which was which) came out 9–11 overall — a
+coin toss — but the bands told the real story: detail won for *recent events* (4–1) and
+lost everywhere else, including doctrine (1–4) where the lines were byte-identical in
+both indexes. A lighter surround makes the standing lines work better. So: doctrine and
+recent memories keep their full line; everything else is compressed to a trigger.
+
+**Why age is not mtime.** `cp -r`, a restore, a checkout, a bulk `sed` — every timestamp
+resets, the whole index becomes "fresh", nothing is trimmed, and the mechanism has
+switched itself off without a word. Measured on the live store: 50 of 214 files shared a
+single bulk-touch day, and for those mtime understated the true age by a median of 11
+days (worst case 425). So the loom prefers a date written inside the memory, and
+distrusts any mtime shared by a fifth of the store on one calendar day. A date more than
+a day in the future is a plan, not a stamp — but *exactly* one day of slack is allowed,
+because "today" is written in local time and at 06:00 in Tokyo the UTC date is still
+yesterday. Without that slack the freshest memories are discarded every morning.
+
+**Where the block goes is a cache decision.** A prefix cache is lost from the first
+changed byte onward: identical preamble 0.14 s, appended-at-the-end 0.14 s, one word
+added at the front 0.66 s. The persona commonly embeds a clock, so it changes every
+minute; the map is the largest block and changes a few times a day. The big stable thing
+goes in front of the thing that ticks — `promptOrder: -50`, before the persona. And the
+block itself contains nothing volatile; `build()` refuses a header carrying a date or a
+clock at build time.
+
+**Never half a map.** Over the soft budget, the whole map is still emitted and the
+warning goes in the JSON, never in the text — a banner inside the block is volatile
+content and costs the prefix. Over the hard ceiling, the block becomes a stub with no
+index lines at all. Truncating to fit would be the worst possible artifact: it looks
+complete, and every memory below the cut appears not to exist.
+
+**And two bugs inherited from the first implementation**, both of which failed silently
+and are now impossible by construction:
+
+- *The loom read its own output.* It preferred the woven file as its source when one
+  existed, so it re-wove its own cloth and could never see a new memory. On the live
+  store, 41 of 129 memories — doctrine included — had been missing from a healthy-looking
+  cloth for 11 days. The source is now always the canonical index, and a loom pointed at
+  it as an output refuses to construct.
+- *The cloth lived in the store.* Written beside the memories, it was picked up as one.
+  It belongs in `_still/`, the workshop, which is never walked.
+
+The postcondition that makes this class of bug unshippable: **the cloth must name
+exactly the same memories, in the same order, as the index it came from.** Checked on
+every weave, raising if not. Compression may shorten a description; it may never lose,
+reorder or invent a link.
+
+---
+
 ## 7. Several kura, one server
 
 A single memory serving both "help me build this" and "help me think this through"
@@ -190,3 +252,6 @@ carry a pointer (`persona = "..."`, readable at `GET /profile`) and nothing more
   breadth-first, with no ontology and no inference.
 - **Not an archive.** The archive is the journal. This holds what was distilled *out* of
   it — which is why TOSS is a good outcome and growth is not a metric.
+- **Not a context-stuffer.** The resident map is the *index*, never the bodies. The
+  point of distilling is that the map stays small enough to carry; a design that pastes
+  memories into every prompt has given up on that and will hit the window instead.

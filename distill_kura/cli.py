@@ -4,7 +4,9 @@
     kura stores                       what exists, which mode maps where
     kura recall "question" [-s eq]    recall by hand
     kura remember slug "desc" [-]     write one fact (body on stdin with `-`)
-    kura doctor [-s eq]               health of a store, or all of them
+    kura doctor [-s eq]               health of a store (--all for every one)
+    kura weave [-s eq] [--status]     re-weave the resident index (three-layer cloth)
+    kura prefill [-s eq]              print the standing block a host should inject
     kura init <name> --path DIR       create a store and print the TOML to paste
     kura distill run [-s eq]          one pass: drink → spot → gate → write drafts
     kura distill drafts|drain|tidy    inspect / pour / repair the index
@@ -70,6 +72,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("doctor", help="health check")
     p.add_argument("--all", action="store_true", help="every store, not just one")
 
+    p = sub.add_parser("weave", help="re-weave the resident index")
+    p.add_argument("--status", action="store_true", help="report layers and size, weave nothing")
+    p.add_argument("--fresh-days", type=float)
+    p.add_argument("--trigger-tokens", type=int)
+    p.add_argument("--no-model", action="store_true", help="trim mechanically, call no model")
+
+    p = sub.add_parser("prefill", help="print the standing index block")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("init", help="create a new store")
     p.add_argument("name")
     p.add_argument("--path", required=True)
@@ -118,6 +129,57 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     store = _store(reg, a.store)
+
+    if a.cmd in ("weave", "prefill"):
+        from . import prefill as prefill_mod
+        cfg = dict(reg.prefill_cfg_for(store))
+        if getattr(a, "fresh_days", None) is not None:
+            cfg["fresh_days"] = a.fresh_days
+        if getattr(a, "trigger_tokens", None) is not None:
+            cfg["trigger_tokens"] = a.trigger_tokens
+        scribe = None if (a.cmd == "prefill" or a.no_model) else reg.models.scribe
+        loom = prefill_mod.loom_for(store, cfg, scribe=scribe)
+
+        if a.cmd == "prefill":
+            pf = prefill_mod.build(store, loom, header=cfg.get("header"),
+                                   window_tokens=int(cfg.get("window_tokens", 131072)),
+                                   fraction=float(cfg.get("budget_fraction", 0.05)),
+                                   hard_fraction=float(cfg.get("hard_fraction", 0.20)))
+            if a.json:
+                print(json.dumps(pf.as_dict(), ensure_ascii=False))
+            else:
+                print(pf.text, end="")
+            # 2 = the block is not what it should be (no cloth, or stale): the caller
+            # still gets usable text, but a hook can notice and re-weave.
+            return 2 if pf.stats.get("stale") or pf.stats.get("note") else 0
+
+        if a.status:
+            st = loom.weave(generate=False).stats
+            print(json.dumps(st, ensure_ascii=False, indent=1))
+            return 0
+        from .weave import WeaveError
+        try:
+            cloth = loom.fit(window_tokens=int(cfg.get("window_tokens", 131072)),
+                             fraction=float(cfg.get("budget_fraction", 0.05)))
+        except WeaveError as e:
+            sys.exit(f"weave refused to write: {e}")
+        # `fit` already wove with the model; persist exactly that text.
+        stats = loom.persist(cloth)
+        print(json.dumps(stats, ensure_ascii=False))
+        if stats.get("over_budget"):
+            w = stats.get("weight", {})
+            print(f"⚠ the index is {stats['tokens_est']} tokens, over the "
+                  f"{stats['budget_tokens']}-token budget "
+                  f"({100 * stats['fraction_used']:.2f}% of the window). Nothing was "
+                  f"dropped, and the vivid layer was kept because no setting reaches the "
+                  f"budget anyway (fresh_days={stats['fresh_days_used']}).\n"
+                  f"  weight: {w.get('grouped_lines', 0)} grouped lines (never trimmed — "
+                  f"they name several memories each), {w.get('pinned_lines', 0)} pinned, "
+                  f"{w.get('trigger_lines', 0)} trimmed, {w.get('header_lines', 0)} headers.\n"
+                  f"  dials: lower trigger_tokens, shrink pinned_types, split the store, "
+                  f"or raise budget_fraction if the window can afford it.",
+                  file=sys.stderr)
+        return 0
 
     if a.cmd == "recall":
         d = do_recall(store, reg.models.thinker, a.question, a.hops, a.top)

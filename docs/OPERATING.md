@@ -39,12 +39,54 @@ Restart=on-failure
 `night` only runs a pass once the journals have been quiet for `--idle-min`, so it stays
 out of the way of live work.
 
+## Keeping the resident map current
+
+The map the agent wears is only as good as its last weave.
+
+```ini
+# ~/.config/systemd/user/kura-weave.service   (+ a .timer, or a cron line)
+[Service]
+Type=oneshot
+Environment=KURA_CONFIG=%h/kura/kura.toml
+ExecStart=/usr/bin/python3 -m distill_kura.cli weave
+```
+
+Weave after the distiller pours, and once more in the morning:
+
+```bash
+kura distill drain && kura weave
+```
+
+A weave in the steady state costs nothing: trigger lines are cached in a ledger keyed on
+the description *and* the budget, so only genuinely changed lines reach a model, and an
+unchanged cloth is not rewritten at all (`written: false`). Re-weaving on a tight timer
+is still pointless — the index changes a few times a day, not a few times a minute.
+
+**What to watch:**
+
+| signal | meaning |
+|---|---|
+| `kura prefill` exits 2 | no cloth yet, or the cloth is stale — the full index is being served instead |
+| `over_budget: true` | the map costs more than `budget_fraction`. Nothing was dropped |
+| `budget_met: false` | no setting reaches the budget; the vivid layer was kept deliberately |
+| `over_ceiling: true` | the map is not being shown at all — a stub went out instead. Act on this |
+| `hooks_mechanical` high | the scribe is failing the quality bar, or is unreachable |
+| `grouped` large | many lines name several memories each; those are never trimmed |
+
+If the map will not fit: lower `trigger_tokens`, narrow `pinned_types`, shorten
+`fresh_days`, raise `budget_fraction` if the window can afford it — or split the store,
+which is the honest answer past a few hundred memories.
+
+**Never** hand-edit the woven cloth. It is derived; the next weave overwrites it. Edit
+the canonical `MEMORY.md`, or the memory itself, and re-weave.
+
 ## Scheduling by hand, and exit codes
 
 ```bash
 kura distill run    # 0 = did work, 2 = nothing worth drinking
 kura distill drain  # 0 = poured or tossed something, 2 = no drafts
 kura distill tidy   # 0 = repaired a line, 2 = index is clean
+kura prefill        # 0 = a current cloth was served, 2 = no cloth or it is stale
 ```
 
 **Exit 2 means "there was nothing to do".** A scheduler must distinguish it from

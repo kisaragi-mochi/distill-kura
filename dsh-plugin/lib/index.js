@@ -30,11 +30,34 @@
  *
  * Optional parameters must NOT carry `required: false` — the schema compiler rejects
  * it ("required must be true when present"). Omit the key instead.
+ *
+ * ── the resident map ────────────────────────────────────────────────────────────
+ * Tools answer "what do you know about X?" only once the agent has decided to ask. This
+ * plugin also registers a system-prompt SECTION holding the whole index, so the agent
+ * can see what is known without asking — and, more importantly, can see what is *not*.
+ *
+ * Two hard constraints from the harness, both verified in its own .d.ts:
+ *
+ *   1. `section({ text })` may be a function, but it is **synchronous**
+ *      (`text: string | ((context) => string)`), and it is called on every prompt
+ *      assembly — that is, every model STEP, not every turn. Returning a Promise puts
+ *      "[object Promise]" in the prompt. So the map is fetched in the BACKGROUND and the
+ *      provider hands back whatever is cached, instantly.
+ *
+ *   2. Sections concatenate in ascending `order`; -100 is the harness identity, 0 the
+ *      persona, 100-199 tool guidance. We default to **-50: before the persona**, and
+ *      that is a cache decision, not an aesthetic one. A prefix cache is lost from the
+ *      first changed byte onward. The persona commonly embeds a clock (`{{now}}` via
+ *      dsh-now), so it changes every minute; anything after it is re-priced every
+ *      minute too. The map is the largest block in the prompt and changes a few times a
+ *      day, so it belongs in front of the thing that ticks.
+ *      If nothing volatile precedes the tool sections in your deployment, a late order
+ *      (200) is cheaper when the map itself changes. Set `promptOrder` and know why.
  */
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
 const name = "distill-kura";
-const inject = ["tools"];
+const inject = ["tools", "systemPrompt"];
 
 /** Config: `{ url, store, label, readonly, allowSwitch, timeoutMs }` — all optional. */
 const Config = undefined;
@@ -46,6 +69,9 @@ const DEFAULTS = {
   readonly: true,      // writing belongs to the distiller's evidence gate
   allowSwitch: true,   // offer kura_use so one agent can move between kura at runtime
   timeoutMs: 120_000,
+  prefill: true,       // keep the index resident in the system prompt
+  promptOrder: -50,    // before the persona — see the header note on prefix caches
+  refreshMs: 120_000,  // how often the background refresh re-reads the map
 };
 
 const TEXT = {
@@ -72,6 +98,16 @@ function settle(config) {
   }
   if (!Number.isFinite(c.timeoutMs) || c.timeoutMs <= 0) {
     throw new Error(`distill-kura: timeoutMs must be a positive number, got ${JSON.stringify(c.timeoutMs)}`);
+  }
+  if (typeof c.prefill !== "boolean") {
+    throw new Error(`distill-kura: prefill must be a boolean, got ${JSON.stringify(c.prefill)}`);
+  }
+  if (!Number.isFinite(c.promptOrder)) {
+    throw new Error(`distill-kura: promptOrder must be a number, got ${JSON.stringify(c.promptOrder)}`);
+  }
+  if (!Number.isFinite(c.refreshMs) || c.refreshMs < 5_000) {
+    // Below a few seconds this hammers the kura for a map that changes a few times a day.
+    throw new Error(`distill-kura: refreshMs must be a number >= 5000, got ${JSON.stringify(c.refreshMs)}`);
   }
   c.url = c.url.replace(/\/+$/, "");
   return c;
@@ -106,6 +142,49 @@ async function call(cfg, method, path, body, signal) {
 
 const q = (store) => (store ? `?store=${encodeURIComponent(store)}` : "");
 const head = (store, extra) => `[kura: ${store || "default"}${extra ? " " + extra : ""}]`;
+
+/**
+ * The resident map, kept warm out of band.
+ *
+ * The prompt provider is synchronous and runs on every step, so it must never wait on
+ * the network — it reads `state.map.text` and returns. This object is the only thing
+ * standing between "the map is a little stale" and "the agent stalls on every token".
+ *
+ * When the kura is unreachable we serve an explicit note, never an empty string. An
+ * agent handed nothing concludes that nothing is remembered, which is a stronger and
+ * more damaging claim than "the memory is down".
+ */
+function mapCache(cfg, state) {
+  const missing = () =>
+    `<<<KURA-MAP store=${state.current || "default"}>>>\n` +
+    `${cfg.label} keeps a long-term memory, but its index could not be read just now.\n` +
+    `The map is MISSING, not empty — do not conclude that nothing is remembered.\n` +
+    `Use kura_recall; if it also fails, say the memory is unavailable.\n` +
+    `<<<END KURA-MAP>>>\n`;
+
+  return {
+    text: () => (state.map.ok ? state.map.text : missing()),
+    async refresh() {
+      const target = state.bound ? cfg.store : state.current;
+      try {
+        const d = await call(cfg, "GET", "/prefill" + q(target));
+        // Only swap when the content actually differs: replacing the string with an
+        // identical one is free, but replacing it with a *re-ordered* one is not, and
+        // this makes the etag the single source of truth for "did the map change".
+        if (d.etag !== state.map.etag) {
+          state.map = { ok: true, text: d.text, etag: d.etag, at: Date.now(), stats: d };
+        } else {
+          state.map.at = Date.now();
+        }
+        return true;
+      } catch (err) {
+        state.map.ok = state.map.ok && Date.now() - state.map.at < cfg.refreshMs * 5;
+        state.map.error = String(err && err.message ? err.message : err);
+        return false;
+      }
+    },
+  };
+}
 
 function tools(cfg, state) {
   const target = (store) => (state.bound ? cfg.store : store || state.current);
@@ -205,6 +284,28 @@ function tools(cfg, state) {
     }),
   ];
 
+  if (cfg.prefill) {
+    list.push(defineTool({
+      name: "kura_map",
+      description:
+        `Show the whole index of ${cfg.label} — every memory's one-line trigger, in one ` +
+        `answer. Use it when you need to see WHAT EXISTS rather than look something up: ` +
+        `before saying a thing was never discussed, when choosing which memory to open, ` +
+        `or right after switching kura. The map is normally already in your context; ` +
+        `call this if it is missing or you suspect it is out of date.`,
+      parameters: {
+        store: { type: "string", description: "Which kura. Omit for the current one." },
+      },
+      output: TEXT,
+      isConcurrencySafe: () => true,
+      async execute(args, exec) {
+        const to = target(args.store);
+        const d = await call(cfg, "GET", "/prefill" + q(to), undefined, exec?.signal);
+        return d.text;
+      },
+    }));
+  }
+
   if (cfg.allowSwitch && !state.bound) {
     list.push(defineTool({
       name: "kura_use",
@@ -224,6 +325,10 @@ function tools(cfg, state) {
           return `No kura called '${args.store}'. Known: ${JSON.stringify([...known])}`;
         }
         state.current = args.store;
+        // Swap the resident map too. Switching memory while still wearing the previous
+        // kura's index is the worst of both: the agent reads one household's map and
+        // recalls from another's.
+        if (state.cache) await state.cache.refresh();
         return `${head(state.current)} Now recalling from '${args.store}'. ` +
           `(Memory only — the persona belongs to the preset.)`;
       },
@@ -277,13 +382,36 @@ function readonlyGuard(cfg) {
 function apply(ctx, config) {
   const cfg = settle(config);
   // Bound = pinned to one kura for this agent: the preset IS the mode switch.
-  const state = { current: cfg.store, bound: cfg.store !== "" && cfg.allowSwitch === false };
+  const state = {
+    current: cfg.store,
+    bound: cfg.store !== "" && cfg.allowSwitch === false,
+    map: { ok: false, text: "", etag: "", at: 0 },
+  };
+  const cache = mapCache(cfg, state);
+  state.cache = cache;
 
   for (const tool of tools(cfg, state)) {
     ctx.effect(() => ctx.tools.register(tool), `distill-kura.${tool.name}`);
   }
   if (cfg.readonly) {
     ctx.effect(() => ctx.tools.guard(readonlyGuard(cfg)), "distill-kura.readonly-guard");
+  }
+
+  if (cfg.prefill) {
+    // Synchronous by contract: hand back the cached string, never a Promise.
+    ctx.effect(
+      () =>
+        ctx.systemPrompt.section({
+          name: "distill-kura:map",
+          order: cfg.promptOrder,
+          text: () => cache.text(),
+        }),
+      "distill-kura.map-section",
+    );
+    cache.refresh();                       // first fill, not awaited
+    const timer = setInterval(() => { cache.refresh(); }, cfg.refreshMs);
+    if (typeof timer.unref === "function") timer.unref();
+    ctx.effect(() => () => clearInterval(timer), "distill-kura.map-refresh");
   }
 }
 

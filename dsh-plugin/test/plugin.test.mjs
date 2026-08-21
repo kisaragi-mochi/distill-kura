@@ -30,6 +30,12 @@ function fakeKura() {
                                elapsed_s: 0.1, context: "recalled text" }));
     } else if (req.url.startsWith("/memory/")) {
       res.end(JSON.stringify({ text: "a whole memory" }));
+    } else if (req.url.startsWith("/prefill")) {
+      const store = new URL(req.url, "http://x").searchParams.get("store") || "maker";
+      res.end(JSON.stringify({
+        text: `<<<KURA-MAP store=${store}>>>\n- [A](a.md) — trigger for ${store}\n<<<END KURA-MAP>>>\n`,
+        etag: `etag-${store}`, tokens_est: 20, store,
+      }));
     } else if (req.url.startsWith("/remember")) {
       res.end(JSON.stringify({ ok: true, slug: "x" }));
     } else {
@@ -45,14 +51,32 @@ function fakeCtx() {
   const tools = new Map();
   const guards = [];
   const disposers = [];
+  const sections = new Map();
   return {
-    registered: tools, guards, disposers,
+    registered: tools, guards, disposers, sections,
     effect(fn, label) { disposers.push({ label, dispose: fn() }); },
     tools: {
       register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name); },
       guard(g) { guards.push(g); return () => guards.splice(guards.indexOf(g), 1); },
     },
+    systemPrompt: {
+      section(sec) {
+        if (sections.has(sec.name)) throw new Error(`duplicate section ${sec.name}`);
+        sections.set(sec.name, sec);
+        return () => sections.delete(sec.name);
+      },
+    },
   };
+}
+
+/** Wait until `check()` is true, or fail — the map is filled by a background fetch. */
+async function until(check, ms = 3000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    if (check()) return true;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  throw new Error("timed out waiting for the background refresh");
 }
 
 test("a bad url dies at load, naming the value", () => {
@@ -69,10 +93,13 @@ test("every registration is reversible", async () => {
     const ctx = fakeCtx();
     apply(ctx, { url });
     assert.ok(ctx.registered.size >= 4);
-    assert.equal(ctx.disposers.length, ctx.registered.size + ctx.guards.length);
+    // Every registration — tools, the guard, the prompt section and the refresh timer —
+    // must come back through ctx.effect, so unloading leaves nothing behind.
+    assert.ok(ctx.disposers.length >= ctx.registered.size + ctx.guards.length + ctx.sections.size);
     for (const d of ctx.disposers) d.dispose();
     assert.equal(ctx.registered.size, 0);
     assert.equal(ctx.guards.length, 0);
+    assert.equal(ctx.sections.size, 0);
   } finally { srv.close(); }
 });
 
@@ -159,4 +186,111 @@ test("an unreachable kura throws a legible error, not a hang", async () => {
   const ctx = fakeCtx();
   apply(ctx, { url: "http://127.0.0.1:1", timeoutMs: 1500 });
   await assert.rejects(() => ctx.registered.get("kura_doctor").execute({}, {}));
+});
+
+
+// ── the resident map ────────────────────────────────────────────────────────
+
+test("the map is registered as a prompt section, before the persona", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url });
+    const sec = ctx.sections.get("distill-kura:map");
+    assert.ok(sec, "no prompt section registered");
+    // A prefix cache dies from the first changed byte onward. The persona (order 0)
+    // commonly carries a clock, so the biggest stable block must sit in front of it.
+    assert.ok(sec.order < 0, `expected an order before the persona, got ${sec.order}`);
+    assert.equal(typeof sec.text, "function");
+  } finally { srv.close(); }
+});
+
+test("the section provider is synchronous and never returns a Promise", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url });
+    const out = ctx.sections.get("distill-kura:map").text({});
+    assert.equal(typeof out, "string");            // a Promise here renders as [object Promise]
+    assert.ok(!(out instanceof Promise));
+  } finally { srv.close(); }
+});
+
+test("before the first fetch lands, the map says it is missing — never blank", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url });
+    const out = ctx.sections.get("distill-kura:map").text({});
+    assert.match(out, /MISSING, not empty/);
+    assert.ok(out.trim().length > 0);
+  } finally { srv.close(); }
+});
+
+test("the background refresh fills the map, and repeated reads are byte-identical", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url });
+    const sec = ctx.sections.get("distill-kura:map");
+    await until(() => sec.text({}).includes("trigger for"));
+    assert.equal(sec.text({}), sec.text({}));      // stable across steps
+    assert.match(sec.text({}), /trigger for maker/);
+  } finally { srv.close(); }
+});
+
+test("an unreachable kura degrades to the honest note, not to silence", async () => {
+  const ctx = fakeCtx();
+  apply(ctx, { url: "http://127.0.0.1:1", timeoutMs: 1000 });
+  const out = ctx.sections.get("distill-kura:map").text({});
+  assert.match(out, /could not be read|MISSING/);
+});
+
+test("switching kura swaps the resident map too", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url });
+    const sec = ctx.sections.get("distill-kura:map");
+    await until(() => sec.text({}).includes("trigger for maker"));
+    await ctx.registered.get("kura_use").execute({ store: "talking" }, {});
+    // Reading one household's map while recalling from another's is the worst of both.
+    assert.match(sec.text({}), /store=talking/);
+  } finally { srv.close(); }
+});
+
+test("prefill can be turned off, and then nothing is registered", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url, prefill: false });
+    assert.equal(ctx.sections.size, 0);
+    assert.equal(ctx.registered.has("kura_map"), false);
+  } finally { srv.close(); }
+});
+
+test("kura_map serves the whole map on demand, for hosts that cannot inject", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url, store: "eq", allowSwitch: false });
+    const out = await ctx.registered.get("kura_map").execute({}, {});
+    assert.match(out, /store=eq/);
+  } finally { srv.close(); }
+});
+
+test("a refresh interval below five seconds is refused at load", () => {
+  assert.throws(() => apply(fakeCtx(), { refreshMs: 100 }), /refreshMs must be a number >= 5000/);
+});
+
+test("the map section and its timer are both disposable", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url });
+    assert.equal(ctx.sections.size, 1);
+    for (const d of ctx.disposers) d.dispose();
+    assert.equal(ctx.sections.size, 0);
+    assert.equal(ctx.registered.size, 0);
+  } finally { srv.close(); }
 });

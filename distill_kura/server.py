@@ -8,6 +8,7 @@ as you configure and a client can switch modes per request:
     GET  /index             ?store=maker
     GET  /doctor            ?store=maker          (?all=1 → every store at once)
     GET  /memory/<slug>     ?store=maker
+    GET  /prefill           ?store=eq[&format=text] the resident index block, ready to paste
     GET  /profile           ?store=eq             the store's charter + persona pointer
     GET  /stores            what exists, which mode maps where, which models
     GET  /health
@@ -25,6 +26,7 @@ import re
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import prefill as prefill_mod
 from .recall import recall
 from .registry import Registry
 
@@ -88,6 +90,25 @@ def _make_handler(reg: Registry):
             st, err = self._store(sel)
             if err:
                 return self._send(404, err)
+            if path.startswith("/prefill"):
+                cfg = reg.prefill_cfg_for(st)
+                loom = prefill_mod.loom_for(st, cfg)
+                pf = prefill_mod.build(
+                    st, loom,
+                    header=cfg.get("header"),
+                    window_tokens=int(q.get("window") or cfg.get("window_tokens", 131072)),
+                    fraction=float(q.get("fraction") or cfg.get("budget_fraction", 0.05)),
+                    hard_fraction=float(cfg.get("hard_fraction", 0.20)))
+                if q.get("format") == "text":
+                    # For a shell hook or a `$(...)`: the block and nothing else.
+                    b = pf.text.encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", str(len(b)))
+                    self.send_header("ETag", f'"{pf.etag}"')
+                    self.end_headers()
+                    return self.wfile.write(b)
+                return self._send(200, pf.as_dict())
             if path.startswith("/index"):
                 t = st.index_text()
                 return self._send(200, {"store": st.name, "index": t, "tokens_est": len(t) // 2})

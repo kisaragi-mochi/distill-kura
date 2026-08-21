@@ -138,6 +138,34 @@ class Store:
             return ""
         return open(self.file_of(s), encoding="utf-8", errors="ignore").read()
 
+    def frontmatter(self, slug: str) -> dict:
+        """The leading `---` block, flattened. `type` is lifted out of `metadata:` when
+        it is nested there, because that is where the writer puts it and every caller
+        wants it at the top level. Not a YAML parser — a memory's frontmatter is four
+        or five plain `key: value` lines by construction, and pulling in a parser for
+        that would add a dependency to a project that has none."""
+        text = self.read(slug)
+        if not text.startswith("---"):
+            return {}
+        end = text.find("\n---", 3)
+        if end == -1:
+            return {}
+        out: dict[str, str] = {}
+        for line in text[3:end].splitlines():
+            m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$", line)
+            if m and m.group(2).strip():
+                out.setdefault(m.group(1), m.group(2).strip().strip("\"'"))
+        return out
+
+    def mtime(self, slug: str) -> float:
+        s = self.resolve(slug)
+        if not s:
+            return 0.0
+        try:
+            return os.path.getmtime(self.file_of(s))
+        except OSError:
+            return 0.0
+
     @staticmethod
     def links_of(text: str) -> list[str]:
         """[[name]] links. Only slug-shaped ones (no spaces / sentence punctuation)."""
