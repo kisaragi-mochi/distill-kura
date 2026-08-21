@@ -237,8 +237,9 @@ store. Bind them and one preset change moves the whole self:
   config:
     url: http://127.0.0.1:8085
     store: eq            # this preset's memory
-    readonly: true       # writing goes through the distiller's gate
-    allowSwitch: false   # bound: the preset IS the mode switch
+    readonly: true       # the CLIENT's own switch: do not even offer a write tool
+    # (the store's own `write_policy` is the authority; this just keeps the tool
+    #  out of the model's hands. Naming a store already binds the preset.)
 ```
 
 Leave `allowSwitch` at its default and the agent also gets `kura_use`, so it can move

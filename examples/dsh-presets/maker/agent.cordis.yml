@@ -25,8 +25,12 @@
     url: http://127.0.0.1:8085
     store: maker
     label: the maker kura
-    readonly: true                  # writing goes through the distiller's gate
-    allowSwitch: false              # bound: this preset IS the mode
+    # The CLIENT's own switch: with it on, no write tool is offered to the model at
+    # all. The store's `write_policy` on the server is the authority — set that to
+    # "distiller-only" so a process that bypasses this plugin is refused too.
+    readonly: true
+    # Naming a store already binds the agent; this line only makes it explicit.
+    allowSwitch: false
     prefill: true                   # keep the index resident in the system prompt
     promptOrder: -50                # BEFORE the persona: the persona carries a clock,
                                     # and a prefix cache dies from the first changed

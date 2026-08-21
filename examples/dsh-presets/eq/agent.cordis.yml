@@ -22,7 +22,7 @@
     url: http://127.0.0.1:8085
     store: eq
     label: the EQ kura
-    readonly: true
-    allowSwitch: false
+    readonly: true        # client-side: no write tool. Authority is the store's write_policy
+    allowSwitch: false    # naming a store already binds; this is just explicit
     prefill: true
     promptOrder: -50

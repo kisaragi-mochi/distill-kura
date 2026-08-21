@@ -164,9 +164,11 @@ Everything is store-selectable, so one process is normally right. Watch two thin
 - **Watermarks are per store.** Distilling the same journal into two stores is allowed
   and each keeps its own position — useful when a conversation is relevant to both, but
   it doubles model cost, so bind journals per store when you can.
-- **`readonly = true`** on a store means tools cannot write to it at all; the distiller's
-  `pour` path is the only way in. That is the recommended setting for anything an agent
-  reads from constantly.
+- **`write_policy = "distiller-only"`** on a store refuses direct writes (a tool call,
+  the CLI, `POST /remember`) while still accepting the distiller's verified pour. That is
+  the recommended setting for anything an agent reads from constantly: every memory then
+  has to pass the evidence gate. `frozen` refuses the pour too. The deprecated
+  `readonly = true` maps to `distiller-only`. See `docs/TRUST.md`.
 
 ## Adding a journal format
 
