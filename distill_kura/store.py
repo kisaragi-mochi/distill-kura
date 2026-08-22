@@ -133,7 +133,8 @@ class Store:
                  if os.path.basename(p) not in RESERVED and not os.path.basename(p).startswith("_")]
         found += [("_study/" + os.path.basename(p)[:-3], p)
                   for p in glob.glob(os.path.join(self.path, "_study", "*.md"))
-                  if not os.path.basename(p).startswith("_")]
+                  if not os.path.basename(p).startswith("_")
+                  and os.path.basename(p) not in RESERVED]
         return sorted(name for name, p in found if contained(self.path, p))
 
     def hardlinked(self) -> list[str]:
@@ -170,7 +171,8 @@ class Store:
                  if os.path.basename(p) not in RESERVED and not os.path.basename(p).startswith("_")]
         found += [("_study/" + os.path.basename(p)[:-3], p)
                   for p in glob.glob(os.path.join(self.path, "_study", "*.md"))
-                  if not os.path.basename(p).startswith("_")]
+                  if not os.path.basename(p).startswith("_")
+                  and os.path.basename(p) not in RESERVED]
         return sorted(name for name, p in found if not contained(self.path, p))
 
     @staticmethod

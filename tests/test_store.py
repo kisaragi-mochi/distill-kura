@@ -168,3 +168,10 @@ def test_the_charter_is_not_a_memory(tmp_path):
     assert s.slugs() == ["real"]
     assert s.doctor()["not_in_index"] == []
     assert not s.remember("charter", "d", "b")["ok"]       # cannot be created as one either
+    # ...and the same reserved names inside _study/, where a README explaining the
+    # shelf is the most natural file to leave.
+    os.makedirs(os.path.join(s.path, "_study"), exist_ok=True)
+    with open(os.path.join(s.path, "_study", "README.md"), "w", encoding="utf-8") as f:
+        f.write("what this shelf is for\n")
+    s._slugs_cache = None
+    assert s.slugs() == ["real"]
