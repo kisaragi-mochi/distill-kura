@@ -178,11 +178,18 @@ function mapCache(cfg, state) {
     // previous kura's index in the prompt while recall went to the new one: the agent
     // read one household's map and answered from another's, and the staleness grace
     // period kept it there for minutes.
-    text: () => (state.map.ok && state.map.store === (state.bound ? cfg.store : state.current)
-                 ? state.map.text : missing()),
+    // A map is "for" a store under two names: the one we asked for (`store`, which may
+    // be "" meaning the server's default) and the one the server said it answered for
+    // (`served`). Treating those as different made a map fetched for the default store
+    // a stranger to the same store named explicitly, so `kura_use("maker")` on a
+    // default-is-maker server threw the map away and transferred it again in full.
+    isFor: (want) => state.map.ok && (state.map.store === want || state.map.served === want),
+    text() {
+      return this.isFor(state.bound ? cfg.store : state.current) ? state.map.text : missing();
+    },
     invalidate(target) {
-      if (state.map.store !== target) {
-        state.map = { ok: false, store: target, text: "", etag: "", at: 0 };
+      if (state.map.store !== target && state.map.served !== target) {
+        state.map = { ok: false, store: target, served: "", text: "", etag: "", at: 0 };
       }
     },
     async refresh() {
@@ -192,7 +199,7 @@ function mapCache(cfg, state) {
         // Conditional: the map is the largest thing we fetch and it changes a few times
         // a day, while this runs every couple of minutes.
         const d = await call(cfg, "GET", "/prefill" + q(target), undefined, undefined,
-          state.map.ok && state.map.store === target && state.map.etag
+          this.isFor(target) && state.map.etag
             ? { "If-None-Match": `"${state.map.etag}"` } : {});
         if (d === UNCHANGED) {
           state.map.at = Date.now();
@@ -209,16 +216,15 @@ function mapCache(cfg, state) {
         // identical one is free, but replacing it with a *re-ordered* one is not, and
         // this makes the etag the single source of truth for "did the map change".
         if (d.etag !== state.map.etag || !state.map.ok) {
-          state.map = { ok: true, store: target, text: d.text, etag: d.etag,
-                        at: Date.now(), stats: d };
+          state.map = { ok: true, store: target, served: d.store || target, text: d.text,
+                        etag: d.etag, at: Date.now(), stats: d };
         } else {
           state.map.at = Date.now();
         }
         return true;
       } catch (err) {
         // A staleness grace period is only ever granted to the store the map is FOR.
-        state.map.ok = state.map.ok && state.map.store === target
-          && Date.now() - state.map.at < cfg.refreshMs * 5;
+        state.map.ok = this.isFor(target) && Date.now() - state.map.at < cfg.refreshMs * 5;
         state.map.error = String(err && err.message ? err.message : err);
         return false;
       }
@@ -444,7 +450,7 @@ function apply(ctx, config) {
   const state = {
     current: cfg.store,
     bound: cfg.store !== "" && !cfg.allowSwitch,
-    map: { ok: false, store: cfg.store, text: "", etag: "", at: 0 },
+    map: { ok: false, store: cfg.store, served: "", text: "", etag: "", at: 0 },
   };
   const cache = mapCache(cfg, state);
   state.cache = cache;
@@ -463,7 +469,7 @@ function apply(ctx, config) {
         ctx.systemPrompt.section({
           name: "distill-kura:map",
           order: cfg.promptOrder,
-          text: () => cache.text(),
+          text: () => cache.text(),   // arrow: keeps `this` = cache inside text()
         }),
       "distill-kura.map-section",
     );

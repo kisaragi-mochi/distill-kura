@@ -213,6 +213,8 @@ class Registry:
         if not stores:
             d = os.environ.get("KURA_DIR", os.path.abspath("memory"))
             stores["main"] = Store(name="main", path=d, label=os.environ.get("KURA_LABEL", "kura"))
+        _check_table("distill", raw.get("distill") or {}, _DISTILL_TYPES)
+        _check_table("prefill", raw.get("prefill") or {}, _PREFILL_TYPES)
         srv = raw.get("server") or {}
         default = srv.get("default") or next(iter(stores))
         if default not in stores:

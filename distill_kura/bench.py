@@ -123,6 +123,7 @@ def compress(reg: Registry, store: Store, tokenizer_command: str | None = None,
     dis = Distiller(reg, store)
     metrics_path = os.path.join(store.still, "metrics.jsonl")
     raw_tokens = batches = 0
+    recorded_keys: set[str] = set()
     if os.path.exists(metrics_path):
         for line in open(metrics_path, encoding="utf-8", errors="ignore"):
             try:
@@ -132,9 +133,32 @@ def compress(reg: Registry, store: Store, tokenizer_command: str | None = None,
             if session and session not in str(row.get("source_key", "")):
                 continue
             raw_tokens += int(row.get("raw_tokens_est") or 0)
+            recorded_keys.add(str(row.get("source_key", "")))
             batches += 1
 
     st = store_tokens(store, count)
+    # The numerator must be ONLY what came out of the recorded batches. Dividing the
+    # whole store by the raw material of a few batches gave 6.3 on a store that predated
+    # its metrics — a number in the wrong direction by an order of magnitude. A memory
+    # is attributed to a batch through its evidence manifest, which names the source.
+    scoped_bodies = []
+    unattributed = 0
+    ev_dir = os.path.join(store.path, "_evidence")
+    for slug in store.slugs():
+        ref = store.frontmatter(slug).get("evidence_manifest", "")
+        digest = ref.split("sha256:", 1)[1] if "sha256:" in ref else ""
+        mpath = os.path.join(ev_dir, f"{digest}.json") if digest else ""
+        if not (mpath and os.path.exists(mpath)):
+            unattributed += 1
+            continue
+        try:
+            src_key = json.load(open(mpath, encoding="utf-8")).get("source_key", "")
+        except (OSError, ValueError):
+            unattributed += 1
+            continue
+        if src_key in recorded_keys:
+            scoped_bodies.append(store.read_exact(slug))
+    scoped_tokens = count("\n".join(scoped_bodies)) if scoped_bodies else 0
     cloth = None
     from .prefill import loom_for
     loom = loom_for(store, reg.prefill_cfg_for(store))
@@ -145,18 +169,32 @@ def compress(reg: Registry, store: Store, tokenizer_command: str | None = None,
     out = {
         "store": store.name,
         "counted_by": how,
+        # The raw side is always the distiller's own estimate at drink time: the journal
+        # is not re-read here. An exact tokenizer therefore counts the canonical side
+        # exactly and divides it by an estimate. Say so, rather than print a ratio that
+        # looks more precise than its worse half.
+        "raw_counted_by": "estimated (at drink time)",
         "batches_recorded": batches,
         "raw_tokens_consumed": raw_tokens or None,
-        "canonical_tokens": st["body_tokens"] + st["index_tokens"],
-        "memories": st["memories"],
-        "index_tokens": st["index_tokens"],
+        "memories_from_recorded_batches": len(scoped_bodies),
+        "memories_unattributed": unattributed,
+        "canonical_tokens_from_recorded_batches": scoped_tokens or None,
+        "store_ratio": (round(scoped_tokens / raw_tokens, 4)
+                        if raw_tokens and scoped_bodies else None),
+        "store_ratio_units": ("mixed: canonical exact / raw estimated"
+                              if tokenizer_command else "estimated / estimated"),
+        "whole_store": {"memories": st["memories"],
+                        "body_tokens": st["body_tokens"],
+                        "index_tokens": st["index_tokens"]},
         "map_tokens": cloth,
-        "store_ratio": (round((st["body_tokens"] + st["index_tokens"]) / raw_tokens, 4)
-                        if raw_tokens else None),
         "map_ratio": (round(cloth / st["index_tokens"], 4)
                       if cloth and st["index_tokens"] else None),
         "journals": sorted(dis.journals),
     }
+    if raw_tokens and not scoped_bodies:
+        out["note"] = ("batches were recorded but no memory carries an evidence manifest "
+                       "pointing at them, so store_ratio is undefined. Memories poured "
+                       "before manifests existed cannot be attributed to a batch.")
     if not raw_tokens:
         out["note"] = ("no distiller metrics yet, so store_ratio cannot be computed. "
                        "Run `kura distill run` (metrics land in _still/metrics.jsonl); "

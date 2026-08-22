@@ -409,6 +409,8 @@ test("a server that answers for the wrong store is not believed", async () => {
 });
 
 test("the map is re-fetched conditionally, and 304 keeps it", async () => {
+  // An honest version of this test: the first attempt asserted on kura_map (an explicit
+  // read that always fetches) and never touched the conditional path at all.
   let full = 0, conditional = 0;
   const srv = createServer((req, res) => {
     if (req.url.startsWith("/prefill")) {
@@ -425,7 +427,8 @@ test("the map is re-fetched conditionally, and 304 keeps it", async () => {
                                       etag: "e1", store: "maker" }));
     }
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ default: "maker", stores: {}, modes: {} }));
+    res.end(JSON.stringify({ default: "maker",
+                             stores: { maker: { label: "m", memories: 1 } }, modes: {} }));
   });
   await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
   try {
@@ -433,13 +436,12 @@ test("the map is re-fetched conditionally, and 304 keeps it", async () => {
     apply(ctx, { url: `http://127.0.0.1:${srv.address().port}` });
     const sec = ctx.sections.get("distill-kura:map");
     await until(() => sec.text({}).includes("the map"));
-    // A second refresh must not transfer the map again.
-    const cache = ctx.disposers.length ? null : null;
-    await new Promise((r) => setTimeout(r, 20));
-    const before = full;
-    // Force one more refresh through the public path.
-    await ctx.registered.get("kura_map").execute({}, {});
-    assert.equal(full, before + 1, "kura_map is an explicit read, it may fetch");
-    assert.ok(sec.text({}).includes("the map"));
+    assert.equal(full, 1);
+    // kura_use to the SAME store goes through cache.refresh() without invalidating, so
+    // the request carries If-None-Match and the server answers 304.
+    await ctx.registered.get("kura_use").execute({ store: "maker" }, {});
+    assert.equal(conditional, 1, "the refresh was not conditional");
+    assert.equal(full, 1, "the map was transferred again despite being unchanged");
+    assert.ok(sec.text({}).includes("the map"), "a 304 must keep the map, not blank it");
   } finally { srv.close(); }
 });

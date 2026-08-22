@@ -300,6 +300,7 @@ class Store:
             m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$", line)
             if m and m.group(2).strip():
                 out.setdefault(m.group(1), m.group(2).strip().strip("\"'"))
+        out.pop("metadata", None)          # the container line, not a value
         return out
 
     def mtime(self, slug: str) -> float:
@@ -430,10 +431,19 @@ class Store:
         with self._locked():
             path = self.file_of(slug)
             existed = os.path.exists(path)
+            # Rewriting an existing memory used to regenerate its frontmatter from the
+            # template, silently dropping every metadata key the template did not know
+            # (a session id, a node type, a modified stamp written by another tool).
+            # Keep what was there; the caller's keys override, nothing else is lost.
+            kept: dict[str, str] = {}
+            if existed:
+                kept = {k: v for k, v in self.frontmatter(slug).items()
+                        if k not in ("name", "description", "type")}
+            merged = {**kept, **(meta or {})}
             tmp = path + f".tmp.{os.getpid()}"
             with open(tmp, "w", encoding="utf-8") as f:
                 extra = "".join(f"  {k}: {str(v).replace(chr(10), ' ')}\n"
-                                for k, v in (meta or {}).items())
+                                for k, v in merged.items())
                 f.write(_FRONT.format(slug=slug, desc=description.replace("\n", " "),
                                       type=type_, extra=extra,
                                       body=body.rstrip() + "\n"))

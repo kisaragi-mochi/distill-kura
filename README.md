@@ -428,13 +428,20 @@ memory system is judged by what it declines as much as by what it keeps.
     score 1.0 (10/10)   decision 1/1  number 2/2  negation 1/1  reversal 1/1
                         conditional 1/1  landmine 1/1  returning 1/1  distractor 2/2
 
-That is ten planted facts in a synthetic fixture, not a claim about your corpus. It
-measures whether a fact is *findable*, not whether the answer reads well — judging prose
-needs a model, and then the benchmark stops being reproducible.
+That is ten planted facts in a synthetic fixture, distilled by a local Qwen3.8-27B
+(NVFP4) as brain and scribe with `max_items = 8, coverage_passes = 2`, and scored with
+the same model as thinker. A different model will give a different score: the score
+measures a *pipeline-plus-model*, and the fixture exists so the model is the only thing
+that varies. It measures whether a fact is *findable*, not whether the answer reads
+well — judging prose needs a model, and then the benchmark stops being reproducible.
 
 `kura distill run` writes one line per batch to `_still/metrics.jsonl`, which is where
-both commands get their raw side from. A ratio against journals the store never drank
-would be a number with no meaning, so `bench compress` refuses to compute one.
+the raw side comes from. The canonical side counts **only memories whose evidence
+manifest points at a recorded batch** — dividing a whole store by the raw material of a
+few batches is a number in the wrong direction by an order of magnitude, and the first
+version of this command did exactly that. Memories that predate manifests are reported
+as `unattributed`, not silently included. The raw side is always the distiller's
+estimate at drink time, so with `--tokenizer-command` the ratio is labelled `mixed`.
 
 ## What this runs against
 

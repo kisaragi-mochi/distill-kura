@@ -235,3 +235,72 @@ def test_the_index_is_replaced_atomically(tmp_path):
     s.remember("b", "second", "body")
     assert before in s.index_text()          # append preserved what was there
     assert s.index_text().endswith("\n")     # and left no partial line
+
+
+# ── found by self-review, after the outside reviews ─────────────────────────
+
+def test_rewriting_a_memory_keeps_metadata_it_did_not_write(tmp_path):
+    """Regenerating the frontmatter from the template silently dropped every metadata
+    key the template did not know — a session id, a node type, a stamp written by
+    another tool. On the live store every memory the distiller EXTENDS would have lost
+    its provenance fields."""
+    s = Store(name="s", path=str(tmp_path / "s"))
+    s.init_files()
+    with open(s.file_of("old"), "w", encoding="utf-8") as f:
+        f.write("---\nname: old\ndescription: d\nmetadata:\n  type: feedback\n"
+                "  originSessionId: abc-123\n  node_type: memory\n---\n\nbody\n")
+    with open(s.index_path, "a", encoding="utf-8") as f:
+        f.write("- [old](old.md) — d\n")
+    s.remember_direct("old", "new desc", "new body", type_="feedback")
+    fm = s.frontmatter("old")
+    assert fm["originSessionId"] == "abc-123" and fm["node_type"] == "memory"
+    assert fm["description"] == "new desc"
+    assert s.read_exact("old").count("metadata:") == 1
+
+
+def test_store_ratio_counts_only_what_the_recorded_batches_produced(tmp_path):
+    """Dividing the WHOLE store by the raw material of a few batches gave 6.3 on a store
+    that predated its metrics — wrong by an order of magnitude, in the direction that
+    makes the tool look bad, which is the only reason it was noticed."""
+    import hashlib
+    from distill_kura.bench import compress
+    from distill_kura.registry import Registry
+    from distill_kura.thinker import Models
+    st = Store(name="m", path=str(tmp_path / "m"))
+    st.init_files()
+    for i in range(20):
+        st.remember(f"pre-{i}", "older, from before any metrics", "a body " * 30)
+    os.makedirs(st.still, exist_ok=True)
+    with open(os.path.join(st.still, "metrics.jsonl"), "w", encoding="utf-8") as f:
+        f.write(json.dumps({"source_key": "x", "raw_tokens_est": 500}) + "\n")
+    man = json.dumps({"source_key": "x"})
+    digest = hashlib.sha256(man.encode()).hexdigest()
+    os.makedirs(os.path.join(st.path, "_evidence"), exist_ok=True)
+    with open(os.path.join(st.path, "_evidence", f"{digest}.json"), "w") as f:
+        f.write(man)
+    st.pour_verified("one", "from the recorded batch", "short body",
+                     meta={"evidence_manifest": f"sha256:{digest}"})
+    reg = Registry(stores={"m": st}, modes={}, models=Models.from_config({}), default="m")
+    r = compress(reg, st)
+    assert r["memories_from_recorded_batches"] == 1
+    assert r["memories_unattributed"] == 20
+    assert r["store_ratio"] is not None and r["store_ratio"] < 1.0
+    assert r["store_ratio_units"] == "estimated / estimated"
+    exact = compress(reg, st, tokenizer_command="wc -c")
+    assert exact["store_ratio_units"].startswith("mixed")   # the raw side is never exact
+
+
+def test_the_global_distill_table_is_type_checked_too(tmp_path):
+    """The per-store table was checked; the global one was not, so the same truthy
+    string that was refused under [stores.x.distill] slipped through under [distill]."""
+    from distill_kura.registry import Registry
+    os.makedirs(tmp_path / "s")
+    cfg = tmp_path / "kura.toml"
+    cfg.write_text(f'[stores.s]\npath = "{tmp_path / "s"}"\n'
+                   '[distill]\ninherit_global_journals = "false"\n', encoding="utf-8")
+    try:
+        Registry.load(str(cfg))
+    except ValueError as e:
+        assert "inherit_global_journals must be bool" in str(e)
+    else:
+        raise AssertionError("a truthy string must not pass for a boolean, globally either")
