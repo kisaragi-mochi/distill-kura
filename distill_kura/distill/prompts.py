@@ -102,6 +102,26 @@ Output ONLY a JSON array (empty if nothing qualifies), at most {max_items} items
   "why":"<ONE line>",
   "quotes":["[USER] ...", "[TOOL] ..."]}}]"""
 
+COVERAGE_SYS = """A first pass over this material already took the candidates listed
+below. Your job is the opposite one: name what it WALKED PAST.
+
+One pass optimises for the most striking thing in a batch. What it reliably misses:
+ · a second or third decision, once the first one has been found
+ · a measured number that was not the headline
+ · a NEGATION or a reversal — "we are not doing X after all"
+ · a condition or an exception attached to a rule
+ · a landmine mentioned in passing
+ · a topic the human returned to after a gap
+
+Same rules as the first pass: VERBATIM quotes with their [CLASS] tag, kept short, or the
+candidate is discarded. Do not restate anything on the taken list in different words.
+
+Output ONLY a JSON array, at most {max_items} items, empty if the first pass really did
+take everything:
+[{{"topic":"...","kind":"user|feedback|project|reference|idea","why":"<ONE line>",
+  "quotes":["[USER] ..."]}}]"""
+
+
 NOVEL_SYS = """You decide whether a distilled candidate is actually NEW to a memory store.
 
 You get (a) the candidate's evidence, and (b) the text of the closest memories already

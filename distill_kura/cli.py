@@ -7,6 +7,7 @@
     kura doctor [-s eq]               health of a store (--all for every one)
     kura weave [-s eq] [--status]     re-weave the resident index (three-layer cloth)
     kura prefill [-s eq]              print the standing block a host should inject
+    kura bench compress [-s eq]       what the store cost against the journal it came from
     kura init <name> --path DIR       create a store and print the TOML to paste
     kura distill run [-s eq]          one pass: drink → spot → gate → write drafts
     kura distill drafts|drain|tidy    inspect / pour / repair the index
@@ -81,6 +82,18 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("prefill", help="print the standing index block")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("bench", help="measure, rather than claim")
+    bsub = p.add_subparsers(dest="bcmd")
+    b = bsub.add_parser("compress", help="store_ratio and map_ratio for a store")
+    b.add_argument("--tokenizer-command",
+                   help="a command that reads text on stdin and prints a token count. "
+                        "Without one, figures are labelled `estimated`.")
+    b.add_argument("--session", help="only batches whose source key contains this")
+    b = bsub.add_parser("retention", help="is what mattered still findable?")
+    b.add_argument("--questions", default="bench/fixtures/questions.json")
+    b.add_argument("--hops", type=int, default=1)
+    b.add_argument("--verbose", action="store_true")
+
     p = sub.add_parser("init", help="create a new store")
     p.add_argument("name")
     p.add_argument("--path", required=True)
@@ -129,6 +142,21 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     store = _store(reg, a.store)
+
+    if a.cmd == "bench":
+        from . import bench
+        if a.bcmd == "compress":
+            print(json.dumps(bench.compress(reg, store, a.tokenizer_command, a.session),
+                             ensure_ascii=False, indent=1))
+            return 0
+        if a.bcmd == "retention":
+            r = bench.retention(reg, store, a.questions, hops=a.hops)
+            if not a.verbose:
+                r.pop("rows", None)
+            print(json.dumps(r, ensure_ascii=False, indent=1))
+            # A retention run that scores badly should not look like a passing command.
+            return 0 if r["score"] >= 0.9 else 1
+        sys.exit("kura bench {compress|retention}")
 
     if a.cmd in ("weave", "prefill"):
         from . import prefill as prefill_mod

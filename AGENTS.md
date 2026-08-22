@@ -70,6 +70,7 @@ distill_kura/
   weave.py       the loom: the index compressed into the three-layer resident cloth
   prefill.py     the standing block a host injects. Byte-stable by contract
   tokens.py      per-script token estimation (fitted, not guessed)
+  bench.py       measure instead of claim: store_ratio, map_ratio, retention
   mcp.py         MCP stdio bridge (stdlib only, single file, droppable anywhere)
   cli.py         `kura`
   distill/
@@ -81,7 +82,9 @@ distill_kura/
     pipeline.py  the pass: sip → spot → gate → novelty → compose → stage → drain
 dsh-plugin/      the DeepSeek Harness plugin (JavaScript)
 examples/        a runnable config, two demo stores, DSH preset wiring
-tests/           145 tests, no model needed
+bench/fixtures/  a synthetic corpus with facts planted on purpose, and their questions
+scripts/         the clean-room demo and its scripted model
+tests/           155 tests, no model needed
 ```
 
 ## House style
@@ -149,6 +152,17 @@ empty answer. Do not "clean this up" to one dialect.
   parallel runner starts at the same offset.
 - Anything that bounds coverage (top-N, sampling, a retry cap) must be logged. Silent
   truncation reads as "covered everything".
+
+## Claims
+
+Do not put a performance number in the README that no command produces. Two ratios exist
+and are routinely confused: `store_ratio` (memories vs raw journal) and `map_ratio` (the
+woven map vs the index). Both are properties of the CORPUS — measured with the shipped
+fixtures they come out 0.18 and 1.14 on different material — so a headline figure is
+misleading no matter which one it is.
+
+Anything about how much was *kept* needs `bench retention`, not `bench compress`. A store
+that keeps one memory in a hundred has a wonderful ratio and may be useless.
 
 ## Tests
 

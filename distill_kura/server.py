@@ -100,6 +100,15 @@ def _make_handler(reg: Registry):
                     window_tokens=int(q.get("window") or cfg.get("window_tokens", 131072)),
                     fraction=float(q.get("fraction") or cfg.get("budget_fraction", 0.05)),
                     hard_fraction=float(cfg.get("hard_fraction", 0.20)))
+                # The map is the largest thing this server hands out and it changes a
+                # few times a day, while clients re-read it every couple of minutes.
+                inm = (self.headers.get("If-None-Match") or "").strip('"')
+                if inm and inm == pf.etag:
+                    self.send_response(304)
+                    self.send_header("ETag", f'"{pf.etag}"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if q.get("format") == "text":
                     # For a shell hook or a `$(...)`: the block and nothing else.
                     b = pf.text.encode()
@@ -109,7 +118,13 @@ def _make_handler(reg: Registry):
                     self.send_header("ETag", f'"{pf.etag}"')
                     self.end_headers()
                     return self.wfile.write(b)
-                return self._send(200, pf.as_dict())
+                b = json.dumps(pf.as_dict(), ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(b)))
+                self.send_header("ETag", f'"{pf.etag}"')
+                self.end_headers()
+                return self.wfile.write(b)
             if path.startswith("/index"):
                 t = st.index_text()
                 return self._send(200, {"store": st.name, "index": t,

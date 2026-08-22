@@ -52,7 +52,7 @@ name: {slug}
 description: {desc}
 metadata:
   type: {type}
----
+{extra}---
 
 {body}
 """
@@ -355,7 +355,7 @@ class Store:
 
     def pour_verified(self, slug: str, description: str, body: str,
                       type_: str = "project", hook: str | None = None,
-                      title: str | None = None) -> dict:
+                      title: str | None = None, meta: dict | None = None) -> dict:
         """A write from a draft that passed the gate. Refused only when `frozen`.
 
         A separate method rather than a `verified=True` argument on purpose: the
@@ -363,7 +363,7 @@ class Store:
         by flipping a flag it happens to have in scope."""
         if self.write_policy == FROZEN:
             return {"ok": False, "error": f"store '{self.name}' is frozen: nothing may write"}
-        return self._write(slug, description, body, type_, hook, title)
+        return self._write(slug, description, body, type_, hook, title, meta)
 
     def remember(self, slug: str, description: str, body: str, type_: str = "project",
                  hook: str | None = None, title: str | None = None) -> dict:
@@ -406,7 +406,8 @@ class Store:
         return os.path.realpath(self.path) == self.path
 
     def _write(self, slug: str, description: str, body: str, type_: str = "project",
-               hook: str | None = None, title: str | None = None) -> dict:
+               hook: str | None = None, title: str | None = None,
+               meta: dict | None = None) -> dict:
         """Write ONE fact; add one index line. Existing file → body replaced and the
         index line refreshed (a stale index line keeps speaking the old fact).
 
@@ -431,8 +432,11 @@ class Store:
             existed = os.path.exists(path)
             tmp = path + f".tmp.{os.getpid()}"
             with open(tmp, "w", encoding="utf-8") as f:
+                extra = "".join(f"  {k}: {str(v).replace(chr(10), ' ')}\n"
+                                for k, v in (meta or {}).items())
                 f.write(_FRONT.format(slug=slug, desc=description.replace("\n", " "),
-                                      type=type_, body=body.rstrip() + "\n"))
+                                      type=type_, extra=extra,
+                                      body=body.rstrip() + "\n"))
             os.replace(tmp, path)
             self._titles = None
             self._slugs_cache = None

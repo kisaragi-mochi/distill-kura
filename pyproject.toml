@@ -20,6 +20,12 @@ classifiers = [
 ]
 dependencies = []          # standard library only, on purpose
 
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+# Exact token counting is a benchmarking concern, never a runtime one: the core must
+# stay installable with nothing behind it.
+bench = ["tokenizers>=0.15"]
+
 [project.scripts]
 kura = "distill_kura.cli:main"
 

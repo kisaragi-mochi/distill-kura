@@ -117,7 +117,10 @@ function settle(config) {
   return c;
 }
 
-async function call(cfg, method, path, body, signal) {
+/** 304 from a conditional GET: nothing changed, and nothing was transferred. */
+const UNCHANGED = Symbol("unchanged");
+
+async function call(cfg, method, path, body, signal, headers = {}) {
   const ac = new AbortController();
   const onAbort = () => ac.abort();
   signal?.addEventListener("abort", onAbort, { once: true });
@@ -126,9 +129,10 @@ async function call(cfg, method, path, body, signal) {
     const res = await fetch(cfg.url + path, {
       method,
       signal: ac.signal,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
+    if (res.status === 304) return UNCHANGED;
     const text = await res.text();
     let data;
     try {
@@ -163,7 +167,9 @@ function mapCache(cfg, state) {
     `<<<KURA-MAP store=${state.current || "default"}>>>\n` +
     `${cfg.label} keeps a long-term memory, but its index could not be read just now.\n` +
     `The map is MISSING, not empty — do not conclude that nothing is remembered.\n` +
-    `Use kura_recall; if it also fails, say the memory is unavailable.\n` +
+    `It may simply not have arrived yet (it is fetched in the background, once per\n` +
+    `session and then on a timer). Call kura_map to read it now, or kura_recall to ask\n` +
+    `a question directly. If both fail, say the memory is unavailable.\n` +
     `<<<END KURA-MAP>>>\n`;
 
   return {
@@ -183,7 +189,15 @@ function mapCache(cfg, state) {
       const target = state.bound ? cfg.store : state.current;
       this.invalidate(target);
       try {
-        const d = await call(cfg, "GET", "/prefill" + q(target));
+        // Conditional: the map is the largest thing we fetch and it changes a few times
+        // a day, while this runs every couple of minutes.
+        const d = await call(cfg, "GET", "/prefill" + q(target), undefined, undefined,
+          state.map.ok && state.map.store === target && state.map.etag
+            ? { "If-None-Match": `"${state.map.etag}"` } : {});
+        if (d === UNCHANGED) {
+          state.map.at = Date.now();
+          return true;
+        }
         // The server names the store it answered for. If that is not the one asked for,
         // the map is not ours to show.
         if (d.store !== undefined && target && d.store !== target) {

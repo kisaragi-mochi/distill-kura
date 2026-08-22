@@ -1,0 +1,16 @@
+{"type":"user","message":{"content":[{"type":"text","text":"morning. before anything else — the archive goes on the slow disk from now on, the fast one is scratch only. I don't want to argue about it again."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"df -h /data /scratch"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"/data 3.2T used 1.1T avail\n/scratch 900G used 120G avail"}]}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"and we are NOT going to add a second index. I know it looks tempting. one index, always."}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"understood. one index. I'll note the disk split too."}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"run the throughput test on the new build please"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"./bench --iters 200"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"throughput 43.7 tok/s (was 12.4 tok/s before the fan install)"}]}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"43.7, good. that's the number to quote. anything above 40 means the fans did their job."}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"weather's nice today isn't it. anyway."}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"careful with the cp932 boundary — crossing it silently produces zero rows and no error at all. it has bitten us three times."}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"one exception on the disk rule: anything under 1GB can live on the fast disk, it isn't worth the round trip."}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"noted: slow disk by default, under 1GB may stay on fast."}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"actually, scratch what I said this morning about the archive. put it on the NAS instead — the slow disk is going to be reformatted next week."}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"the fan thing again — I keep coming back to it. we should measure the DIMM side too, not just the GPU side."}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"the repo is at github.com/example/thing and the port is in the config file, you can look those up"}]}}

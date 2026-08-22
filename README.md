@@ -347,7 +347,7 @@ index drift. It is the eye the metabolism needs.
 
 | route | what it does |
 |---|---|
-| `POST /recall` | `{question, hops, top, chars, store\|mode}` → picked, walked, context |
+| `POST /recall` | `{question, hops, top, chars, total_chars, store\|mode}` → picked, walked, context. `chars` is per memory; `total_chars` is a hard ceiling on the whole context |
 | `POST /remember` | `{slug, description, body, type, title}` — a DIRECT write, refused unless `write_policy = "direct-allowed"` |
 | `GET /index` | the raw index |
 | `GET /prefill` | the resident block, ready to inject (`&format=text` for a hook) |
@@ -391,6 +391,66 @@ A few decisions that look odd until you hit the thing they prevent:
 - **`kura distill run` exits 2 when there was nothing to do.** A scheduler must be able
   to tell "did work" from "found nothing", or a watchdog spins on an empty queue and
   starves the steps that need the idle time.
+
+## Measuring it, instead of claiming it
+
+Two questions get answered with one number and should not be.
+
+**How much smaller?** `store_ratio` = tokens in the memories and index / tokens of raw
+journal actually consumed. **What was lost?** That is a different measurement, and a
+store that keeps one memory in a hundred scores beautifully on the first while being
+useless.
+
+```bash
+kura bench compress                       # what this store cost, from the distiller's own metrics
+kura bench compress --tokenizer-command "./count-tokens"   # exact, not estimated
+kura bench retention --questions bench/fixtures/questions.json
+```
+
+Measured here, with the shipped fixtures and the built-in estimator:
+
+| corpus | `store_ratio` |
+|---|---|
+| `scripts/demo-clean-room.sh` (ordinary chat, mostly filler) | **0.18** |
+| `bench/fixtures/corpus.jsonl` (dense: every line is signal) | **1.14** |
+
+The second one is not a bug. On material where nothing is filler, distilling does not
+compress — each memory adds its *why* and *how to apply*, and the store comes out
+slightly larger than the transcript. **The ratio is a property of the corpus, not of
+this tool**, which is why there is no headline number here and why the command reports
+what it counted with.
+
+Retention is scored model-free: each planted fact carries a marker that must appear in
+what recall returns, so the score is reproducible on someone else's machine. Distractors
+invert — a fact marked `must_not_store` costs a point if the store kept it, because a
+memory system is judged by what it declines as much as by what it keeps.
+
+    score 1.0 (10/10)   decision 1/1  number 2/2  negation 1/1  reversal 1/1
+                        conditional 1/1  landmine 1/1  returning 1/1  distractor 2/2
+
+That is ten planted facts in a synthetic fixture, not a claim about your corpus. It
+measures whether a fact is *findable*, not whether the answer reads well — judging prose
+needs a model, and then the benchmark stops being reproducible.
+
+`kura distill run` writes one line per batch to `_still/metrics.jsonl`, which is where
+both commands get their raw side from. A ratio against journals the store never drank
+would be a number with no meaning, so `bench compress` refuses to compute one.
+
+## What this runs against
+
+| | requirement |
+|---|---|
+| Python | 3.11+ (no dependencies; `pip install -e ".[dev]"` only adds pytest) |
+| Node | 20+, for the DSH plugin only |
+| `zstd` | only to read DSH session archives |
+| model endpoint | anything answering `POST <url>/chat/completions` in the OpenAI shape |
+
+**"OpenAI-compatible" is narrower than "any provider."** A vendor's native API needs an
+OpenAI-compatible gateway in front of it; its own URL will not do. A strict service also
+rejects unknown top-level fields, so set `dialect = "openai"` (or `"generic"`) — the
+default `"vllm"` sends `chat_template_kwargs`, which local servers want and a strict one
+400s on. The client retries once with a plain body and records *why* a call failed
+rather than collapsing every cause into a silent `None`.
 
 ## Tests
 

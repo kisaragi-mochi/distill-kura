@@ -134,10 +134,17 @@ Back up to a **different physical device**, and verify a restore. A copy that ha
 silently failing for a week is the same as no copy: it is worth checking that the
 newest file in the backup is actually new.
 
-`_still/` is the distiller's workshop (drafts, watermarks, read log, dropped and tossed
-candidates). It is not part of the memory and does not need backing up — but deleting
-`watermark.json` makes the distiller re-drink every journal from the beginning, which
-is expensive rather than harmful.
+What to back up, and what not to:
+
+| directory | keep it? |
+|---|---|
+| the memories and `MEMORY.md` | **yes** — this is the store |
+| `_evidence/` | **yes** — the manifests memories point at. Losing them makes "why does this memory exist?" unanswerable, which is the question the whole gate exists to keep answerable |
+| `_still/` | no. Workshop: drafts, watermarks, the read log, dropped and tossed candidates, metrics. Deleting `watermark.json` makes the distiller re-drink every journal from the beginning — expensive, not harmful |
+
+`_still/metrics.jsonl` is worth keeping if you care about trend: it is one line per
+distilled batch and the only place `kura bench compress` can learn how much raw material
+a store actually consumed.
 
 ## Feeding it
 
@@ -183,6 +190,22 @@ number carried in the events for anything that gets rewritten. Then add a key un
 `[distill.journals]`. The evidence classes are the contract — get the mapping right
 (`USER` / `TOOL` / `ACT` / `SELF`, and drop reasoning blocks) and everything downstream
 works unchanged.
+
+## Measuring rather than guessing
+
+```bash
+kura bench compress     # store_ratio and map_ratio, from the distiller's own metrics
+kura bench retention --questions bench/fixtures/questions.json
+```
+
+`bench compress` refuses to compute a ratio against journals the store never drank. Pass
+`--tokenizer-command` before quoting a figure anywhere: without it the numbers carry an
+`estimated` label and a warning, because the built-in estimator is up to ~20% out against
+tokenizers it was not fitted on.
+
+`bench retention` exits non-zero below 0.9, so it can sit in a scheduled job. Write your
+own questions against your own corpus — the shipped fixture measures the tool, not your
+store.
 
 ## Security
 

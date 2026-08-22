@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  python:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # The package itself has no dependencies on purpose; only the test runner needs one.
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest tests -q
+      - run: python -m distill_kura.cli --help
+
+  plugin:
+    name: plugin node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # The plugin tests stub the harness package, so no install is required.
+      - run: node --import ./test/register.mjs --test test/plugin.test.mjs
+        working-directory: dsh-plugin
+
+  demo:
+    name: clean-room demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Proves the README's first ten minutes still work on a machine with nothing on it.
+      - run: ./scripts/demo-clean-room.sh
+
+  build:
+    name: build the package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

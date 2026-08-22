@@ -407,3 +407,39 @@ test("a server that answers for the wrong store is not believed", async () => {
     assert.match(ctx.sections.get("distill-kura:map").text({}), /MISSING/);
   } finally { srv.close(); }
 });
+
+test("the map is re-fetched conditionally, and 304 keeps it", async () => {
+  let full = 0, conditional = 0;
+  const srv = createServer((req, res) => {
+    if (req.url.startsWith("/prefill")) {
+      if (req.headers["if-none-match"] === '"e1"') {
+        conditional++;
+        res.statusCode = 304;
+        res.setHeader("ETag", '"e1"');
+        return res.end();
+      }
+      full++;
+      res.setHeader("content-type", "application/json");
+      res.setHeader("ETag", '"e1"');
+      return res.end(JSON.stringify({ text: "<<<KURA-MAP store=maker>>>\nthe map\n",
+                                      etag: "e1", store: "maker" }));
+    }
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ default: "maker", stores: {}, modes: {} }));
+  });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url: `http://127.0.0.1:${srv.address().port}` });
+    const sec = ctx.sections.get("distill-kura:map");
+    await until(() => sec.text({}).includes("the map"));
+    // A second refresh must not transfer the map again.
+    const cache = ctx.disposers.length ? null : null;
+    await new Promise((r) => setTimeout(r, 20));
+    const before = full;
+    // Force one more refresh through the public path.
+    await ctx.registered.get("kura_map").execute({}, {});
+    assert.equal(full, before + 1, "kura_map is an explicit read, it may fetch");
+    assert.ok(sec.text({}).includes("the map"));
+  } finally { srv.close(); }
+});

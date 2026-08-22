@@ -30,6 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from ..recall import recall as kura_recall
+from ..tokens import estimate
 from ..registry import Registry
 from ..store import FROZEN, Store
 from . import prompts
@@ -77,6 +78,12 @@ class Distiller:
         self.language = language or scfg.get("language") or cfg.get("language") or "English"
         self.slots = int(scfg.get("scribe_slots") or cfg.get("scribe_slots") or scribe_slots)
         self.chunk_chars = int(scfg.get("chunk_chars") or cfg.get("chunk_chars") or chunk_chars)
+        # How many candidates one batch may yield. Four was hardcoded, which is generous
+        # for idle chat and thin for a batch full of decisions: past that point a low
+        # "compression ratio" is an OMISSION rate, not a quality.
+        self.max_items = int(scfg.get("max_items") or cfg.get("max_items") or 4)
+        self.coverage_passes = int(scfg.get("coverage_passes")
+                                   or cfg.get("coverage_passes") or 1)
         self.charter = (open(store.charter, encoding="utf-8").read()
                         if store.charter and os.path.exists(store.charter)
                         else prompts.DEFAULT_CHARTER)
@@ -113,9 +120,25 @@ class Distiller:
         return self._store_text
 
     # ── ② spot ───────────────────────────────────────────────────────────
-    def spot(self, segs: list[Segment], max_items: int = 4) -> list[dict]:
-        raw = self.brain(prompts.SPOT_SYS.format(max_items=max_items), as_evidence(segs), 5000)
-        return salvage(raw)[:max_items]
+    def spot(self, segs: list[Segment], max_items: int | None = None) -> list[dict]:
+        limit = max_items or self.max_items
+        raw = self.brain(prompts.SPOT_SYS.format(max_items=limit), as_evidence(segs), 5000)
+        found = salvage(raw)[:limit]
+        # A second look, told what the first one already took. One pass optimises for the
+        # most striking thing in the batch; the audit asks what it walked past.
+        for _ in range(max(0, self.coverage_passes - 1)):
+            if len(found) >= limit:
+                break
+            already = "\n".join(f"- {c.get('topic')}: {c.get('why')}" for c in found)
+            more = salvage(self.brain(
+                prompts.COVERAGE_SYS.format(max_items=limit - len(found)),
+                f"=== ALREADY TAKEN ===\n{already or '(nothing yet)'}\n\n"
+                f"=== THE MATERIAL ===\n{as_evidence(segs)}", 5000))
+            if not more:
+                break
+            seen = {c.get("topic") for c in found}
+            found += [c for c in more if c.get("topic") not in seen][:limit - len(found)]
+        return found
 
     # ── ④ novelty ────────────────────────────────────────────────────────
     def novelty(self, c: dict, near: dict) -> tuple[str, str, str | None]:
@@ -230,6 +253,58 @@ class Distiller:
                 "attributed_to_human": attributes_to_human(text, c["classes"])}
 
     # ── ⑥ stage ──────────────────────────────────────────────────────────
+    # ── provenance that outlives the draft ───────────────────────────────
+    #
+    # The draft carries its evidence in a comment, and the draft is renamed `.poured`
+    # and eventually swept. After that, a canonical memory has no way back to what it
+    # was made from: which journal, which stretch of it, which quotes, which models.
+    # "Why does this memory exist?" stops being answerable, which is the question the
+    # whole evidence gate exists to keep answerable.
+    #
+    # So the manifest is content-addressed and written where memories live, not in the
+    # workshop: `_evidence/<sha256>.json`, referenced from the memory's frontmatter.
+    def _evidence_dir(self) -> str:
+        return os.path.join(self.store.path, "_evidence")
+
+    def _write_manifest(self, d: dict, source: str, key: str) -> str:
+        manifest = {
+            "gate_version": 1,
+            "source_key": key,
+            "source_file": os.path.basename(source),
+            "source_sha256": self._source_digest(source),
+            "kind": d.get("kind"),
+            "evidence_classes": d.get("classes"),
+            "quotes": d.get("evidence"),
+            "unverified_numbers": d.get("unverified_numbers"),
+            "judgement": d.get("judgement"),
+            "brain_model": self.models.brain.model,
+            "scribe_model": self.models.scribe.model,
+            "language": self.language,
+            "created_at": datetime.now(timezone.utc).isoformat()[:19] + "Z",
+        }
+        blob = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=1)
+        digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+        path = os.path.join(self._evidence_dir(), f"{digest}.json")
+        if not os.path.exists(path):
+            os.makedirs(self._evidence_dir(), exist_ok=True)
+            tmp = path + f".tmp.{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(blob)
+            os.replace(tmp, path)
+        return digest
+
+    @staticmethod
+    def _source_digest(source: str) -> str:
+        """Identify the journal itself, not just its basename — names collide."""
+        try:
+            h = hashlib.sha256()
+            with open(source, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return ""
+
     def stage(self, d: dict, source: str) -> str:
         p = os.path.join(self.drafts_dir, f"{d['slug']}.md")
         ev = "\n".join(f"  [{e['class']}] {e['text'][:300]}" for e in d["evidence"])
@@ -242,6 +317,7 @@ class Distiller:
             flags += "   🧠the agent's judgement (not an outside fact)"
         if d.get("extends"):
             flags += f"   ↑extends {d['extends']}"
+        manifest = self._write_manifest(d, source, getattr(self, "_current_key", ""))
         body = ((f"EXTENDS: {d['extends']}\n" if d.get("extends")
                  else f"TITLE: {d.get('title') or d['slug']}\nDESC: {d['description']}\n")
                 + f"\n{d['body']}\n")
@@ -250,6 +326,7 @@ class Distiller:
                     f"     source: {os.path.basename(source)}\n"
                     f"     kind: {d['kind']}   evidence classes: {','.join(d['classes'])}{flags}\n"
                     f"     gate: {self._mark(body)}\n"
+                    f"     evidence_manifest: sha256:{manifest}\n"
                     f"     evidence:\n{ev}\n-->\n" + body)
         return p
 
@@ -329,9 +406,11 @@ class Distiller:
             new_body = re.sub(r"^(DESC|TITLE):.*$", "", body, flags=re.M).strip()
         # The pour has been through the gate, so it uses the verified door: a store set
         # to `distiller-only` accepts this and refuses a bare tool call.
+        man = re.search(r"evidence_manifest:\s*(sha256:[0-9a-f]{64})", raw.split("-->")[0])
         r = self.store.pour_verified(slug_out, desc, new_body,
                                      type_=kind.group(1) if kind else "project",
-                                     title=title)
+                                     title=title,
+                                     meta={"evidence_manifest": man.group(1)} if man else None)
         if r.get("ok"):
             os.rename(p, p + ".poured")
             self._store_text = None
@@ -466,6 +545,22 @@ class Distiller:
         self.marks.advance(src.key(path), nxt)
         return segs, path, src.key(path)
 
+    def _metric(self, row: dict) -> None:
+        """One line per batch, so the pipeline's behaviour is a measurement rather than
+        an impression. Nothing here is a claim: it is what happened, in numbers someone
+        else can add up."""
+        row = {**row, "at": datetime.now(timezone.utc).isoformat()[:19],
+               "store": self.store.name,
+               "brain_model": self.models.brain.model,
+               "scribe_model": self.models.scribe.model,
+               "max_items": self.max_items, "chunk_chars": self.chunk_chars}
+        try:
+            os.makedirs(self.still, exist_ok=True)
+            with open(os.path.join(self.still, "metrics.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except OSError:
+            pass                        # a metric must never break a pass
+
     def run(self, session: str | None = None, chunks: int = 1) -> dict:
         made, killed, covered, sown = [], 0, 0, 0
         for _ in range(chunks):
@@ -473,11 +568,13 @@ class Distiller:
             if not got:
                 break
             segs, path, key = got
+            self._current_key = key
             if not segs:
                 continue
             by: dict[str, int] = {}
             for s in segs:
                 by[s.cls] = by.get(s.cls, 0) + 1
+            raw_chars = sum(len(s.text) for s in segs)
             _log(f"drink: {key[:40]} → {len(segs)} segments {by}")
 
             t0 = time.time()
@@ -514,6 +611,7 @@ class Distiller:
                 self.sprout(c)
                 to_write.append(c)
 
+            drafted, draft_chars, draft_text = [], 0, []
             if to_write:
                 t1 = time.time()
                 with ThreadPoolExecutor(max_workers=self.slots) as pool:
@@ -523,7 +621,20 @@ class Distiller:
                             continue
                         _log(f"      wrote {d['slug']} → {os.path.basename(self.stage(d, path))}")
                         made.append(d["slug"])
+                        drafted.append(d["slug"])
+                        draft_chars += len(d.get("body", ""))
+                        draft_text.append(d.get("body", ""))
                 _log(f"      {len(to_write)} composed in {time.time()-t1:.0f}s")
+            self._metric({
+                "source_key": key, "segments": len(segs), "by_class": by,
+                "raw_chars": raw_chars, "raw_tokens_est": estimate(as_evidence(segs)),
+                "candidates": len(cands), "gated_kept": len(kept),
+                "gated_dropped": len(dropped), "ideas": len(ideas),
+                "covered": covered, "drafts": drafted,
+                "draft_chars": draft_chars,
+                "draft_tokens_est": estimate("\n".join(draft_text)),
+                "index_tokens_est": estimate(self.store.index_text()),
+            })
         if not made and not killed and not covered and not sown:
             return {"ok": True, "why": "nothing worth drinking"}
         return {"ok": True, "drafts": made, "dropped": killed, "covered": covered, "seeds": sown}
