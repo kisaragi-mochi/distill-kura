@@ -395,14 +395,27 @@ class Distiller:
         return {"tags": list(kept), "tag_basis": basis, "tags_refused": refused,
                 "annotations": ann, "curation_problem": problem}
 
+    def _evidence_date(self) -> str:
+        """The date the evidence carries: the journal file's last change, local time.
+        Segments have no timestamps of their own, and the file's mtime is the one date
+        nobody wrote from memory."""
+        src = getattr(self, "_current_source", "")
+        try:
+            return datetime.fromtimestamp(os.path.getmtime(src)).strftime("%Y-%m-%d")
+        except (OSError, ValueError, TypeError):
+            return datetime.now().strftime("%Y-%m-%d")
+
+    _DATE_IN_TEXT = re.compile(r"\b(20\d\d)-(\d\d)-(\d\d)\b")
+
     def _compose_extension(self, c: dict) -> dict | None:
         target = c["extends"]
         existing = self.store.read(target)
         if not existing:
             return None
         ev = "\n".join(f"[{e['class']}] {e['text']}" for e in c["evidence"])
+        date = self._evidence_date()
         out = self.scribe(prompts.EXTEND_SYS,
-                          f"MEMORY TO EXTEND: {target}\n"
+                          f"MEMORY TO EXTEND: {target}\nDATE: {date}\n"
                           f"The distiller's reading (not evidence): {c.get('extends_why')}\n\n"
                           f"=== ALREADY WRITTEN THERE (do not repeat) ===\n{existing[:9000]}\n\n"
                           f"=== NEW EVIDENCE (this is everything) ===\n{ev}\n")
@@ -411,7 +424,13 @@ class Distiller:
         if not body:
             return None
         _, plain = _split_draft(body.group(1))
-        text = (section.group(1) + "\n" if section else "") + plain
+        # The heading's date is the evidence's date, mechanically. 30 of 39 extension
+        # headings in the house were dated before the distiller existed; one said 2025.
+        head = section.group(1).strip() if section else f"## {date}"
+        head = self._DATE_IN_TEXT.sub(date, head)
+        if date not in head:
+            head = f"## {date} " + head.lstrip("#").strip()
+        text = head + "\n" + plain
         return {"slug": target, "title": "", "description": "", "extends": target,
                 "body": text.strip(), "kind": c.get("kind", "project"),
                 "evidence": c["evidence"], "classes": c["classes"],
@@ -758,6 +777,7 @@ class Distiller:
                 break
             segs, path, key = got
             self._current_key = key
+            self._current_source = path
             if not segs:
                 continue
             by: dict[str, int] = {}

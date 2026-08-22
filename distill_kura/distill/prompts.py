@@ -90,7 +90,7 @@ WHAT IS NOT WORTH KEEPING:
    not a fact. (A judgement OF the agent's may be kept — set `kind: "feedback"` and
    say in `why` that it is a judgement.)
 
-TAGS are words about the memory's character, several per memory, lower-case kebab.
+TAGS are words about the memory's character, usually three to five, lower-case kebab.
 Content: hypothesis, evidence, research-result, decision, implementation, commitment,
 reference, feedback. Character: emotion-carried (the human's feeling is in the
 evidence), entrusted (the human asked for it to be kept — quote the asking),
@@ -182,8 +182,8 @@ Rules:
 
 Four CURATION lines go with the memory. They are your judgement about where it sits,
 read against the charter above — not new facts, and never a reason to widen the body:
-  TAGS            words about its character (JSON array, lower-case kebab). Several is
-                  normal. A description, never a weight.
+  TAGS            words about its character (JSON array, lower-case kebab). Three to
+                  five is usual. A description, never a weight.
   BELONGS_BECAUSE one sentence: why THIS store wants it. If you cannot say, say so.
   KEEP            one sentence: the meaning that must outlive any later thinning.
   MAY_FADE        one sentence: the detail that need not.
@@ -213,9 +213,14 @@ If the new evidence changes the memory's character, say so in TAGS (words to ADD
 existing tags are kept) and, if the reason it belongs here has changed, BELONGS_BECAUSE.
 Otherwise omit both lines.
 
+The date of this evidence is given to you as DATE. Use exactly that date in the
+heading and nowhere else — never a date from memory, never one the text mentions in
+passing: a heading dated from the body of an old quote put a 2025 section into a
+store that did not exist in 2025.
+
 Output exactly:
 
-SECTION: <a short "## " heading, including the date>
+SECTION: <a short "## " heading, starting with DATE>
 TAGS: ["..."]            (optional)
 BODY:
 <2-6 lines: what is newly known. Add a one-line **How to apply:** if it earns one.>"""

@@ -55,6 +55,26 @@ with `limit` and `pressure` left `None`**.
 released or deleted, and no unit or limit is chosen. `docs/DESIGN.md` §8 says what
 is undecided and why the first pass will be a dry run.
 
+### The editor, and the watcher (new)
+
+The model you talk to is also the **editor** that writes and judges memories in its
+idle minutes — that is the default, and a GPU model does it acceptably (measured on
+the house's Qwen: six drafts in 33 s, judged in 5 s, with reasons in the evidence
+vocabulary). The upgrade path is an editor on its own seat, including a CPU model
+that never competes with the conversation. `kura tend` is the watcher: quiet is the
+newest journal's mtime; after `idle_min` it drains, distils, re-weaves once per
+silence and tidies once; a track with nothing to do exits 2 and rests
+`backoff_min`; work is counted, launches are not; every track's output is kept;
+a heartbeat that `doctor` reads says whether anyone is tending the store; the human's
+return stops a running track unless `yield_on_return = false`. Rebuilt from the
+five-day record of the house's first watcher and the four ways it went wrong.
+
+An extension's heading now carries the evidence's date (the journal file's mtime)
+and a heading that says otherwise is corrected mechanically — 30 of 39 extension
+headings in the house had been dated before the distiller existed.
+
+Not shipped, on purpose: an autonomous research loop. It stays on the house side.
+
 ### Boundaries
 
 - **Containment.** Every lookup resolves into the set of memories a store actually holds.

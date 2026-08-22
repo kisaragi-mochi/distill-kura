@@ -797,6 +797,29 @@ class Store:
         return (open(self.profile_path, encoding="utf-8").read()
                 if self.profile_state()["state"] == "present" else "")
 
+    # ── the watcher's heartbeat ──────────────────────────────────────────
+    def tend_state(self, stale_after_s: float = 120.0) -> dict:
+        """Is someone tending this store? `kura tend` writes `_still/tend.json` every
+        tick; a heartbeat older than two minutes, or a pid that is gone, is a dead
+        watcher — the thing the first watcher's death went twelve days without."""
+        p = os.path.join(self.still, "tend.json")
+        if not os.path.exists(p):
+            return {"alive": False, "why": "no watcher has ever run here"}
+        try:
+            d = json.load(open(p, encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"alive": False, "why": "heartbeat unreadable"}
+        age = time.time() - float(d.get("at") or 0)
+        pid = int(d.get("pid") or 0)
+        alive = age < stale_after_s
+        if alive and pid:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                alive = False
+        return {"alive": alive, "age_s": int(age), "pid": pid, "running": d.get("running") or "",
+                "done": d.get("done") or {}, "why": "" if alive else f"last heartbeat {int(age)} s ago"}
+
     # ── read log (append-only; NEVER used for ranking) ───────────────────
     def note_read(self, names: list[str], why: str = "recall") -> None:
         if not names:
@@ -899,6 +922,7 @@ class Store:
                 "unit": None, "limit": None, "pressure": None,
             },
             "learned_profile": self.profile_state(),
+            "tending": self.tend_state(),
             "write_policy": self.write_policy,
             "model_profile": self.model_profile,
             "persona": self.persona,

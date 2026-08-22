@@ -71,7 +71,10 @@ _TYPES = {"path": str, "label": str, "readonly": bool, "write_policy": str,
 # The nested tables need checking too: `inherit_global_journals = "false"` is a STRING,
 # therefore truthy, so a store inherited the global intake it had explicitly declined.
 _DISTILL_TYPES = {"inherit_global_journals": bool, "journals": dict, "language": str,
-                  "scribe_slots": int, "chunk_chars": int}
+                  "scribe_slots": int, "chunk_chars": int, "max_items": int,
+                  "coverage_passes": int,
+                  # the watcher (`kura tend`)
+                  "idle_min": (int, float), "backoff_min": (int, float), "yield_on_return": bool}
 _PREFILL_TYPES = {"window_tokens": int, "budget_fraction": float, "hard_fraction": float,
                   "fresh_days": (int, float), "pinned_types": list, "trigger_tokens": int,
                   "verbatim_after": str, "cloth_path": str, "header": str}

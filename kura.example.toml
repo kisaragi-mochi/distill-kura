@@ -22,7 +22,8 @@ default = "main"       # which kura answers when a request names none
 #             later re-reads drafts to pour/fix/toss them. Wants judgement and
 #             good prose in the target language.
 #
-# DEFAULT: declare only [models.thinker] and one model does all three jobs.
+# DEFAULT: declare only [models.thinker] and one model does all three jobs — the model
+# you talk to is also the EDITOR that writes and judges your memories in its idle minutes.
 # UPGRADE: give brain and/or scribe their own endpoint — a bigger local model, or
 # an online API. Any OpenAI-compatible /chat/completions works; the key is read
 # from the named environment variable and never stored in this file.
@@ -53,8 +54,9 @@ effort = "low"          # low | medium | high
 # dialect = "openai"                # omit chat_template_kwargs on a strict service
 # temperature = 0.4
 #
-# A slow, deep local model as the scribe (this is the setup the design came from:
-# a huge CPU-only model writes, a fast GPU model reads):
+# A slow, deep local model as the EDITOR on its own seat (the setup the design came
+# from: a huge CPU-only model writes and judges, a fast GPU model reads; maintenance
+# then goes on while you talk — pair it with yield_on_return = false under [distill]):
 # [models.scribe]
 # url = "http://127.0.0.1:8096/v1"
 # model = "big-cpu-model"
@@ -145,6 +147,13 @@ trigger_tokens = 24         # budget for one compressed line, in tokens, not cha
 language = "English"        # the language memories are WRITTEN in
 scribe_slots = 4            # concurrent compositions (match your server's slots)
 chunk_chars = 200_000       # one batch; aim at what the brain swallows in one gulp
+
+# The watcher (`kura tend`). Quiet = the newest journal file's mtime.
+idle_min = 10               # minutes of silence before a track may run
+backoff_min = 20            # rest after a track had nothing to do (exit 2)
+yield_on_return = true      # stop a running track when the journal changes. Set false
+                            # when the editor sits on its own seat (a CPU model, another
+                            # machine) and does not compete with the conversation
 
 # A root may also be a table, because one sessions directory usually holds every mode's
 # conversations and you rarely want all of them in one kura:

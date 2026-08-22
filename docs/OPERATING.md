@@ -29,15 +29,33 @@ The distiller is separate on purpose — the mouth must stay up even when the di
 is wedged, and the distiller must be killable without taking recall down with it.
 
 ```ini
-# ~/.config/systemd/user/kura-distill.service
+# ~/.config/systemd/user/kura-tend@.service      (one instance per store)
+[Unit]
+Description=distill-kura watcher for %i
+After=kura.service
+
 [Service]
 Environment=KURA_CONFIG=%h/kura/kura.toml
-ExecStart=/usr/bin/python3 -m distill_kura.cli distill night --idle-min 20
-Restart=on-failure
+ExecStart=/usr/bin/python3 -m distill_kura.cli -s %i tend
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
 ```
 
-`night` only runs a pass once the journals have been quiet for `--idle-min`, so it stays
-out of the way of live work.
+```bash
+systemctl --user enable --now kura-tend@maker kura-tend@eq
+curl -s 'localhost:8085/doctor?store=maker' | python3 -c 'import json,sys; print(json.load(sys.stdin)["tending"])'
+```
+
+`Restart=always`, not `on-failure`: the first watcher this replaced was started by a
+boot script, died with the machine, and was not missed for twelve days. `tend` works
+only once the journals have been quiet for `idle_min` (10) minutes, rests a track that
+had nothing to do for `backoff_min` (20), stops a running track when the journal
+changes (unless `yield_on_return = false` — an editor on its own seat), and keeps every
+track's output in `_still/tend.log`. `distill night` still exists for a bare
+one-pass-when-quiet loop, but `tend` is the one to run.
 
 ## Keeping the resident map current
 
@@ -124,6 +142,7 @@ curl -s localhost:8085/doctor | python3 -m json.tool
 | `missing_manifest` non-empty | a memory points at an evidence manifest that is gone | restore `_evidence/` from backup; the memory still reads, its provenance does not |
 | `curation.tampered` non-empty | a memory's tags or sentences were edited after the gate signed them | read the file; restore from the manifest or re-pour. On a `distiller-only` store this is the one thing nobody but the gate should have done |
 | `curation.unsigned_names` non-empty | tags or sentences with no mark, on a store where only the gate writes | someone wrote frontmatter by hand; decide whether it stays (it reads fine; it just is not the gate's word) |
+| `tending.alive: false` | no watcher is tending this store (never started, or died) | `systemctl --user status kura-tend@<store>`; the heartbeat is `_still/tend.json` |
 | `learned_profile.state: broken` | `profile.md` is unreadable or carries numbers about how much things matter; it is NOT read and the fixed charter carries on | read `why`; rewrite the profile in sentences |
 | `capacity.*` | the store's size in four units — memories, index tokens, body tokens, bytes. `limit` and `pressure` are `None` on purpose | nothing acts on these yet. Watch them, and see the next section |
 

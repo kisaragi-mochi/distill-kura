@@ -310,8 +310,17 @@ Three **roles**, not three machines:
 | `brain` | distilling: reads a whole batch of journal | context length and patience |
 | `scribe` | distilling: writes the memory, then judges drafts | good prose in your language, judgement |
 
-Declare only `[models.thinker]` and one model does all three. Upgrade either of the
-others independently — a bigger local model, or an online API (any OpenAI-compatible
+Declare only `[models.thinker]` and one model does all three — **the model you talk
+to is also the editor** that writes and judges your memories. That is the default and
+it is a fair one: a capable GPU model does the editor's work well enough in its idle
+minutes, and `kura tend` stops it the moment you come back (see "Unattended" below).
+
+The upgrade path is to give the editor its own seat — a bigger model, an online API,
+or a **CPU model that does not compete for the GPU at all**, so maintenance can go on
+while you are talking. The house this was built in runs a 1-trillion-parameter MoE
+on CPU at about 3 tokens/second as the editor: slow, but it never touches the seat the
+conversation uses, and the memories it wrote over five days are a third of the store
+today. Upgrade either of the other roles independently — a bigger local model, or an online API (any OpenAI-compatible
 `/chat/completions`; the key is read from an environment variable you name, never
 stored in the config):
 
@@ -333,9 +342,46 @@ default can spend its whole budget reasoning and return nothing. And the charter
 is placed byte-identically at the head of every role's prompt, so on a slow local model
 the three roles share one cached prefix instead of paying three prefills.
 
+**A slow editor needs the prefix.** The charter sits byte-identically at the head of
+every call, so a 3 tok/s CPU editor pays its prefill once per silence, not once per
+draft; on llama.cpp, keep `--cache-reuse 0` off the table for recurrent models and let
+the server keep its slots warm (`--slot-save-path`). The editor's calls are the ones
+that wait an hour (`timeout=3600`) on purpose.
+
 **If the thinker is down, recall does not go silent** — it falls back to word overlap
 and labels the answer `how=words`, which the tools surface as `⚠ degraded`. Quiet
 degradation is worse than degradation.
+
+### Unattended: `kura tend`
+
+The distiller, the pourer and the loom are meant to run in the quiet hours, and the
+watcher that decides when that is needs no model:
+
+```bash
+kura tend -s maker          # stays resident; one process per store
+kura tend -s maker --once   # one tick, for a scheduler or a test
+```
+
+"Quiet" is the newest journal file's mtime. After `idle_min` (10) of silence it drains
+waiting drafts (the editor reads each one cold: pour / fix / toss), or runs one
+distilling pass when there are none; when something was poured it re-weaves the
+resident map once; and it tidies the index once per silence. A track that had nothing
+to do exits 2 and rests for `backoff_min` (20), so an empty journal does not spin. It
+counts work — poured, tossed, fixed, drafted — never launches. Every track's output is
+kept in `_still/tend.log`. And it writes a heartbeat that `kura doctor` reads
+(`tending.alive`), because a watcher that dies quietly is the one failure a watcher
+must not have.
+
+When the journal changes, a running track is stopped: the editor is usually the same
+GPU you are about to talk to. With the editor on a separate seat — a CPU model, another
+machine — set `yield_on_return = false` under `[distill]` and a verdict in flight is
+left to finish. This is the watcher the house ran its CPU editor with for five days,
+rebuilt with the lessons it taught; `docs/OPERATING.md` has the systemd unit.
+
+What this project does **not** ship: an autonomous research loop that reads papers and
+grows the store on its own. The house has one; it needs a model that can be left alone
+for an hour per question, and its results are not evidence in the sense the gate
+uses. It stays on the house side of the line.
 
 ---
 

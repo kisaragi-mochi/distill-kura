@@ -233,3 +233,30 @@ def test_recurred_is_signed_too(tmp_path):
     s.annotate_verified("x", tags=["recurred"], meta={"recurred_manifest": "sha256:" + "f" * 64})
     assert s.curation_state("x") == "verified"
     assert s.frontmatter("x")["recurred_manifest"].startswith("sha256:")
+
+
+# ── 9. an extension's heading carries the evidence's date, not an invented one ──
+
+def test_extension_heading_date_is_the_journals_not_the_models(tmp_path):
+    """30 of 39 extension headings in the house were dated before the distiller
+    existed; one said 2025. The date now comes from the journal file's mtime and a
+    heading that says otherwise is corrected mechanically."""
+    import time
+    from distill_kura.distill.pipeline import Distiller as D
+    s = Store(name="m", path=str(tmp_path / "m"), write_policy="distiller-only"); s.init_files()
+    s.pour_verified("x", "the slow disk", "The archive goes on the slow disk.")
+    models = Models.from_config({"thinker": {"url": "http://127.0.0.1:9/v1", "model": "none"}})
+    reg = Registry(stores={"m": s}, modes={}, models=models, default="m", raw={})
+    d = D(reg, s)
+    src = tmp_path / "j.jsonl"; src.write_text("{}\n")
+    t = time.mktime((2026, 8, 20, 12, 0, 0, 0, 0, -1)); os.utime(src, (t, t))
+    d._current_source = str(src)
+    d.scribe = lambda task, u, max_tokens=0: "SECTION: ## 2025-06-09 注ぎ手の判断記録\nBODY:\nnew fact\n"   # type: ignore
+    c = {"extends": "x", "extends_why": "adds", "evidence": [{"class": "USER", "text": "move it tonight"}],
+         "classes": ["USER"], "kind": "project"}
+    out = d._compose_extension(c)
+    assert out["body"].startswith("## 2026-08-20 注ぎ手の判断記録")
+    assert "2025" not in out["body"]
+    # a heading with no date at all gets the date put in front
+    d.scribe = lambda task, u, max_tokens=0: "SECTION: ## the verdict log\nBODY:\nnew fact\n"   # type: ignore
+    assert d._compose_extension(c)["body"].startswith("## 2026-08-20 the verdict log")

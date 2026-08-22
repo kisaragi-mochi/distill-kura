@@ -6,6 +6,7 @@
     kura remember slug "desc" [-]     write one fact (body on stdin with `-`)
     kura annotate slug --tag landmine add tags / the three sentences to one memory
     kura profile show|draft|apply     the wide room's learned profile (draft → read → apply by hand)
+    kura tend [-s eq]                 the watcher: in the quiet hours, drain → distil → weave → tidy
     kura doctor [-s eq]               health of a store (--all for every one)
     kura weave [-s eq] [--status]     re-weave the resident index (three-layer cloth)
     kura prefill [-s eq]              print the standing block a host should inject
@@ -97,6 +98,13 @@ def main(argv: list[str] | None = None) -> int:
     psub.add_parser("show", help="state and text of profile.md, and whether a draft waits")
     psub.add_parser("draft", help="write _still/profile.draft.md from this store's memories")
     psub.add_parser("apply", help="copy the draft over profile.md — a person's act, never automatic")
+
+    p = sub.add_parser("tend", help="the watcher: distil, pour, weave and tidy in the quiet hours")
+    p.add_argument("--idle-min", type=float, default=None, help="minutes of journal silence before working (config: distill.idle_min, default 10)")
+    p.add_argument("--backoff-min", type=float, default=None, help="rest after a track had nothing to do (config: distill.backoff_min, default 20)")
+    p.add_argument("--poll", type=float, default=15.0, help="seconds between looks at the journal")
+    p.add_argument("--no-yield", action="store_true", help="do not stop a running track when the human returns (editor on a separate seat)")
+    p.add_argument("--once", action="store_true", help="one tick, then exit (for schedulers and tests)")
 
     p = sub.add_parser("doctor", help="health check")
     p.add_argument("--all", action="store_true", help="every store, not just one")
@@ -258,6 +266,26 @@ def main(argv: list[str] | None = None) -> int:
         r = store.annotate_direct(a.slug, tags=a.tag, annotations=_annotations_of(a))
         print(json.dumps(r, ensure_ascii=False))
         return 0 if r.get("ok") else 1
+
+    if a.cmd == "tend":
+        from .tend import Tender
+        t = Tender(reg, store, a.config, idle_min=a.idle_min, poll_s=a.poll,
+                   backoff_min=a.backoff_min, yield_on_return=(False if a.no_yield else None))
+        if a.once:
+            stamp = t.tick(0.0)
+            # give a started track a moment, then report what it said
+            if t.proc:
+                try:
+                    t.proc.wait(timeout=3600)
+                except Exception:
+                    pass
+                t.reap()
+            t.beat(0.0, stamp)
+            print(json.dumps({"store": store.name, "done": t.done,
+                              "next_ok": {k: int(v) for k, v in t.next_ok.items()}}, ensure_ascii=False))
+            return 0
+        t.watch()
+        return 0
 
     if a.cmd == "profile":
         import shutil
