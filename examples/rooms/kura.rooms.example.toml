@@ -1,0 +1,111 @@
+# Five rooms — a kura.toml for the Research / Develop / Manage / EQ / USER layout.
+#
+# This is NOT the minimal config. `kura.example.toml` at the repository root is;
+# start there if you have one store. This file shows the shape when the same person
+# talks in several rooms and each room is meant to remember a different side of
+# the same afternoon.
+#
+# The rules this layout depends on (docs/DESIGN.md §9):
+#   · the room is chosen BEFORE the conversation, by the host (a DSH preset, an MCP
+#     environment, a CLI flag). No router in this file, and none in the code.
+#   · one memory lives in one room. Tags are many; rooms are one. Nothing moves a
+#     memory to another room — not a retag, not a mode change, not a duplicate.
+#   · every room drinks from its OWN journal root. With five stores there is no
+#     inheritance from [distill.journals]; a root listed nowhere feeds nobody.
+#   · the wide room (user) is expected to recall a little softer than the narrow
+#     ones. That is the price of a wide door, not a defect.
+
+[server]
+port = 8085
+host = "127.0.0.1"
+default = "user"                  # un-prefixed routes answer for the wide room
+
+[models.thinker]
+url = "http://127.0.0.1:8011/v1"
+model = "local"
+
+# ── the rooms ─────────────────────────────────────────────────────────────
+# Each store's charter is the byte-identical head of every distiller prompt for that
+# store, so the room's purpose is what the brain, scribe and pourer read first.
+
+[stores.research]
+path = "~/kura/research"
+label = "Research — what became known"
+charter = "examples/rooms/research/charter.md"
+write_policy = "distiller-only"
+[stores.research.distill]
+inherit_global_journals = false
+language = "English"
+[stores.research.distill.journals]
+dsh = "~/dsh/sessions/work-research"
+
+[stores.develop]
+path = "~/kura/develop"
+label = "Develop — how it was made to work"
+charter = "examples/rooms/develop/charter.md"
+write_policy = "distiller-only"
+[stores.develop.distill]
+inherit_global_journals = false
+language = "English"
+[stores.develop.distill.journals]
+dsh = "~/dsh/sessions/work-develop"
+
+[stores.manage]
+path = "~/kura/manage"
+label = "Manage — what it changed in the plan"
+charter = "examples/rooms/manage/charter.md"
+write_policy = "distiller-only"
+[stores.manage.distill]
+inherit_global_journals = false
+language = "English"
+[stores.manage.distill.journals]
+dsh = "~/dsh/sessions/work-manage"
+
+[stores.eq]
+path = "~/kura/eq"
+label = "EQ — what was felt, and what settled it"
+charter = "examples/rooms/eq/charter.md"
+write_policy = "distiller-only"
+[stores.eq.distill]
+inherit_global_journals = false
+language = "English"
+[stores.eq.distill.journals]
+dsh = "~/dsh/sessions/work-eq"
+
+[stores.user]
+path = "~/kura/user"
+label = "USER — the person, over time"
+charter = "examples/rooms/user/charter.md"
+write_policy = "distiller-only"
+# `profile.md` beside the charter is read after it when present — see the charter
+# and docs/OPERATING.md "The wide room". It is never written by a model on its own.
+[stores.user.distill]
+inherit_global_journals = false
+language = "English"
+[stores.user.distill.journals]
+dsh = "~/dsh/sessions/work-user"
+
+# ── modes ─────────────────────────────────────────────────────────────────
+# Selector (what a host sends) → room. Lower-case on the wire; display names are the
+# host's business. `user` is the selector for the USER room; the evidence class
+# [USER] is a different thing and never appears here.
+
+[modes]
+research = "research"
+develop = "develop"
+manage = "manage"
+eq = "eq"
+user = "user"
+
+# ── the resident map ──────────────────────────────────────────────────────
+[prefill]
+window_tokens = 131072
+budget_fraction = 0.05
+fresh_days = 14
+pinned_types = ["feedback", "user"]
+trigger_tokens = 24
+
+# No [distill.journals] here on purpose. Five stores, five roots, nothing shared.
+[distill]
+language = "English"
+scribe_slots = 4

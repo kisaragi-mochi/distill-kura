@@ -90,3 +90,13 @@ npx @deepseek-ai/dsh --profile headless "which kura are you reading from?"
 
 A wrong plugin id is skipped **silently** by name-mismatch. `--dump-config` is the only
 way to see that the thing you configured is the thing that loaded.
+
+## More than two rooms
+
+`../rooms/` carries a five-room layout (Research / Develop / Manage / EQ / USER) with a
+charter per room and a config where every room drinks from its own session directory.
+The wiring is the same as `maker`/`eq` here: one preset per room, each naming its
+`store:`. What matters is *when* the choice is made — the preset is read when a session
+is created and never re-read, so the person picks the room first, then starts the
+session. There is no router that reads the first message and decides for them, and a
+session does not change rooms mid-way.
