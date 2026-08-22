@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 
+from ..store import InvalidTag, normalize_tags
 from .sources import Segment
 
 MAX_QUOTE = 400
@@ -94,6 +95,72 @@ def gate(cands: list[dict], segs: list[Segment], store_text: str = "") -> tuple[
                      "judgement": judgement,
                      "unverified_numbers": claims_number and not grounded})
     return kept, dropped, ideas
+
+
+# ── tags: a model proposes, the evidence decides ─────────────────────────
+#
+# A tag is a word, but some words are claims. `entrusted` says the human asked for this
+# to be kept; `emotion-carried` says they reacted; `recurred` says they brought it up
+# again. A model that could attach those freely could immortalise whatever it liked —
+# so each claiming tag needs the class of evidence that would make it true, checked
+# here and recorded in the manifest. The seven words reserved for a future forgetting
+# pass are refused outright: no model assigns them until that pass is designed.
+#
+# Everything else — `decision`, `landmine`'s sibling `hypothesis`, a store's own words —
+# is curation, not a claim about the human, and passes as proposed.
+_ENTRUST = re.compile(
+    r"(remember (this|that|it)|don'?t forget|do not forget|keep (this|that|it) in mind|"
+    r"write (this|that|it) down|覚えて|忘れないで|記憶して|メモして|覚えておいて|覚えといて)", re.I)
+FORGETTING_TAGS = frozenset({"superseded", "absorbed", "fulfilled", "expired",
+                             "corrected", "released", "incidental"})
+
+
+def verify_tags(proposed, evidence: list[dict], recurred_ok: bool = False
+                ) -> tuple[tuple[str, ...], dict[str, dict], dict[str, str]]:
+    """→ (kept, basis, refused).
+
+    `basis[tag]` names the evidence a kept claiming tag rests on, so the manifest can
+    say why the tag exists. `refused[tag]` says why one did not make it — written to
+    the manifest too, because a silently dropped tag looks like one never proposed.
+    `recurred` is decided by the caller (it needs a prior memory and a different
+    occasion, which a single candidate cannot see) and passes only with `recurred_ok`.
+    """
+    try:
+        tags = normalize_tags(proposed)
+    except InvalidTag as e:
+        return (), {}, {"*": str(e)}
+    classes = {e["class"] for e in evidence}
+    user_quotes = [e["text"] for e in evidence if e["class"] == "USER"]
+    kept: list[str] = []
+    basis: dict[str, dict] = {}
+    refused: dict[str, str] = {}
+    for t in tags:
+        if t in FORGETTING_TAGS:
+            refused[t] = "reserved for the forgetting pass; a model may not assign it"
+        elif t == "emotion-carried":
+            if user_quotes:
+                kept.append(t); basis[t] = {"class": "USER", "quote": user_quotes[0]}
+            else:
+                refused[t] = "needs the human's own words; no [USER] quote survived"
+        elif t == "entrusted":
+            q = next((q for q in user_quotes if _ENTRUST.search(q)), None)
+            if q:
+                kept.append(t); basis[t] = {"class": "USER", "quote": q}
+            else:
+                refused[t] = "needs a [USER] quote that asks for this to be kept"
+        elif t == "recurred":
+            if recurred_ok:
+                kept.append(t); basis[t] = {"class": "USER", "quote": user_quotes[0] if user_quotes else ""}
+            else:
+                refused[t] = "recurrence is decided against a prior memory, not proposed"
+        elif t in ("formative", "landmine"):
+            if classes - {"SELF"}:
+                kept.append(t); basis[t] = {"class": sorted(classes - {"SELF"})[0]}
+            else:
+                refused[t] = "needs more than the agent's own prose"
+        else:
+            kept.append(t)
+    return tuple(kept), basis, refused
 
 
 def salvage(raw: str) -> list[dict]:

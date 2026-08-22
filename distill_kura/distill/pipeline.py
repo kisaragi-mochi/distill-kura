@@ -32,9 +32,9 @@ from datetime import datetime, timezone
 from ..recall import recall as kura_recall
 from ..tokens import estimate
 from ..registry import Registry
-from ..store import FROZEN, Store
+from ..store import ANNOTATION_KEYS, FROZEN, Store, normalize_tags
 from . import prompts
-from .gate import attributes_to_human, gate, norm, salvage
+from .gate import attributes_to_human, gate, norm, salvage, verify_tags
 from .seeds import Seeds
 from .sources import Segment, as_evidence, discover_all, source_for
 from .watermark import Watermarks
@@ -45,6 +45,55 @@ MIN_DRINK = 6_000            # less raw material than this is not worth a pass
 
 def _log(s: str) -> None:
     print(f"{datetime.now().strftime('%H:%M:%S')} {s}", flush=True)
+
+
+# The lines a draft carries above its body. TITLE/DESC name the memory, EXTENDS points
+# at one, and the four curation lines are the scribe's judgement about the store, not
+# new facts. All of them sit INSIDE the signed text: an edited tag would break the gate
+# mark exactly like an edited sentence.
+_HEAD_KEYS = ("EXTENDS", "TITLE", "DESC", "TAGS", "BELONGS_BECAUSE", "KEEP", "MAY_FADE")
+
+
+_HEAD_LINE = re.compile(r"^(" + "|".join(_HEAD_KEYS) + r"):[ \t]*(.*)$")
+
+
+def _split_draft(body: str) -> tuple[dict[str, str], str]:
+    """(header lines as a dict, the rest). Only the block at the TOP counts: a memory
+    whose body happens to contain a line starting `KEEP:` keeps it. The block ends at
+    the first line that is neither a header nor blank."""
+    head: dict[str, str] = {}
+    lines = body.splitlines()
+    i = 0
+    while i < len(lines):
+        m = _HEAD_LINE.match(lines[i])
+        if m:
+            head[m.group(1)] = m.group(2).strip()
+        elif lines[i].strip():
+            break
+        i += 1
+    return head, "\n".join(lines[i:]).strip()
+
+
+def _curation_of(out: str) -> tuple[list[str], dict[str, str], str | None]:
+    """Read the optional curation lines from a scribe's output: (tags, annotations,
+    problem). A missing line is simply absent — a model that kept the old shape still
+    produces a memory. A TAGS line that is not a JSON array is a *problem*, named, and
+    the memory is written without tags rather than with a broken frontmatter."""
+    # The scribe's output starts with SLUG:/TITLE:/DESC: lines; the curation lines sit
+    # among them, above BODY:. Everything after BODY: is the memory and is not scanned.
+    head: dict[str, str] = {}
+    for line in out.split("BODY:", 1)[0].splitlines():
+        m = _HEAD_LINE.match(line)
+        if m:
+            head[m.group(1)] = m.group(2).strip()
+    ann = {k.lower(): head[k] for k in ("BELONGS_BECAUSE", "KEEP", "MAY_FADE") if head.get(k)}
+    raw = head.get("TAGS", "")
+    if not raw:
+        return [], ann, None
+    try:
+        return list(normalize_tags(raw)), ann, None
+    except ValueError as e:
+        return [], ann, f"TAGS line unreadable, written untagged: {e}"
 
 
 class Distiller:
@@ -167,6 +216,53 @@ class Distiller:
         return ((verdict if verdict in ("COVERED", "EXTENDS", "NEW") else "NEW"),
                 " ".join(out.splitlines()[1:])[:200], (named.strip("`,.") if named else names[0]))
 
+    # ── recurrence: one word, once ───────────────────────────────────────
+    #
+    # "The human brought this up again" is a property worth recording and a number not
+    # worth keeping. So a COVERED candidate may put ONE `recurred` on the memory that
+    # covers it, under three conditions the model does not get to judge: the candidate
+    # carries the human's own words; the memory was distilled from a DIFFERENT journal
+    # (a second mention in the same session is not another occasion); and the memory
+    # does not already carry the tag. The evidence goes into a manifest of its own,
+    # referenced from the memory, so "why does this say recurred?" stays answerable.
+    #
+    # A memory with no manifest — one written before manifests existed, or by hand —
+    # has no known origin, and "different occasion" cannot be decided. It is left alone
+    # and the fact is logged; widening this is a decision for a person, not a default.
+    def _origin_key(self, slug: str) -> str | None:
+        ref = self.store.frontmatter(slug).get("evidence_manifest", "")
+        if not ref.startswith("sha256:"):
+            return None
+        try:
+            with open(os.path.join(self._evidence_dir(), ref[7:] + ".json"), encoding="utf-8") as f:
+                return str(json.load(f).get("source_key") or "")
+        except (OSError, ValueError):
+            return None
+
+    def recur(self, c: dict, target: str, key: str, source: str) -> str:
+        """→ 'tagged' | 'already' | a reason it was not. Never raises, never counts."""
+        if "USER" not in c["classes"]:
+            return "no [USER] quote: the agent repeating itself is not a recurrence"
+        if "recurred" in self.store.tags(target):
+            return "already"
+        origin = self._origin_key(target)
+        if origin is None:
+            return "origin unknown (no manifest): left untagged"
+        if origin == key:
+            return "same journal as the memory's origin: not another occasion"
+        kept, basis, _ = verify_tags(["recurred"], c["evidence"], recurred_ok=True)
+        if "recurred" not in kept:
+            return "not verified"
+        digest = self._write_manifest({"kind": c.get("kind"), "classes": c["classes"],
+                                       "evidence": c["evidence"], "tags": ["recurred"],
+                                       "tag_basis": basis, "recurrence_of": target},
+                                      source, key)
+        r = self.store.annotate_verified(target, tags=["recurred"],
+                                         meta={"recurred_manifest": f"sha256:{digest}"})
+        if not r.get("ok"):
+            return f"refused: {r.get('error')}"
+        return "tagged" if r.get("changed") else "already"
+
     def sprout(self, c: dict) -> None:
         open_seeds = self.seeds.open_seeds(30)
         if not open_seeds:
@@ -219,15 +315,36 @@ class Distiller:
         if not (slug and desc and body):
             return None
         text = desc.group(1) + "\n" + body.group(1)
+        _, plain = _split_draft(body.group(1))
         return {"slug": re.sub(r"[^a-z0-9-]+", "-", slug.group(1).strip().lower()).strip("-")[:48],
                 "title": (title.group(1).strip()[:40] if title else ""),
                 "description": desc.group(1).strip()[:200],
-                "body": body.group(1).strip(),
+                "body": plain,
                 "kind": c.get("kind", "project"),
                 "evidence": c["evidence"], "classes": c["classes"],
                 "unverified_numbers": c.get("unverified_numbers", False),
                 "judgement": c.get("judgement", False),
-                "attributed_to_human": attributes_to_human(text, c["classes"])}
+                "attributed_to_human": attributes_to_human(text, c["classes"]),
+                **self._curate(c, out)}
+
+    def _curate(self, c: dict, out: str) -> dict:
+        """Tags and the three sentences, from the brain's candidate and the scribe's
+        output, verified against the evidence. The scribe's sentences win (it wrote the
+        final text); tags are the union, and every claiming tag must earn its place."""
+        s_tags, s_ann, problem = _curation_of(out)
+        proposed = list(c.get("tags") or []) + s_tags
+        try:
+            normalize_tags(proposed)
+        except ValueError as e:
+            problem = (problem + "; " if problem else "") + f"candidate tags unreadable: {e}"
+            proposed = s_tags
+        kept, basis, refused = verify_tags(proposed, c["evidence"])
+        ann = {k: c[k] for k in ANNOTATION_KEYS if isinstance(c.get(k), str) and c[k].strip()}
+        ann.update(s_ann)
+        if problem:
+            _log(f"      ⚠ {problem}")
+        return {"tags": list(kept), "tag_basis": basis, "tags_refused": refused,
+                "annotations": ann, "curation_problem": problem}
 
     def _compose_extension(self, c: dict) -> dict | None:
         target = c["extends"]
@@ -244,13 +361,15 @@ class Distiller:
         section = re.search(r"^SECTION:\s*(.+)$", out or "", re.M)
         if not body:
             return None
-        text = (section.group(1) + "\n" if section else "") + body.group(1)
+        _, plain = _split_draft(body.group(1))
+        text = (section.group(1) + "\n" if section else "") + plain
         return {"slug": target, "title": "", "description": "", "extends": target,
                 "body": text.strip(), "kind": c.get("kind", "project"),
                 "evidence": c["evidence"], "classes": c["classes"],
                 "unverified_numbers": c.get("unverified_numbers", False),
                 "judgement": c.get("judgement", False),
-                "attributed_to_human": attributes_to_human(text, c["classes"])}
+                "attributed_to_human": attributes_to_human(text, c["classes"]),
+                **self._curate(c, out or "")}
 
     # ── ⑥ stage ──────────────────────────────────────────────────────────
     # ── provenance that outlives the draft ───────────────────────────────
@@ -268,7 +387,10 @@ class Distiller:
 
     def _write_manifest(self, d: dict, source: str, key: str) -> str:
         manifest = {
-            "gate_version": 1,
+            # 2: tags, the evidence each claiming tag rests on, the ones refused and
+            # why, and the three curation sentences. Additive — a v1 manifest is
+            # still read by everything that reads manifests.
+            "gate_version": 2,
             "source_key": key,
             "source_file": os.path.basename(source),
             "source_sha256": self._source_digest(source),
@@ -277,6 +399,11 @@ class Distiller:
             "quotes": d.get("evidence"),
             "unverified_numbers": d.get("unverified_numbers"),
             "judgement": d.get("judgement"),
+            "tags": list(d.get("tags") or []),
+            "recurrence_of": d.get("recurrence_of"),
+            "tag_evidence": d.get("tag_basis") or {},
+            "tags_refused": d.get("tags_refused") or {},
+            "annotations": d.get("annotations") or {},
             "brain_model": self.models.brain.model,
             "scribe_model": self.models.scribe.model,
             "language": self.language,
@@ -318,9 +445,17 @@ class Distiller:
         if d.get("extends"):
             flags += f"   ↑extends {d['extends']}"
         manifest = self._write_manifest(d, source, getattr(self, "_current_key", ""))
+        cur = ""
+        if d.get("tags"):
+            cur += f"TAGS: {json.dumps(list(d['tags']), ensure_ascii=False)}\n"
+        for k in ANNOTATION_KEYS:
+            if (d.get("annotations") or {}).get(k):
+                cur += f"{k.upper()}: {d['annotations'][k]}\n"
+        if d.get("tags_refused"):
+            flags += "   ⊘tags refused: " + ", ".join(f"{t} ({w})" for t, w in d["tags_refused"].items())
         body = ((f"EXTENDS: {d['extends']}\n" if d.get("extends")
                  else f"TITLE: {d.get('title') or d['slug']}\nDESC: {d['description']}\n")
-                + f"\n{d['body']}\n")
+                + cur + f"\n{d['body']}\n")
         with open(p, "w", encoding="utf-8") as f:
             f.write(f"<!-- distilled {datetime.now(timezone.utc).isoformat()[:19]}Z\n"
                     f"     source: {os.path.basename(source)}\n"
@@ -384,11 +519,18 @@ class Distiller:
                            "the distiller, or its body was edited afterwards"}
         body = re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S)
         kind = re.search(r"kind:\s*(\w+)", raw)
-        ext = re.search(r"^EXTENDS:\s*(\S+)$", body, re.M)
+        head, add = _split_draft(body)
         title = ""
-        if ext:
-            target = ext.group(1)
-            add = re.sub(r"^EXTENDS:.*$", "", body, count=1, flags=re.M).strip()
+        # Curation lines were inside the signed text, so they are the distiller's own.
+        # A TAGS line that does not parse here was not written by stage() — refuse
+        # rather than pour a memory with a frontmatter nobody can read.
+        try:
+            tags = normalize_tags(head.get("TAGS") or [])
+        except ValueError as e:
+            return {"ok": False, "why": f"draft TAGS line unreadable: {e}"}
+        ann = {k: head[k.upper()] for k in ANNOTATION_KEYS if head.get(k.upper())}
+        if head.get("EXTENDS"):
+            target = head["EXTENDS"]
             cur = self.store.read(target)
             m = re.match(r"^---\n.*?\n---\n(.*)$", cur, re.S)
             if not m:
@@ -398,25 +540,24 @@ class Distiller:
             desc = dm.group(1).strip().strip('"') if dm else target
             new_body = m.group(1).rstrip() + "\n\n" + add
         else:
-            dm = re.search(r"^DESC:\s*(.+)$", body, re.M)
-            tm = re.search(r"^TITLE:\s*(.+)$", body, re.M)
             slug_out = slug
-            desc = dm.group(1).strip() if dm else slug
-            title = tm.group(1).strip() if tm else ""
-            new_body = re.sub(r"^(DESC|TITLE):.*$", "", body, flags=re.M).strip()
+            desc = head.get("DESC") or slug
+            title = head.get("TITLE", "")
+            new_body = add
         # The pour has been through the gate, so it uses the verified door: a store set
         # to `distiller-only` accepts this and refuses a bare tool call.
         man = re.search(r"evidence_manifest:\s*(sha256:[0-9a-f]{64})", raw.split("-->")[0])
         r = self.store.pour_verified(slug_out, desc, new_body,
                                      type_=kind.group(1) if kind else "project",
                                      title=title,
-                                     meta={"evidence_manifest": man.group(1)} if man else None)
+                                     meta={"evidence_manifest": man.group(1)} if man else None,
+                                     tags=tags, annotations=ann)
         if r.get("ok"):
             os.rename(p, p + ".poured")
             self._store_text = None
         # `created` already means "the file did not exist"; naming the slug here too
         # overwrote that answer with a string.
-        return {**r, "poured_into": slug_out, "extended": bool(ext)}
+        return {**r, "poured_into": slug_out, "extended": bool(head.get("EXTENDS"))}
 
     def judge_draft(self, path: str) -> dict:
         raw = open(path, encoding="utf-8").read()
@@ -459,8 +600,12 @@ class Distiller:
                     continue
                 if j["verdict"] == "FIX" and j.get("new_body"):
                     raw = open(p, encoding="utf-8").read()
-                    first = re.search(r"^(EXTENDS|TITLE|DESC):.*$", raw, re.M)
-                    body = (first.group(0) + "\n\n" if first else "") + j["new_body"] + "\n"
+                    # Every header line survives a FIX, not just the first one: keeping
+                    # only TITLE dropped DESC, and the memory poured with its slug as
+                    # the index trigger. The scribe rewrote the BODY, nothing else.
+                    hd, _ = _split_draft(self._draft_body(raw))
+                    keep_head = [f"{k}: {v}" for k, v in hd.items()]
+                    body = ("\n".join(keep_head) + "\n\n" if keep_head else "") + j["new_body"] + "\n"
                     # The scribe rewrote the body with the evidence in front of it, so it
                     # is still gated — but the mark has to follow the text it signs.
                     keep = re.sub(r"gate:\s*[0-9a-f]{32}", f"gate: {self._mark(body)}",
@@ -562,7 +707,7 @@ class Distiller:
             pass                        # a metric must never break a pass
 
     def run(self, session: str | None = None, chunks: int = 1) -> dict:
-        made, killed, covered, sown = [], 0, 0, 0
+        made, killed, covered, sown, recurred = [], 0, 0, 0, 0
         for _ in range(chunks):
             got = self.sip_one(session)
             if not got:
@@ -600,9 +745,16 @@ class Distiller:
                 _log(f"    ○ {c['topic']} [{','.join(c['classes'])}] → {verdict} {target or ''}")
                 if verdict == "COVERED":
                     covered += 1
+                    rec = self.recur(c, target, key, path) if target else "no target named"
+                    if rec == "tagged":
+                        recurred += 1
+                        _log(f"      ↺ recurred: {target}")
+                    elif rec != "already":
+                        _log(f"      · not marked recurred — {rec}")
                     with open(os.path.join(self.still, "dropped.jsonl"), "a", encoding="utf-8") as f:
                         f.write(json.dumps({**{k: v for k, v in c.items() if k != "evidence"},
                                             "why_dropped": f"COVERED by {target}", "reason": why,
+                                            "recurred": rec,
                                             "at": datetime.now(timezone.utc).isoformat()},
                                            ensure_ascii=False) + "\n")
                     continue
@@ -630,14 +782,15 @@ class Distiller:
                 "raw_chars": raw_chars, "raw_tokens_est": estimate(as_evidence(segs)),
                 "candidates": len(cands), "gated_kept": len(kept),
                 "gated_dropped": len(dropped), "ideas": len(ideas),
-                "covered": covered, "drafts": drafted,
+                "covered": covered, "recurred": recurred, "drafts": drafted,
                 "draft_chars": draft_chars,
                 "draft_tokens_est": estimate("\n".join(draft_text)),
                 "index_tokens_est": estimate(self.store.index_text()),
             })
         if not made and not killed and not covered and not sown:
             return {"ok": True, "why": "nothing worth drinking"}
-        return {"ok": True, "drafts": made, "dropped": killed, "covered": covered, "seeds": sown}
+        return {"ok": True, "drafts": made, "dropped": killed, "covered": covered,
+                "recurred": recurred, "seeds": sown}
 
     def night(self, idle_min: float = 20.0, poll_s: float = 30.0) -> None:
         """Run a pass whenever the journals have been quiet long enough. Never gets in
