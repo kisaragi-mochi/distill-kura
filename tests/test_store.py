@@ -154,3 +154,17 @@ def test_bodies_are_stored_verbatim(tmp_path):
     body = 'a snippet: {"a": {{nested}}} and ${SHELL} and 100% of it'
     s.remember("verbatim", "d", body)
     assert body in s.read("verbatim")
+
+
+def test_the_charter_is_not_a_memory(tmp_path):
+    """Writing a store's charter made it appear as a memory the moment it existed:
+    unindexed in `doctor`, and walkable by recall."""
+    s = make(tmp_path)
+    with open(os.path.join(s.path, "charter.md"), "w", encoding="utf-8") as f:
+        f.write("you are one worker in a memory system\n")
+    with open(os.path.join(s.path, "README.md"), "w", encoding="utf-8") as f:
+        f.write("about this store\n")
+    s.remember("real", "a real memory", "body")
+    assert s.slugs() == ["real"]
+    assert s.doctor()["not_in_index"] == []
+    assert not s.remember("charter", "d", "b")["ok"]       # cannot be created as one either

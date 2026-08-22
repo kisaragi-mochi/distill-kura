@@ -28,6 +28,10 @@ from dataclasses import dataclass, field
 from .tokens import estimate
 
 INDEX = "MEMORY.md"
+# Files that live in a store directory by convention and are NOT memories. The store's
+# own charter was being counted as a memory the moment one was written — it appeared in
+# `doctor` as unindexed and would have been walked by recall.
+RESERVED = {INDEX, "charter.md", "README.md", "persona.json"}
 
 
 class InvalidSlug(ValueError):
@@ -126,7 +130,7 @@ class Store:
         reports what was excluded: dropping it silently would be its own failure."""
         found = [(os.path.basename(p)[:-3], p)
                  for p in glob.glob(os.path.join(self.path, "*.md"))
-                 if os.path.basename(p) != INDEX and not os.path.basename(p).startswith("_")]
+                 if os.path.basename(p) not in RESERVED and not os.path.basename(p).startswith("_")]
         found += [("_study/" + os.path.basename(p)[:-3], p)
                   for p in glob.glob(os.path.join(self.path, "_study", "*.md"))
                   if not os.path.basename(p).startswith("_")]
@@ -163,7 +167,7 @@ class Store:
         """Files that look like memories but resolve outside the store."""
         found = [(os.path.basename(p)[:-3], p)
                  for p in glob.glob(os.path.join(self.path, "*.md"))
-                 if os.path.basename(p) != INDEX and not os.path.basename(p).startswith("_")]
+                 if os.path.basename(p) not in RESERVED and not os.path.basename(p).startswith("_")]
         found += [("_study/" + os.path.basename(p)[:-3], p)
                   for p in glob.glob(os.path.join(self.path, "_study", "*.md"))
                   if not os.path.basename(p).startswith("_")]
@@ -420,6 +424,8 @@ class Store:
         slug = re.sub(r"[^a-z0-9-]+", "-", slug.lower()).strip("-")
         if not slug:
             return {"ok": False, "error": "slug required"}
+        if f"{slug}.md" in RESERVED or slug.upper() == "MEMORY":
+            return {"ok": False, "error": f"'{slug}' is a reserved file name in a store"}
         # Stored VERBATIM. It is tempting to escape `{` here because `{{...}}` is a
         # variable in most prompt templates — but a memory store holds code, JSON and
         # shell, and silently rewriting a body corrupts exactly the memories that carry
