@@ -136,6 +136,15 @@ class Distiller:
         self.charter = (open(store.charter, encoding="utf-8").read()
                         if store.charter and os.path.exists(store.charter)
                         else prompts.DEFAULT_CHARTER)
+        # The learned profile, when the store has a sound one, is read AFTER the
+        # charter by every role — still one byte-identical head per store, so still
+        # one cached prefix. A broken profile is named at construction and NOT read:
+        # the fixed charter carries on alone, visibly rather than as a quiet fallback.
+        self.profile = store.profile_state()
+        if self.profile["state"] == "present":
+            self.charter = self.charter.rstrip("\n") + "\n\n" + store.profile_text().strip() + "\n"
+        elif self.profile["state"] == "broken":
+            _log(f"⚠ learned profile not read — {self.profile['why']}")
         self.still = store.still
         self.drafts_dir = os.path.join(self.still, "drafts")
         self.marks = Watermarks(os.path.join(self.still, "watermark.json"))
@@ -262,6 +271,41 @@ class Distiller:
         if not r.get("ok"):
             return f"refused: {r.get('error')}"
         return "tagged" if r.get("changed") else "already"
+
+    # ── the learned profile: drafted from this store, applied by a person ──
+    def profile_draft(self) -> dict:
+        """Write `_still/profile.draft.md` from THIS store's memories. Observable, never
+        applied: the file a person reads before deciding is the whole output. A store
+        with no memories yields no draft — there is nothing to have learned from."""
+        slugs = self.store.slugs()
+        if not slugs:
+            return {"ok": False, "why": "no memories: nothing to draft a profile from"}
+        bodies = []
+        room = 60_000
+        for sl in slugs:
+            t = self.store.read_exact(sl)
+            if room - len(t) < 0:
+                _log(f"  profile draft: stopped reading at {sl} ({len(slugs)} memories, budget spent)")
+                break
+            bodies.append(f"=== {sl} ===\n{t}")
+            room -= len(t)
+        out = self.brain(prompts.PROFILE_SYS.format(language=self.language),
+                         f"=== INDEX ===\n{self.store.index_text()}\n\n"
+                         f"=== MEMORIES ===\n" + "\n\n".join(bodies), 1600)
+        if not out.strip().startswith("##"):
+            return {"ok": False, "why": "the model did not keep the shape (no heading first)"}
+        # The same check the store applies on read: a draft that would be refused as
+        # a profile is refused as a draft, and the reason is in the answer.
+        probe_state = _probe_profile(self.store, out)
+        if probe_state["state"] != "present":
+            return {"ok": False, "why": f"draft refused: {probe_state['why']}"}
+        tmp = os.path.join(self.still, "profile.draft.md")
+        os.makedirs(self.still, exist_ok=True)
+        with open(tmp + ".tmp", "w", encoding="utf-8") as f:
+            f.write(out.strip() + "\n")
+        os.replace(tmp + ".tmp", tmp)
+        return {"ok": True, "draft": tmp, "chars": len(out),
+                "note": "a draft, not a profile. Read it; `kura profile apply` copies it by hand."}
 
     def sprout(self, c: dict) -> None:
         open_seeds = self.seeds.open_seeds(30)
@@ -820,6 +864,16 @@ class Distiller:
                 _log(f"  {self.drain()}")
             except Exception as e:       # a bad pass must not end the watch
                 _log(f"  pass failed: {type(e).__name__}: {e}")
+
+
+def _probe_profile(store: Store, text: str) -> dict:
+    """Apply the store's own profile check to a text that is not on disk yet."""
+    for rx, why in ((store._PROFILE_TABLE, "looks like a table of numbers, not sentences"),
+                    (store._PROFILE_SCORE, "carries a score or weight")):
+        m = rx.search(text)
+        if m:
+            return {"state": "broken", "why": f"{why}: {m.group(0).strip()[:60]!r}"}
+    return {"state": "present", "why": ""}
 
 
 def drafts_of(store: Store) -> list[tuple[str, str, str]]:

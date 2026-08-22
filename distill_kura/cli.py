@@ -5,6 +5,7 @@
     kura recall "question" [-s eq]    recall by hand
     kura remember slug "desc" [-]     write one fact (body on stdin with `-`)
     kura annotate slug --tag landmine add tags / the three sentences to one memory
+    kura profile show|draft|apply     the wide room's learned profile (draft → read → apply by hand)
     kura doctor [-s eq]               health of a store (--all for every one)
     kura weave [-s eq] [--status]     re-weave the resident index (three-layer cloth)
     kura prefill [-s eq]              print the standing block a host should inject
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from .recall import recall as do_recall
@@ -89,6 +91,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("annotate", help="add tags / the three sentences to one memory")
     p.add_argument("slug")
     _annotation_args(p)
+
+    p = sub.add_parser("profile", help="the learned profile of a store (the wide room)")
+    psub = p.add_subparsers(dest="pcmd", required=True)
+    psub.add_parser("show", help="state and text of profile.md, and whether a draft waits")
+    psub.add_parser("draft", help="write _still/profile.draft.md from this store's memories")
+    psub.add_parser("apply", help="copy the draft over profile.md — a person's act, never automatic")
 
     p = sub.add_parser("doctor", help="health check")
     p.add_argument("--all", action="store_true", help="every store, not just one")
@@ -250,6 +258,34 @@ def main(argv: list[str] | None = None) -> int:
         r = store.annotate_direct(a.slug, tags=a.tag, annotations=_annotations_of(a))
         print(json.dumps(r, ensure_ascii=False))
         return 0 if r.get("ok") else 1
+
+    if a.cmd == "profile":
+        import shutil
+        draft = os.path.join(store.still, "profile.draft.md")
+        if a.pcmd == "show":
+            st = store.profile_state()
+            print(json.dumps({"store": store.name, **st,
+                              "draft_waiting": os.path.exists(draft),
+                              "text": store.profile_text()}, ensure_ascii=False, indent=1))
+            return 0
+        if a.pcmd == "draft":
+            r = _distiller(reg, store).profile_draft()
+            print(json.dumps(r, ensure_ascii=False))
+            return 0 if r.get("ok") else 1
+        if a.pcmd == "apply":
+            # A person copying a file they have read. Refused on a frozen store, because
+            # frozen means nothing is written there by anyone through this tool.
+            if store.write_policy == "frozen":
+                print(json.dumps({"ok": False, "error": f"store '{store.name}' is frozen"}))
+                return 1
+            if not os.path.exists(draft):
+                print(json.dumps({"ok": False, "error": "no draft: run `kura profile draft` first"}))
+                return 1
+            shutil.copyfile(draft, store.profile_path)
+            os.remove(draft)
+            print(json.dumps({"ok": True, "applied": store.profile_path,
+                              **store.profile_state()}, ensure_ascii=False))
+            return 0
 
     if a.cmd == "distill":
         from .distill import drafts_of

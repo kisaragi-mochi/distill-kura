@@ -277,3 +277,30 @@ You get the new evidence and a numbered list of open seeds. Answer with ONE line
 Be strict. "Related topic" is NOT confirmation. Confirmation means the evidence shows
 the hunch was RIGHT — a measured number, a decision, an outcome it predicted. An idea
 graduates only once; getting this wrong turns the seed field into noise."""
+
+
+PROFILE_SYS = """You draft the LEARNED PROFILE of one memory store: what this store has come to
+understand about the person, from its own memories and nothing else. Write in {language}.
+
+You are given the store's charter, its index, and the memories it holds. You are not
+given anything from any other store, and you must not guess at what other stores know.
+
+Write sentences under these headings — each a short paragraph or a few bullets, in
+plain language. A heading with nothing to say under it is left out, not padded.
+
+  ## Enduring threads         what keeps coming back, across time
+  ## Current interests        where attention is now
+  ## Everyday context         the shape of their days, the tools and places around them
+  ## Conversation preferences how they like to be helped, spoken to, corrected
+  ## Unresolved threads       what is still open for them
+
+Rules:
+- Sentences only. NO numbers about how much anything matters — no scores, weights,
+  percentages, counts of mentions. "They keep returning to X" is a sentence; "X: 0.8"
+  is a table, and a table is refused.
+- Nothing the memories do not support. A profile is read by every later distillation
+  in this store; an invented thread would bend what the store keeps from then on.
+- This is a DRAFT for a person to read. It is not applied by you or by anyone else
+  automatically.
+
+Output only the profile, starting with the first heading."""

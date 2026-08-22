@@ -31,7 +31,7 @@ INDEX = "MEMORY.md"
 # Files that live in a store directory by convention and are NOT memories. The store's
 # own charter was being counted as a memory the moment one was written — it appeared in
 # `doctor` as unindexed and would have been walked by recall.
-RESERVED = {INDEX, "charter.md", "README.md", "persona.json"}
+RESERVED = {INDEX, "charter.md", "README.md", "persona.json", "profile.md"}
 
 
 class InvalidSlug(ValueError):
@@ -684,6 +684,53 @@ class Store:
                 return {"ok": True, "slug": slug, "created": not existed, "indexed": True}
             return {"ok": True, "slug": slug, "created": not existed, "indexed": False}
 
+    # ── the learned profile (optional; the wide room's growing understanding) ──
+    #
+    # A few sections in plain sentences that a store may keep beside its charter —
+    # enduring threads, current interests, everyday context, how the person likes to
+    # be helped, what is unfinished. Read AFTER the charter by this store's distiller,
+    # and offered to the host at GET /profile; never part of the resident map, so the
+    # byte-stable block is untouched by it.
+    #
+    # It is a text, not a table. A profile that carries numbers about how much things
+    # matter — `trading: 0.8`, `interest score 7` — is exactly the weight this project
+    # refuses to store, so such a file is reported as BROKEN and not read. Absence is
+    # reported too: a missing profile must look different from an empty one, or a
+    # deleted file would silently become "this person has no threads".
+    @property
+    def profile_path(self) -> str:
+        return os.path.join(self.path, "profile.md")
+
+    _PROFILE_TABLE = re.compile(r"^\s*[-*|]?\s*[^:|\n]{1,60}[:|]\s*\d+(\.\d+)?\s*%?\s*\|?\s*$", re.M)
+    _PROFILE_SCORE = re.compile(r"\b(score|weight|priority|importance|salience)\b\s*[:=]?\s*\d", re.I)
+
+    def profile_state(self) -> dict:
+        """{"state": absent | present | broken, "why": ..., "chars": n}."""
+        p = self.profile_path
+        if not os.path.exists(p):
+            return {"state": "absent", "why": "no profile.md beside the charter", "chars": 0}
+        if not contained(self.path, p):
+            return {"state": "broken", "why": "profile.md resolves outside the store", "chars": 0}
+        try:
+            text = open(p, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError) as e:
+            return {"state": "broken", "why": f"unreadable: {e}", "chars": 0}
+        if not text.strip():
+            return {"state": "broken", "why": "profile.md is empty", "chars": 0}
+        for rx, why in ((self._PROFILE_TABLE, "looks like a table of numbers, not sentences"),
+                        (self._PROFILE_SCORE, "carries a score or weight; a profile holds no numbers about how much things matter")):
+            m = rx.search(text)
+            if m:
+                return {"state": "broken", "why": f"{why}: {m.group(0).strip()[:60]!r}",
+                        "chars": len(text)}
+        return {"state": "present", "why": "", "chars": len(text)}
+
+    def profile_text(self) -> str:
+        """The profile when it is present and sound; otherwise nothing. Callers that
+        need to know WHY nothing ask `profile_state()` — this one is for reading."""
+        return (open(self.profile_path, encoding="utf-8").read()
+                if self.profile_state()["state"] == "present" else "")
+
     # ── read log (append-only; NEVER used for ranking) ───────────────────
     def note_read(self, names: list[str], why: str = "recall") -> None:
         if not names:
@@ -774,6 +821,7 @@ class Store:
                 "bytes": sum(len(t.encode("utf-8")) for t in files.values()),
                 "unit": None, "limit": None, "pressure": None,
             },
+            "learned_profile": self.profile_state(),
             "write_policy": self.write_policy,
             "model_profile": self.model_profile,
             "persona": self.persona,

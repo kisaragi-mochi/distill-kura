@@ -148,6 +148,9 @@ def _make_handler(reg: Registry):
                     "persona_path": st.persona,
                     "persona_exists": bool(st.persona and os.path.exists(st.persona)),
                     "charter": (open(st.charter, encoding="utf-8").read() if st.charter else ""),
+                    # The learned profile, with its state: a host that wants to show
+                    # or inject it can; "absent" and "broken" are distinguishable.
+                    "learned_profile": {**st.profile_state(), "text": st.profile_text()},
                     "modes": [m for m, t in reg.modes.items() if t == st.name]})
             if path.startswith("/memory/"):
                 # EXACT: an explicit read answers for the memory that was named, or 404.
