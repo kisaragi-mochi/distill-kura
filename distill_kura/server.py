@@ -30,6 +30,16 @@ from . import prefill as prefill_mod
 from .recall import recall
 from .tokens import estimate
 from .registry import Registry
+from .store import ANNOTATION_KEYS
+
+
+def _annotations(p: dict) -> dict:
+    """The three sentences, from either a nested `annotations` object or flat keys."""
+    out = dict(p.get("annotations") or {})
+    for k in ANNOTATION_KEYS:
+        if p.get(k):
+            out[k] = p[k]
+    return out
 
 
 def _make_handler(reg: Registry):
@@ -145,9 +155,13 @@ def _make_handler(reg: Registry):
                 # a name is also the one place a caller could try to name a path.
                 slug = urllib.parse.unquote(path.split("/memory/", 1)[1])
                 t = st.read_exact(slug)
+                s_ = st.resolve_exact(slug)
                 return self._send(200 if t else 404,
-                                  {"store": st.name, "slug": st.resolve_exact(slug),
-                                   "text": t})
+                                  {"store": st.name, "slug": s_, "text": t,
+                                   # Words about the memory, never weights: read-side
+                                   # callers may show them, nothing ranks by them.
+                                   "tags": list(st.tags(s_)) if s_ else [],
+                                   "annotations": st.annotations(s_) if s_ else {}})
             self._send(404, {"error": "not found", "path": path})
 
         # ── POST ─────────────────────────────────────────────────────────
@@ -174,7 +188,15 @@ def _make_handler(reg: Registry):
                 # policy allows one. The distiller's verified pour is a different door.
                 r = st.remember_direct(p.get("slug", ""), p.get("description", ""),
                                        p.get("body", ""), p.get("type", "project"),
-                                       p.get("hook"), p.get("title"))
+                                       p.get("hook"), p.get("title"),
+                                       tags=p.get("tags"), annotations=_annotations(p))
+                return self._send(200 if r.get("ok") else 403, r)
+            if path.startswith("/annotate"):
+                # Tags and the three sentences on an existing memory, through the DIRECT
+                # door: a distiller-only store refuses this too. The distiller's own
+                # annotations go through `annotate_verified`, which has no route.
+                r = st.annotate_direct(p.get("slug", ""), tags=p.get("tags"),
+                                       annotations=_annotations(p))
                 return self._send(200 if r.get("ok") else 403, r)
             self._send(404, {"error": "not found", "path": path})
 

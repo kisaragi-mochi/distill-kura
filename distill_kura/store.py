@@ -56,10 +56,70 @@ name: {slug}
 description: {desc}
 metadata:
   type: {type}
-{extra}---
+{extra}{top}---
 
 {body}
 """
+
+
+# ── tags and annotations ─────────────────────────────────────────────────
+#
+# A memory lives in ONE store (that is its ownership) and may carry SEVERAL tags (that
+# is its character). Tags are words, never weights: there is no score behind a tag, no
+# count of how often it was proposed, and nothing here ranks by them. The reserved
+# words are documented so that two writers mean the same thing by `landmine`; the
+# vocabulary is open so a store can grow its own.
+#
+# The three annotations are short editorial sentences, not fields to fill: why this
+# memory belongs in THIS store, what must survive, and what may thin out under capacity
+# pressure. They are judgements about curation, never new facts — a pour that widened
+# the body through `keep` would be the gate's failure, so the scribe is told so.
+RESERVED_TAGS = frozenset({
+    # content / use
+    "hypothesis", "evidence", "research-result", "decision", "implementation",
+    "commitment", "reference", "feedback",
+    # character / reason to hold
+    "recurred", "emotion-carried", "formative", "entrusted", "landmine", "resolved", "settled",
+    # reserved for a future, still undesigned, forgetting pass — never auto-applied
+    "superseded", "absorbed", "fulfilled", "expired", "corrected", "released", "incidental",
+})
+ANNOTATION_KEYS = ("belongs_because", "keep", "may_fade")
+_TAG = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+class InvalidTag(ValueError):
+    """A tag that is not a lower-case kebab word. Raised, not dropped: a silently
+    discarded tag looks exactly like one that was never proposed."""
+
+
+def normalize_tags(tags) -> tuple[str, ...]:
+    """Dedupe and order deterministically, so the same set always renders to the same
+    bytes and a merge of nothing new is a no-op on disk. Accepts a list, a tuple, a JSON
+    array in a string, or a single word."""
+    if tags is None:
+        return ()
+    if isinstance(tags, str):
+        s = tags.strip()
+        if s.startswith("["):
+            try:
+                tags = json.loads(s)
+            except ValueError as e:
+                raise InvalidTag(f"tags is not a JSON array: {s!r}") from e
+        else:
+            tags = [t for t in re.split(r"[,\s]+", s) if t]
+    out: set[str] = set()
+    for t in tags:
+        if not isinstance(t, str):
+            raise InvalidTag(f"a tag must be a string, got {type(t).__name__} ({t!r})")
+        t = t.strip()
+        if not _TAG.match(t):
+            raise InvalidTag(f"{t!r} is not a tag: lower-case a-z, 0-9 and '-', up to 40 chars")
+        out.add(t)
+    return tuple(sorted(out))
+
+
+def _render_tags(tags: tuple[str, ...]) -> str:
+    return json.dumps(list(tags), ensure_ascii=False)
 
 
 # Who may write, in three states rather than a boolean.
@@ -309,6 +369,46 @@ class Store:
         out.pop("metadata", None)          # the container line, not a value
         return out
 
+    @staticmethod
+    def _split(text: str) -> tuple[str, str]:
+        """(frontmatter block, body) of a memory file. Body is what follows the closing
+        `---`, with the blank line the template puts there removed."""
+        if not text.startswith("---"):
+            return "", text
+        end = text.find("\n---", 3)
+        if end == -1:
+            return "", text
+        return text[3:end], text[end + 4:].lstrip("\n")
+
+    def tags(self, slug: str) -> tuple[str, ...]:
+        """The memory's tags, normalised. A memory written before tags existed has none,
+        and that is an ordinary answer, not an error. A `tags:` line that cannot be read
+        is ALSO an empty answer here — and a line in `doctor()`, so the rot is visible
+        rather than quietly treated as 'untagged'."""
+        raw = self.frontmatter(slug).get("tags")
+        if not raw:
+            return ()
+        try:
+            return normalize_tags(raw)
+        except InvalidTag:
+            return ()
+
+    def tag_problems(self, slug: str) -> str | None:
+        """Why `tags(slug)` would be empty when the file says otherwise, or None."""
+        raw = self.frontmatter(slug).get("tags")
+        if not raw:
+            return None
+        try:
+            normalize_tags(raw)
+            return None
+        except InvalidTag as e:
+            return str(e)
+
+    def annotations(self, slug: str) -> dict[str, str]:
+        """`belongs_because` / `keep` / `may_fade` — only the ones present."""
+        fm = self.frontmatter(slug)
+        return {k: fm[k] for k in ANNOTATION_KEYS if fm.get(k)}
+
     def mtime(self, slug: str) -> float:
         s = self.resolve(slug)
         if not s:
@@ -346,11 +446,7 @@ class Store:
         return order
 
     # ── writing ──────────────────────────────────────────────────────────
-    def remember_direct(self, slug: str, description: str, body: str,
-                        type_: str = "project", hook: str | None = None,
-                        title: str | None = None) -> dict:
-        """A write that did NOT come through the distiller's evidence gate — a tool call,
-        the CLI, a human. Allowed only under `direct-allowed`."""
+    def _direct_refused(self) -> dict | None:
         if self.write_policy == FROZEN:
             # Do not point the caller at a door that is also shut.
             return {"ok": False, "error": f"store '{self.name}' is frozen: nothing may write"}
@@ -358,11 +454,23 @@ class Store:
             return {"ok": False, "error": f"store '{self.name}' is {self.write_policy}: "
                                           f"direct writes are refused; memories enter "
                                           f"through the distiller's evidence gate"}
-        return self._write(slug, description, body, type_, hook, title)
+        return None
+
+    def remember_direct(self, slug: str, description: str, body: str,
+                        type_: str = "project", hook: str | None = None,
+                        title: str | None = None, tags=None,
+                        annotations: dict | None = None) -> dict:
+        """A write that did NOT come through the distiller's evidence gate — a tool call,
+        the CLI, a human. Allowed only under `direct-allowed`."""
+        if (r := self._direct_refused()):
+            return r
+        return self._write(slug, description, body, type_, hook, title,
+                           tags=tags, annotations=annotations)
 
     def pour_verified(self, slug: str, description: str, body: str,
                       type_: str = "project", hook: str | None = None,
-                      title: str | None = None, meta: dict | None = None) -> dict:
+                      title: str | None = None, meta: dict | None = None,
+                      tags=None, annotations: dict | None = None) -> dict:
         """A write from a draft that passed the gate. Refused only when `frozen`.
 
         A separate method rather than a `verified=True` argument on purpose: the
@@ -370,7 +478,85 @@ class Store:
         by flipping a flag it happens to have in scope."""
         if self.write_policy == FROZEN:
             return {"ok": False, "error": f"store '{self.name}' is frozen: nothing may write"}
-        return self._write(slug, description, body, type_, hook, title, meta)
+        return self._write(slug, description, body, type_, hook, title, meta,
+                           tags=tags, annotations=annotations)
+
+    # ── annotating: tags and the three sentences, without touching the body ──
+    #
+    # Two doors again, for the same reason as above. A tag is small, and it is tempting
+    # to let anyone add one — but `entrusted` on a memory is a claim that the human asked
+    # for it to be kept, and a tool that can write that claim on a `distiller-only` store
+    # is a tool that can immortalise whatever it likes. So the direct door obeys the
+    # direct policy, and the verified door is reached only from the distiller, which
+    # carries evidence for every reserved tag it adds.
+    def annotate_direct(self, slug: str, tags=None, annotations: dict | None = None) -> dict:
+        if (r := self._direct_refused()):
+            return r
+        return self._annotate(slug, tags, annotations, None)
+
+    def annotate_verified(self, slug: str, tags=None, annotations: dict | None = None,
+                          meta: dict | None = None) -> dict:
+        if self.write_policy == FROZEN:
+            return {"ok": False, "error": f"store '{self.name}' is frozen: nothing may write"}
+        return self._annotate(slug, tags, annotations, meta)
+
+    def _annotate(self, slug: str, tags, annotations: dict | None, meta: dict | None) -> dict:
+        """Merge tags (union) and annotations (given keys override) into one memory's
+        frontmatter. Body, description and the index line are untouched.
+
+        Idempotent on disk: when the merge changes nothing, the file is not rewritten —
+        not even its mtime — so `recurred` proposed a second time is a no-op, and there
+        is no counter anywhere that could turn 'proposed twice' into 'twice as important'.
+        The slug is EXACT: a fuzzy match here would decorate a neighbour."""
+        if not self._still_ourselves():
+            return {"ok": False, "error": f"store '{self.name}' no longer resolves to the "
+                                          f"directory it was opened on ({self.path}); "
+                                          f"refusing to write through the substitution"}
+        s = self.resolve_exact(slug)
+        if not s:
+            return {"ok": False, "error": f"no memory named {slug!r} in store '{self.name}'"}
+        try:
+            add = normalize_tags(tags)
+        except InvalidTag as e:
+            return {"ok": False, "error": str(e)}
+        for k in (annotations or {}):
+            if k not in ANNOTATION_KEYS:
+                return {"ok": False, "error": f"{k!r} is not an annotation; "
+                                              f"one of {list(ANNOTATION_KEYS)}"}
+        with self._locked():
+            text = self._open(s)
+            fm_raw, body = self._split(text)
+            if not fm_raw:
+                return {"ok": False, "error": f"{s} has no frontmatter to annotate"}
+            fm = self.frontmatter(s)
+            have = self.tags(s)
+            new_tags = normalize_tags(tuple(have) + add)
+            new_ann = {**self.annotations(s), **{k: v for k, v in (annotations or {}).items() if v}}
+            new_meta = {**{k: v for k, v in fm.items()
+                           if k not in ("name", "description", "type", "tags") and k not in ANNOTATION_KEYS},
+                        **(meta or {})}
+            rendered = self._render(s, fm.get("description", ""), fm.get("type", "project"),
+                                    body, new_meta, new_tags, new_ann)
+            if rendered == text:
+                return {"ok": True, "slug": s, "changed": False, "tags": list(new_tags)}
+            tmp = self.file_of(s) + f".tmp.{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(rendered)
+            os.replace(tmp, self.file_of(s))
+            return {"ok": True, "slug": s, "changed": True, "tags": list(new_tags)}
+
+    @staticmethod
+    def _render(slug: str, description: str, type_: str, body: str, meta: dict,
+                tags: tuple[str, ...], annotations: dict) -> str:
+        """One memory file, from parts. The only place the template is filled, so that
+        a rewrite and a fresh write produce the same bytes for the same parts."""
+        extra = "".join(f"  {k}: {str(v).replace(chr(10), ' ')}\n" for k, v in meta.items())
+        if tags:
+            extra += f"  tags: {_render_tags(tags)}\n"
+        top = "".join(f"{k}: {str(annotations[k]).replace(chr(10), ' ')}\n"
+                      for k in ANNOTATION_KEYS if annotations.get(k))
+        return _FRONT.format(slug=slug, desc=description.replace("\n", " "), type=type_,
+                             extra=extra, top=top, body=body.rstrip() + "\n")
 
     def remember(self, slug: str, description: str, body: str, type_: str = "project",
                  hook: str | None = None, title: str | None = None) -> dict:
@@ -414,7 +600,7 @@ class Store:
 
     def _write(self, slug: str, description: str, body: str, type_: str = "project",
                hook: str | None = None, title: str | None = None,
-               meta: dict | None = None) -> dict:
+               meta: dict | None = None, tags=None, annotations: dict | None = None) -> dict:
         """Write ONE fact; add one index line. Existing file → body replaced and the
         index line refreshed (a stale index line keeps speaking the old fact).
 
@@ -428,6 +614,16 @@ class Store:
             return {"ok": False, "error": "slug required"}
         if f"{slug}.md" in RESERVED or slug.upper() == "MEMORY":
             return {"ok": False, "error": f"'{slug}' is a reserved file name in a store"}
+        # Tags are validated BEFORE anything is touched. A bad tag refused after the body
+        # was written would leave a memory without the tags its writer believes it has.
+        try:
+            new_tags = normalize_tags(tags)
+        except InvalidTag as e:
+            return {"ok": False, "error": str(e)}
+        for k in (annotations or {}):
+            if k not in ANNOTATION_KEYS:
+                return {"ok": False, "error": f"{k!r} is not an annotation; "
+                                              f"one of {list(ANNOTATION_KEYS)}"}
         # Stored VERBATIM. It is tempting to escape `{` here because `{{...}}` is a
         # variable in most prompt templates — but a memory store holds code, JSON and
         # shell, and silently rewriting a body corrupts exactly the memories that carry
@@ -444,17 +640,22 @@ class Store:
             # (a session id, a node type, a modified stamp written by another tool).
             # Keep what was there; the caller's keys override, nothing else is lost.
             kept: dict[str, str] = {}
+            kept_tags: tuple[str, ...] = ()
+            kept_ann: dict[str, str] = {}
             if existed:
                 kept = {k: v for k, v in self.frontmatter(slug).items()
-                        if k not in ("name", "description", "type")}
+                        if k not in ("name", "description", "type", "tags")
+                        and k not in ANNOTATION_KEYS}
+                # Tags and annotations survive a body rewrite the same way: a caller
+                # that does not mention them has not asked to remove them.
+                kept_tags = self.tags(slug)
+                kept_ann = self.annotations(slug)
             merged = {**kept, **(meta or {})}
             tmp = path + f".tmp.{os.getpid()}"
             with open(tmp, "w", encoding="utf-8") as f:
-                extra = "".join(f"  {k}: {str(v).replace(chr(10), ' ')}\n"
-                                for k, v in merged.items())
-                f.write(_FRONT.format(slug=slug, desc=description.replace("\n", " "),
-                                      type=type_, extra=extra,
-                                      body=body.rstrip() + "\n"))
+                f.write(self._render(slug, description, type_, body, merged,
+                                     normalize_tags(kept_tags + new_tags),
+                                     {**kept_ann, **{k: v for k, v in (annotations or {}).items() if v}}))
             os.replace(tmp, path)
             self._titles = None
             self._slugs_cache = None
@@ -526,6 +727,18 @@ class Store:
                     dead.append(f"{name}→{l}")
         indexed = set(self.known_slugs())   # entry lines only, never comments
         idx = self.index_text()
+        # Tag and annotation rot, named per memory. `tags()` answers "none" for a line it
+        # cannot read, which is the right answer for a reader and the wrong one for an
+        # operator — so the reason is surfaced here, where someone is looking for it.
+        invalid_tags = {n: why for n in files if (why := self.tag_problems(n))}
+        missing_manifest = []
+        for n in files:
+            fm = self.frontmatter(n)
+            ref = fm.get("evidence_manifest", "")
+            if ref.startswith("sha256:") and not os.path.exists(
+                    os.path.join(self.path, "_evidence", ref[7:] + ".json")):
+                missing_manifest.append(n)
+        body_tokens = sum(estimate(self._split(t)[1]) for t in files.values())
         return {
             "store": self.name,
             "path": self.path,
@@ -546,6 +759,21 @@ class Store:
             # The fitted estimator, not len//2: chars/2 is biased 8-23% LOW against real
             # tokenizers, and low is the direction that silently overflows a window.
             "index_tokens_est": estimate(idx),
+            "invalid_tags": invalid_tags,
+            "missing_manifest": sorted(missing_manifest),
+            "tagged": sum(1 for n in files if self.tags(n)),
+            # Capacity is OBSERVED here and decided nowhere. Four candidate units are
+            # reported side by side because which one a shelf is measured in — memories,
+            # index tokens, body tokens, bytes — is a decision that has not been made,
+            # and making it by picking a default would make it silently. `limit` stays
+            # None until a person sets one; nothing in this codebase acts on `pressure`.
+            "capacity": {
+                "memories": len(files),
+                "index_tokens_est": estimate(idx),
+                "body_tokens_est": body_tokens,
+                "bytes": sum(len(t.encode("utf-8")) for t in files.values()),
+                "unit": None, "limit": None, "pressure": None,
+            },
             "write_policy": self.write_policy,
             "model_profile": self.model_profile,
             "persona": self.persona,

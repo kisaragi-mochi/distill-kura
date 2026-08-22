@@ -190,6 +190,13 @@ TOOLS: list[dict] = [
                 "slug": {"type": "string", "description": "kebab-case id"},
                 "description": {"type": "string", "description": "One line for the index — a recognition trigger, not a summary"},
                 "body": {"type": "string", "description": "The fact itself"},
+                "tags": {"type": "array", "items": {"type": "string"},
+                         "description": ("Optional words describing the memory's character, "
+                                         "lower-case kebab (e.g. decision, landmine, entrusted). "
+                                         "Several are fine. They describe; they do not rank.")},
+                "belongs_because": {"type": "string", "description": "Optional. One sentence: why this memory belongs in THIS kura."},
+                "keep": {"type": "string", "description": "Optional. One sentence: the meaning that must survive."},
+                "may_fade": {"type": "string", "description": "Optional. One sentence: the detail that may thin out later."},
                 "store": {"type": "string", "description": "Which kura. Omit for the current one."},
             },
             "required": ["slug", "description", "body"],
@@ -280,7 +287,8 @@ def call_tool(name: str, args: dict) -> str:
     if name == "kura_remember":
         d = http("POST", "/remember" + _q(store),
                  {"slug": args.get("slug"), "description": args.get("description"),
-                  "body": args.get("body")})
+                  "body": args.get("body"), "tags": args.get("tags"),
+                  **{k: args[k] for k in ("belongs_because", "keep", "may_fade") if args.get(k)}})
         if WRITE_LOG:
             try:
                 os.makedirs(os.path.dirname(WRITE_LOG), exist_ok=True)

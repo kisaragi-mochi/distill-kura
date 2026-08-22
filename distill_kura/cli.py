@@ -4,6 +4,7 @@
     kura stores                       what exists, which mode maps where
     kura recall "question" [-s eq]    recall by hand
     kura remember slug "desc" [-]     write one fact (body on stdin with `-`)
+    kura annotate slug --tag landmine add tags / the three sentences to one memory
     kura doctor [-s eq]               health of a store (--all for every one)
     kura weave [-s eq] [--status]     re-weave the resident index (three-layer cloth)
     kura prefill [-s eq]              print the standing block a host should inject
@@ -26,6 +27,20 @@ from .recall import recall as do_recall
 from .registry import Registry
 from .server import serve
 from .store import Store
+
+
+
+def _annotation_args(p) -> None:
+    p.add_argument("--tag", action="append", default=[],
+                   help="a word describing the memory (repeatable). Describes; never ranks")
+    p.add_argument("--belongs-because", help="one sentence: why it belongs in THIS kura")
+    p.add_argument("--keep", help="one sentence: the meaning that must survive")
+    p.add_argument("--may-fade", help="one sentence: the detail that may thin out later")
+
+
+def _annotations_of(a) -> dict:
+    return {k: v for k, v in (("belongs_because", a.belongs_because), ("keep", a.keep),
+                              ("may_fade", a.may_fade)) if v}
 
 
 def _reg(a) -> Registry:
@@ -69,6 +84,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("body", nargs="?", default="-", help="body text, or - to read stdin")
     p.add_argument("--title")
     p.add_argument("--type", default="project")
+    _annotation_args(p)
+
+    p = sub.add_parser("annotate", help="add tags / the three sentences to one memory")
+    p.add_argument("slug")
+    _annotation_args(p)
 
     p = sub.add_parser("doctor", help="health check")
     p.add_argument("--all", action="store_true", help="every store, not just one")
@@ -221,7 +241,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "remember":
         body = sys.stdin.read() if a.body == "-" else a.body
-        r = store.remember_direct(a.slug, a.description, body, a.type, title=a.title)
+        r = store.remember_direct(a.slug, a.description, body, a.type, title=a.title,
+                                  tags=a.tag, annotations=_annotations_of(a))
+        print(json.dumps(r, ensure_ascii=False))
+        return 0 if r.get("ok") else 1
+
+    if a.cmd == "annotate":
+        r = store.annotate_direct(a.slug, tags=a.tag, annotations=_annotations_of(a))
         print(json.dumps(r, ensure_ascii=False))
         return 0 if r.get("ok") else 1
 
