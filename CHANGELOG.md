@@ -16,6 +16,39 @@ or to half a map, and never truncates the list to fit.
 `kura weave`, `kura prefill`, `GET /prefill`, a `systemPrompt.section` in the DSH plugin,
 and a `kura_map` tool for hosts that cannot inject.
 
+### Rooms, tags, and the sentences that go with a memory (new)
+
+The room is chosen before the conversation and a memory never leaves it; a memory
+may carry several **tags** — words about its character, never weights — and three
+curation sentences: `belongs_because`, `keep`, `may_fade`. The distiller proposes
+them against the store's charter; a tag that claims something about the human
+(`entrusted`, `emotion-carried`, `recurred`) is checked deterministically against
+the quotes, and both the basis and every refusal go into the evidence manifest
+(`gate_version` 2, additive). `recurred` is written once, by the distiller, when
+the human raises a covered topic again from another journal — decided, never
+proposed, never counted.
+
+The prompts no longer rank every store alike (decisions, then emotion, then topics
+returned to …): the charter ranks, and emotion and recurrence are things not to
+walk past. `examples/rooms/` carries a five-room layout — Research / Develop /
+Manage / EQ / USER — with charters and a config where each room drinks from its
+own journal. The core still serves any stores and any selectors.
+
+A wide room may keep a learned `profile.md` beside its charter, in sentences, read
+after the charter by its own distiller and never entering the resident map.
+`kura profile draft` writes one from that store's memories; `kura profile apply` is
+a person copying a file they have read. A profile carrying numbers about how much
+things matter is reported as broken and not read.
+
+`POST /annotate`, `kura annotate`, `tags`/`belongs_because`/`keep`/`may_fade` on
+`/remember` and the MCP `kura_remember`; `GET /memory` returns them; `doctor` reports
+`invalid_tags`, `missing_manifest`, `learned_profile` and **capacity in four units
+with `limit` and `pressure` left `None`**.
+
+**Not in this release:** forgetting. Nothing is garaged, settled, absorbed,
+released or deleted, and no unit or limit is chosen. `docs/DESIGN.md` §8 says what
+is undecided and why the first pass will be a dry run.
+
 ### Boundaries
 
 - **Containment.** Every lookup resolves into the set of memories a store actually holds.
@@ -44,6 +77,8 @@ material. The ratio is a property of the corpus, not of the tool.
 
 ### Fixed
 
+- a FIX verdict kept only the first draft header line, so DESC was lost and the
+  memory poured with its slug as the index trigger
 - the resident map had no store identity: a failed switch left the previous kura's index
   in the prompt while recall went to the new one
 - the trigger quality gate tested the alphabet, rejecting good Japanese triggers (and ★)

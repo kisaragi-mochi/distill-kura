@@ -120,6 +120,31 @@ curl -s localhost:8085/doctor | python3 -m json.tool
 | `not_in_index` | a memory exists but nothing points at it | it is invisible to recall — index it |
 | drafts piling up in `_still/drafts/` | `drain` is not running | run it; check the scribe endpoint |
 | `_still/tossed.jsonl` growing fast | the brain is proposing junk | look at what it proposes; the prompt or the journal source may be wrong |
+| `invalid_tags` non-empty | a `tags:` line a reader cannot parse; the memory reads as untagged | fix the line by hand (it is a JSON array of lower-case kebab words) |
+| `missing_manifest` non-empty | a memory points at an evidence manifest that is gone | restore `_evidence/` from backup; the memory still reads, its provenance does not |
+| `learned_profile.state: broken` | `profile.md` is unreadable or carries numbers about how much things matter; it is NOT read and the fixed charter carries on | read `why`; rewrite the profile in sentences |
+| `capacity.*` | the store's size in four units — memories, index tokens, body tokens, bytes. `limit` and `pressure` are `None` on purpose | nothing acts on these yet. Watch them, and see the next section |
+
+## When a shelf is full
+
+Nothing is forgotten automatically, and `capacity` has no limit until a person sets
+one. The unit a store is measured in, the limit, whether a wide room shares it, how
+candidates are compared, where a garaged memory goes and for how long, which tags
+protect absolutely and which only argue, who approves, and what finally deletes a file
+— none of that is decided, and `docs/DESIGN.md` §8 says why it will be decided with
+real memories in front of the people whose memories they are rather than by a default.
+
+What you can do today is keep the material that decision will need:
+
+- the distiller writes `belongs_because` / `keep` / `may_fade` on every memory it pours,
+  so "what does this still do here?" has a first answer on file
+- `kura annotate <slug> --keep "…" --may-fade "…"` adds them to older memories by hand
+  (direct door: `direct-allowed` stores only)
+- `kura doctor` once a week into a log, so the four capacity units have a history
+
+When the first forgetting pass comes it will be a dry run — store, pressure, candidates,
+their tags and sentences, the reason each could be released, what must be kept, and the
+proposed action — and it will modify nothing.
 
 ## Back it up
 
@@ -181,6 +206,38 @@ Everything is store-selectable, so one process is normally right. Watch two thin
   the recommended setting for anything an agent reads from constantly: every memory then
   has to pass the evidence gate. `frozen` refuses the pour too. The deprecated
   `readonly = true` maps to `distiller-only`. See `docs/TRUST.md`.
+
+- **Bind each store to its own journal root.** With more than one store configured,
+  nothing inherits `[distill.journals]`; a store with no `[stores.<name>.distill.journals]`
+  drinks nothing, and says so in `kura stores`. This is the whole reason two rooms can
+  remember two sides of one afternoon: each only ever sees its own conversations. The
+  five-room example in `examples/rooms/` shows the shape.
+- **A memory never changes store.** Tags do not move it, a mode change does not move
+  it, and there is no move or copy command. If the same topic belongs in two rooms,
+  each room distils its own memory from its own evidence.
+
+## The wide room
+
+A store whose charter is "understand the person, without a narrower purpose" may keep a
+`profile.md` beside its charter: a few sections in sentences — enduring threads, current
+interests, everyday context, conversation preferences, unresolved threads. That store's
+distiller reads it after the charter, so what the room keeps from then on follows what
+it has come to understand. It never enters the resident map, and `GET /profile` hands it
+to a host with its state.
+
+```bash
+kura -s user profile show      # state (absent / present / broken), the text, and whether a draft waits
+kura -s user profile draft     # → _still/profile.draft.md, from THIS store's memories only
+$EDITOR ~/kura/user/_still/profile.draft.md
+kura -s user profile apply     # a person copying a file they have read. Never automatic
+```
+
+A profile is text. One that carries numbers about how much things matter (`trading:
+0.8`, `interest score 7`) is the weight this project refuses to store: it is reported as
+`broken`, not read, and the fixed charter carries on — visibly, in `doctor`, not as a
+quiet fallback. Whether and when a draft should ever be applied without a person is a
+decision to make with real drafts in hand; the command exists so those drafts can be
+collected.
 
 ## Adding a journal format
 

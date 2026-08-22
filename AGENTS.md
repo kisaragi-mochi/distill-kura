@@ -57,6 +57,37 @@ weave and raises `WeaveError` if violated. Do not downgrade it to a warning. A m
 missing from the map does not exist as far as the agent is concerned, and the loss is
 invisible — the cloth looks perfectly healthy.
 
+## Things that must not grow here
+
+**No number says how much a memory matters.** No `importance`, `salience`, `priority`
+or `score` field; no `recurrence_count`; no retention decision that reads
+`read_counts()`; no table of points per tag. Tags are words about a memory's
+character, and the three sentences (`belongs_because` / `keep` / `may_fade`) are
+curation judgements against the store's charter. The charter ranks; nothing else
+does. `tests/test_rooms.py` greps the source for the forbidden names — keep it that
+way rather than finding a synonym.
+
+**A memory never changes store.** No move, no copy, no re-filing by tag, no router
+that reads a message and picks a room. The store is chosen before the conversation by
+the host, and a mode change affects only future sessions. If you find yourself
+wanting to deduplicate across stores, stop: Research's "what we learned" and
+Develop's "what we did" are two facts.
+
+**A claiming tag needs its evidence.** `verify_tags()` in the gate is deterministic,
+like the rest of the gate. `entrusted`, `emotion-carried`, `recurred`, `landmine`,
+`formative` each name the evidence that would make them true; a model proposes, the
+evidence decides, and both the basis and every refusal are in the manifest.
+`recurred` is written once by the distiller against a prior memory from a different
+journal — it is decided, never proposed, never counted.
+
+**Forgetting is not designed yet, and this codebase must not design it by default.**
+`doctor` observes capacity in four units with `limit` and `pressure` left `None`.
+Anything that would pick a unit, set a limit, choose candidates, garage, settle,
+absorb, release or delete is a conversation with the people whose memories they are
+— `docs/DESIGN.md` §8 lists what is undecided. If a change needs one of those
+answers to compile, it is the wrong change for now. The first forgetting pass will be
+a dry run that modifies nothing.
+
 ## Layout
 
 ```
@@ -81,10 +112,10 @@ distill_kura/
     seeds.py     ideas (no evidence required) and their graduation
     pipeline.py  the pass: sip → spot → gate → novelty → compose → stage → drain
 dsh-plugin/      the DeepSeek Harness plugin (JavaScript)
-examples/        a runnable config, two demo stores, DSH preset wiring
+examples/        a runnable config, two demo stores, DSH preset wiring, the five-room layout
 bench/fixtures/  a synthetic corpus with facts planted on purpose, and their questions
 scripts/         the clean-room demo and its scripted model
-tests/           156 tests, no model needed
+tests/           220 tests, no model needed
 ```
 
 ## House style

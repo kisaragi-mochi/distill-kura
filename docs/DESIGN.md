@@ -244,7 +244,126 @@ carry a pointer (`persona = "..."`, readable at `GET /profile`) and nothing more
 
 ---
 
-## 8. What this is not
+## 8. The room decides what matters — and what a full shelf means
+
+### One principle, four questions
+
+What to remember, how to write it, what to recall and — one day — what to let go are
+not four ranking problems. They are one question asked four times: *what is this store
+for, and which side of this memory serves that?* The answer lives in the store's
+charter, which is why the charter sits byte-identically at the head of every role's
+prompt. The same afternoon yields a Research memory ("what became known"), a Develop
+memory ("how it was made to work"), a Manage memory ("what it changed in the plan") and
+an EQ memory ("what was felt, and what settled it"). These are different facts about
+one event, and none of them is the "real" one.
+
+The floor does not move with the room. A quote exists verbatim or the candidate dies;
+a number comes from `[TOOL]` or it is not written; a decision is the human's words or
+it is not a decision; the agent's prose is a judgement and is written as one; nothing
+crosses a store boundary. What changes by room is not what is true but which aspect of
+the truth is kept, and for what.
+
+### Why there is no universal priority
+
+An earlier SPOT prompt ranked, for every store alike: decisions first, then emotion,
+then topics returned to, then numbers and landmines, then doctrine. It was not wrong
+about what to notice; it was wrong about who decides. Emotion is the *reason* an EQ
+store exists and a *distraction* in a Develop store. A topic returned to is the heart
+of a USER store and noise in a Research store that already has the result. A list that
+puts emotion at #2 everywhere makes four rooms into one room with four doors.
+
+So emotion, recurrence, numbers and reversals are now *things not to walk past* —
+observations — and the charter ranks. A candidate must say why it belongs in *this*
+store, and a sentence that would fit any store ("it is important") is treated as "it
+does not belong anywhere yet".
+
+### The room is the person's choice
+
+A store is chosen before the conversation, by the host, and is the whole session's
+home. The model does not read the first message and pick a room; it does not move the
+session when the topic drifts; it does not file a memory into a different store because
+a tag suggests one. A Develop memory tagged `emotion-carried` is a Develop memory.
+There is no move, no copy and no re-filing, and a mode change affects only future
+sessions. When the same topic is raised in another room, that room distils its own
+memory from its own evidence. This looks like duplication and is not: two rooms, two
+facts.
+
+### Tags are words, not weights
+
+A memory may carry several tags. They describe its character — `decision`, `landmine`,
+`entrusted`, `emotion-carried`, `recurred`, `settled`, the store's own words — and
+nothing ranks, sorts or counts by them. Two things keep that honest:
+
+1. **A claiming tag needs the evidence that would make it true.** `entrusted` says the
+   human asked for this to be kept, so it needs a `[USER]` quote that asks.
+   `emotion-carried` needs the human's words at all. `landmine` and `formative` need
+   more than the agent's prose. The check is deterministic (`gate.verify_tags`), and
+   both the basis and every refusal go into the evidence manifest.
+2. **`recurred` is decided, not proposed.** A model proposing it would be a popularity
+   counter in disguise. It is written once, by the distiller, when a candidate covered
+   by an existing memory carries the human's own words from a *different journal* than
+   the memory was distilled from. A memory with no manifest has no known origin, and is
+   left alone — logged, not guessed. There is no `recurrence_count`, and a second
+   recurrence does not touch the file.
+
+Seven further words — `superseded`, `absorbed`, `fulfilled`, `expired`, `corrected`,
+`released`, `incidental` — are reserved for a forgetting pass that does not exist yet,
+and a model may not assign them.
+
+Beside the tags, three sentences: **belongs_because** (why this store wants it),
+**keep** (the meaning that must outlive any thinning) and **may_fade** (the detail that
+need not). They are the scribe's curation judgement against the charter, not new facts,
+and they decide nothing today. They are written now so that when a shelf is full, the
+question "what does this memory still do here?" already has a first answer on file.
+
+### The wide room
+
+Four narrow rooms with fixed charters recognise sharply. A USER room, whose charter is
+"understand the person, without a narrower purpose", cannot be sharp in the same way,
+and the design accepts that: its recall is expected to be a little softer, and in
+exchange it is the one room whose understanding grows. The growth is a `profile.md`
+beside the charter — enduring threads, current interests, everyday context,
+conversation preferences, unresolved threads — in sentences. It is read after the
+charter by that store's distiller, so what the room keeps from then on is shaped by
+what it has come to understand; it never enters the resident map; it is store-local
+and drafted from the store's own memories; a draft is a file a person reads, and
+applying it is a person's act. A profile that carries numbers about how much things
+matter is the weight this project refuses to store, and is reported as broken and not
+read. When, or whether, a draft should be applied without a person is a decision to
+make with real drafts in hand.
+
+### Garage-sale forgetting (not built)
+
+Forgetting here is not a function of age or of how rarely something is read. It is a
+consequence of a finite shelf: when the 101st memory arrives at a store that holds a
+hundred, *all 101* are asked the same question — *is there still a reason for you to
+be here?* — and the one with the weakest answer against the charter is the candidate.
+Neither the old hundred nor the newcomer has a claim by default; not storing the
+newcomer is a correct outcome. And the absence of a protecting tag is not a reason to
+forget: forgetting needs a positive account — "this has done its work" — which is what
+the reserved words above are for.
+
+The shapes it might take: KEEP; SETTLE (thin the detail, keep the meaning — `may_fade`
+says which is which); ABSORB (fold the meaning into another memory *of the same
+store*); GARAGE (out of the active index, into a grace state); RELEASE (out of the
+active memory, with an explicit reason). MOVE is not on the list and will not be.
+
+What exists today is the observation point: `kura doctor` reports capacity in four
+units side by side — memories, index tokens, body tokens, bytes — with `limit` and
+`pressure` left `None`. Which unit a shelf is measured in, what the limit is, whether
+the wide room shares it, how candidates are compared, where the garage is and how long
+grace lasts, whether a garaged memory can still be read by name, which tags protect
+absolutely and which only argue, who approves, and what finally deletes a file — every
+one of those is undecided, and will be decided with real memories, a real map, and real
+mis-selections in front of the people whose memories they are. Until then, detecting a
+full shelf reports it and changes nothing. The first implementation, whenever it comes,
+is a dry run that shows the store, the pressure, the candidates, their tags and
+sentences, the reason each could be released, what must be kept, and the proposed
+action — and modifies no memory, no index, no frontmatter.
+
+---
+
+## 9. What this is not
 
 - **Not a RAG pipeline.** Nothing is chunked, embedded or scored. The unit is a fact a
   person could read aloud.

@@ -63,4 +63,4 @@ selects which server is mounted.
 It does not route. It does not rank one room's memories above another's. It does not
 forget anything yet — capacity is *observed* (`kura doctor` → `capacity`) and nothing
 acts on it; what happens when a shelf is full is a conversation to have with real
-memories in front of you, not a default. `docs/DESIGN.md` §9.
+memories in front of you, not a default. `docs/DESIGN.md` §8.

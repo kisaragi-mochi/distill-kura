@@ -88,6 +88,12 @@ label = "EQ mode — talking things through"
 # ── modes ───────────────────────────────────────────────────────────────────
 # An agent mode (a DSH preset name, a Claude Code profile, whatever your host
 # calls it) → the kura it speaks from. A request may name either side.
+#
+# The mode is chosen BEFORE a conversation, by the host, and is that session's home:
+# nothing here reads a message and picks a store, and a memory never moves between
+# stores afterwards. An unknown mode is an error, never a fall to `default`.
+# For a layout with more than two rooms see examples/rooms/kura.rooms.example.toml —
+# kept separate so this minimal file stays minimal.
 
 [modes]
 default = "main"

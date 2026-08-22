@@ -218,6 +218,29 @@ curl -s localhost:8085/s/eq/doctor          # path form, for clients that only v
 The stores share no memories, no index, and no distiller watermark. Switching mode
 genuinely changes what is remembered — not the same memory in a different voice.
 
+**The room is chosen before the conversation.** A mode is what the host sends — a DSH
+preset, `KURA_STORE` in an MCP environment, `-s` on the CLI — and it is the whole
+session's home. Nothing in this project reads a message and decides which store it
+belongs to; a conversation that drifts from building into feeling stays where it
+started, and the host may offer another room for the *next* session. An unknown
+selector is an error at the door, never a quiet fall to the default.
+
+**One room, many tags.** A memory lives in exactly one store and may carry several
+tags that describe its character (`decision`, `landmine`, `emotion-carried`, …). Tags
+are words, not weights: nothing ranks by them, nothing counts them, and a Develop
+memory tagged `emotion-carried` is still a Develop memory. There is no command that
+moves or copies a memory to another store, and a mode change affects only future
+sessions. The same topic raised in two rooms yields two memories, each distilled from
+that room's own evidence — Research's "what we learned" and Develop's "what we did"
+are different facts, and nothing crosses the boundary to deduplicate them.
+
+**A wide room recalls a little softer.** Narrow stores with fixed charters recognise
+sharply. A store that accepts anything — a USER room that follows the person rather
+than a purpose — is expected to be looser, and in exchange is the one whose
+understanding may grow: a `profile.md` beside its charter, in sentences, read after
+the charter, drafted from its own memories and applied by a person. Five such rooms,
+with their charters and a config, are in [`examples/rooms/`](examples/rooms/).
+
 **Independent as routing, not as confidentiality.** The server has no authentication, so
 any process that can reach its port can name any store it holds. Binding an agent keeps
 a *model* in its lane; it does not keep a *process* out. One trust level per process —
@@ -326,6 +349,11 @@ name: archive-on-slow-disk
 description: the archive lives on the slow disk; the fast one stays scratch
 metadata:
   type: project          # user | feedback | project | reference
+  tags: ["decision", "landmine"]
+  evidence_manifest: sha256:…
+belongs_because: this store keeps how the machine is laid out and why
+keep: which disk, and the reason
+may_fade: the df figures from that afternoon
 ---
 
 The archive goes on the slow disk. The fast disk is scratch space.
@@ -346,8 +374,22 @@ not a summary: proper nouns, numbers, ⚠️ landmines, the conclusion reached. 
 could be swapped with another memory's line and still read fine, it is not doing its
 job — `kura distill tidy` finds the mechanically detectable cases and rewrites them.
 
-`kura doctor` reports counts, dead links, islands (memories nothing links to), and
-index drift. It is the eye the metabolism needs.
+The four lines under `metadata`/at the top are **curation, not facts**: `tags` are
+words about the memory's character — several is normal, and a memory written before
+they existed simply has none — and the three sentences say why it belongs in *this*
+store, what meaning must outlive any later thinning, and what detail need not. The
+distiller proposes them against the store's charter; tags that claim something about
+the human (`entrusted`, `emotion-carried`, `recurred`) are checked against the quotes
+and the check is recorded in the manifest. `recurred` is written once, by the
+distiller, when the human brings a topic up again from another session — it is a
+property, not a counter, and there is no number behind it.
+
+`kura doctor` reports counts, dead links, islands (memories nothing links to), index
+drift, tag lines it cannot read, manifests a memory points at that are gone, the state
+of the learned profile, and the store's **capacity in four units side by side** —
+memories, index tokens, body tokens, bytes — with `limit` and `pressure` left `None`.
+It is the eye the metabolism needs. What happens when a shelf is full is not decided
+yet: see [`docs/DESIGN.md`](docs/DESIGN.md) §8.
 
 ---
 
@@ -356,13 +398,14 @@ index drift. It is the eye the metabolism needs.
 | route | what it does |
 |---|---|
 | `POST /recall` | `{question, hops, top, chars, total_chars, store\|mode}` → picked, walked, context. `chars` is per memory; `total_chars` is a hard ceiling on the whole context |
-| `POST /remember` | `{slug, description, body, type, title}` — a DIRECT write, refused unless `write_policy = "direct-allowed"` |
+| `POST /remember` | `{slug, description, body, type, title, tags, belongs_because, keep, may_fade}` — a DIRECT write, refused unless `write_policy = "direct-allowed"` |
+| `POST /annotate` | `{slug, tags, belongs_because, keep, may_fade}` — merge tags / the three sentences onto an existing memory. The direct door: same refusal as `/remember`. A merge that adds nothing touches nothing |
 | `GET /index` | the raw index |
 | `GET /prefill` | the resident block, ready to inject (`&format=text` for a hook) |
-| `GET /memory/<slug>` | one memory in full |
+| `GET /memory/<slug>` | one memory in full, with its `tags` and `annotations` |
 | `GET /doctor` | health of one store (`?all=1` for every store) |
 | `GET /stores` | stores, modes, and which model fills each role |
-| `GET /profile` | the store's charter, and a pointer to its persona (never rendered here) |
+| `GET /profile` | the store's charter, the learned profile with its state (absent / present / broken), and a pointer to its persona (never rendered here) |
 | `GET /health` | liveness |
 
 Any route accepts `?store=` / `?mode=`, a `store`/`mode` field in the body, or the

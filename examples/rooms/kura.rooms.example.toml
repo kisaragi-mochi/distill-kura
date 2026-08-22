@@ -5,7 +5,7 @@
 # talks in several rooms and each room is meant to remember a different side of
 # the same afternoon.
 #
-# The rules this layout depends on (docs/DESIGN.md §9):
+# The rules this layout depends on (docs/DESIGN.md §8):
 #   · the room is chosen BEFORE the conversation, by the host (a DSH preset, an MCP
 #     environment, a CLI flag). No router in this file, and none in the code.
 #   · one memory lives in one room. Tags are many; rooms are one. Nothing moves a

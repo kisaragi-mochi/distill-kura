@@ -165,6 +165,18 @@ store that went dark under a backup tool would be the worse failure.
 If it matters to you: keep the stores on separate filesystems (a hardlink cannot cross
 one), or under separate users.
 
+## Tags, annotations and the learned profile do not widen anything
+
+Three things were added around a memory — tags, three curation sentences, and an
+optional `profile.md` — and none of them changes the claim above. They are files in
+the store directory and fall under the same boundary as the memories: a process that
+can read the store can read them, a process that cannot, cannot. The write side keeps
+its two doors: a tag goes on through `annotate_direct` (refused on `distiller-only`)
+or `annotate_verified` (the distiller, with evidence in the manifest), and `frozen`
+refuses both. The profile is read by that store's distiller only and drafted from that
+store's memories only; it is never carried into another store's prompt. Nothing here
+is a permission layer, and nothing here should be read as one.
+
 ## What is still on you
 
 - process, user and file-permission separation (this is what stops a hardlink, a copy,
