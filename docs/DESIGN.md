@@ -361,6 +361,28 @@ is a dry run that shows the store, the pressure, the candidates, their tags and
 sentences, the reason each could be released, what must be kept, and the proposed
 action — and modifies no memory, no index, no frontmatter.
 
+**The seam it would plug into, and the ledger it would write** (a design sketch, so
+that when the pass is built it lands where the rest of the system expects it — none of
+this exists in code):
+
+- *Where a dry run reads from.* `doctor()["capacity"]` for the pressure, each memory's
+  `tags()` and `annotations()` for its own account of itself, the store's charter for
+  the question. Nothing else — no read log, no model-side ranking.
+- *Where a proposal goes.* `_still/garage/proposals/<date>.jsonl`, one line per
+  candidate: `{id, slug, index_line (verbatim bytes), section, tags, annotations,
+  reason (words), proposed: KEEP|SETTLE|ABSORB|GARAGE|RELEASE, protected_by: [...]}`.
+  A proposal is a file a person reads; it expires with the next night's proposal.
+- *Where an act is recorded, if one is ever taken.* `_still/garage/ledger.jsonl`, one
+  line per act: the proposal id, who decided (a person, never a model), the memory's
+  `sha256` before, the index line removed byte-for-byte, and what would restore it.
+  The ledger is append-only and is what `kura garage repair` would rebuild a
+  half-applied state from. A memory that is garaged keeps its file and its slug, gains
+  `state: garaged` in its frontmatter through `annotate_verified`, and leaves the index;
+  `read_exact` still answers for it. Nothing in the ledger deletes.
+- *What `doctor` would add.* `garaged` (state and ledger agree), `half_garaged`
+  (they do not), `lost` (in no index and in no ledger — today's silent forgetting),
+  and `links_released` kept apart from `links_dead`.
+
 ---
 
 ## 9. What this is not

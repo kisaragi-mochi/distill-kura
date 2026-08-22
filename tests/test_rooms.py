@@ -114,3 +114,24 @@ def test_no_router_and_no_move_exist_in_the_codebase():
         assert word not in src, word
     # read counts exist for diagnostics and are never consulted for a decision
     assert not re.search(r"read_counts\(\)[^\n]*\n[^\n]*(rank|sort|prior|keep|drop)", src)
+
+
+def test_a_mode_switch_affects_future_sessions_only_and_moves_nothing(tmp_path):
+    """Spec 8.4 #8, written as the act itself: a memory distilled while the mode was
+    `develop` stays in develop after the mode table is pointed elsewhere. The only
+    thing a switch changes is which store the NEXT request resolves to."""
+    reg = rooms_registry(tmp_path)
+    dev = reg.store("develop")
+    dev.pour_verified("black-screen", "recovery order after a GPU change", "the order that worked",
+                      tags=["landmine"])
+    before = open(dev.file_of("black-screen"), "rb").read()
+    # the host's selector `work` pointed at develop; it is re-bound to eq for future
+    # sessions (a selector that IS a store name cannot be re-bound — by design)
+    reg.modes["work"] = "develop"
+    assert reg.store("work") is dev
+    reg.modes["work"] = "eq"
+    assert reg.store("work").name == "eq"                      # future requests go there
+    assert reg.store("eq").slugs() == []                        # nothing travelled with the switch
+    assert dev.slugs() == ["black-screen"]
+    assert open(dev.file_of("black-screen"), "rb").read() == before
+    assert dev.tags("black-screen") == ("landmine",)
