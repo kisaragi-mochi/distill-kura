@@ -744,6 +744,29 @@ class Distiller:
         fs = discover_all(self.journals, exclude_roots=self.exclude_roots)
         return [f for f in fs if session in f] if session else fs
 
+    def catch_up(self) -> dict:
+        """Mark every journal as already drunk, up to where it stands now.
+
+        Pointing a distiller at a history it has never seen means drinking all of it —
+        for a year-old journal that is days of model time to re-learn what the store
+        may already know. This says "start from today" without deleting anything: the
+        marks move forward only (`advance` takes a max), so a journal that was already
+        further along is untouched.
+        """
+        moved, seen = {}, 0
+        for path in self.files():
+            src = source_for(path)
+            if not src:
+                continue
+            k = src.key(path)
+            end, _ = src.claim_bound(path, 0, 1 << 40)   # the whole file, in its own unit
+            before = self.marks.read().get(k, 0)
+            seen += 1
+            if end > before:
+                self.marks.advance(k, end)
+                moved[k] = end
+        return {"ok": True, "journals": seen, "moved": len(moved), "at": moved}
+
     def sip_one(self, session: str | None = None) -> tuple[list[Segment], str, str] | None:
         c = self.marks.claim(self.files(session), self.chunk_chars, MIN_DRINK)
         if not c:

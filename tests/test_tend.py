@@ -149,3 +149,20 @@ model = "none"
     assert t.newest_mtime() == 0.0
     t.tick(0.0)
     assert t.proc is None
+
+
+def test_catchup_starts_from_today_without_losing_further_marks(tmp_path):
+    """Pointing a distiller at an old journal would drink all of it. catchup moves the
+    marks to the end of every journal — forward only, so a mark already past stays."""
+    from distill_kura.distill import Distiller
+    reg, st, cfg, j = build(tmp_path)
+    d = Distiller(reg, st)
+    r = d.catch_up()
+    assert r["ok"] and r["journals"] == 1 and r["moved"] == 1
+    assert d.sip_one() is None                      # nothing left to drink
+    marks = d.marks.read()
+    key = "claude:" + os.path.basename(str(j))
+    assert marks[key] == os.path.getsize(j)
+    d.marks.advance(key, marks[key] + 10_000)       # someone is further along
+    d.catch_up()
+    assert d.marks.read()[key] == marks[key] + 10_000   # never pulled backwards

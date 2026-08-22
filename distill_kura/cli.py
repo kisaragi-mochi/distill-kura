@@ -12,6 +12,7 @@
     kura prefill [-s eq]              print the standing block a host should inject
     kura bench compress [-s eq]       what the store cost against the journal it came from
     kura init <name> --path DIR       create a store and print the TOML to paste
+    kura distill catchup [-s eq]      start from today: mark every journal drunk up to now
     kura distill run [-s eq]          one pass: drink → spot → gate → write drafts
     kura distill drafts|drain|tidy    inspect / pour / repair the index
     kura distill night                stay resident, distil in the quiet
@@ -144,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     d = dsub.add_parser("tidy"); d.add_argument("-n", type=int, default=6)
     d = dsub.add_parser("night"); d.add_argument("--idle-min", type=float, default=20)
     dsub.add_parser("sip")
+    dsub.add_parser("catchup", help="mark every journal as drunk up to now — start from today")
 
     a = ap.parse_args(argv)
     if not a.cmd:
@@ -335,6 +337,10 @@ def main(argv: list[str] | None = None) -> int:
             from .distill.sources import as_evidence
             print(as_evidence(segs)[:2000])
             return 0
+        if a.dcmd == "catchup":
+            r = dis.catch_up()
+            print(json.dumps(r, ensure_ascii=False))
+            return 0 if r.get("moved") else 2
         if a.dcmd == "drafts":
             rows = drafts_of(store)
             for slug, cls, desc in rows:

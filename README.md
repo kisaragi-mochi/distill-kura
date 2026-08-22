@@ -358,9 +358,15 @@ The distiller, the pourer and the loom are meant to run in the quiet hours, and 
 watcher that decides when that is needs no model:
 
 ```bash
-kura tend -s maker          # stays resident; one process per store
-kura tend -s maker --once   # one tick, for a scheduler or a test
+kura distill catchup -s maker   # first: start from today, do not drink a year of history
+kura tend -s maker              # stays resident; one process per store
+kura tend -s maker --once       # one tick, for a scheduler or a test
 ```
+
+Run `catchup` once when you point a distiller at a journal it has never seen —
+otherwise its first act is to drink the whole history, which for a year-old journal
+is days of model time spent re-learning what the store may already know. It only
+moves the marks forward, so it can never lose progress.
 
 "Quiet" is the newest journal file's mtime. After `idle_min` (10) of silence it drains
 waiting drafts (the editor reads each one cold: pour / fix / toss), or runs one

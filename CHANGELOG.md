@@ -69,6 +69,10 @@ a heartbeat that `doctor` reads says whether anyone is tending the store; the hu
 return stops a running track unless `yield_on_return = false`. Rebuilt from the
 five-day record of the house's first watcher and the four ways it went wrong.
 
+`kura distill catchup` marks every journal as drunk up to now, so pointing a
+distiller at an existing history does not start by re-reading all of it. Forward
+only — it cannot lose progress.
+
 An extension's heading now carries the evidence's date (the journal file's mtime)
 and a heading that says otherwise is corrected mechanically — 30 of 39 extension
 headings in the house had been dated before the distiller existed.
