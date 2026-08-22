@@ -67,7 +67,7 @@ DEFAULT_TRIGGER_TOKENS = 24
 # code that wrote it", so without a version the trimmer can be improved and nothing
 # happens. Observed exactly that: a fix for dropped ★ markers changed nothing until the
 # ledger was invalidated.
-LEDGER_VERSION = 3
+LEDGER_VERSION = 5
 
 # Markers that carry the point of a line. A trimmer that drops them keeps the words and
 # loses the meaning: ⚠️ says "this will bite you again", ★ says "this is the important
@@ -340,20 +340,32 @@ class Loom:
         return self._balance(self._soft_cut(" ".join(keep), limit))
 
     # ── quality bar ──────────────────────────────────────────────────────
-    @staticmethod
-    def _grounded(trigger: str, desc: str, floor: float = 0.6) -> bool:
+    # Character 2-grams at 0.70, chosen by measurement rather than taste. On seven real
+    # cases from a Japanese store — three good compressions, an inverted negation, an
+    # invention, a title restatement, and a short good trigger — the worst GOOD case
+    # scores 0.72 and the best BAD one 0.44, a gap of 0.28. Character 3-grams separate
+    # the same set only at 0.45, where the gap is 0.19: heavy compression drops particles
+    # and a 3-gram window straddles the join. The calibration table is
+    # `test_grounding_calibration` — change this constant and it will tell you.
+    GRAM = 2
+    GROUNDING_FLOOR = 0.70
+
+    @classmethod
+    def _grounded(cls, trigger: str, desc: str, floor: float | None = None) -> bool:
         """Is the trigger made of the description, or did the model write something new?
 
-        Character 3-grams, because this must work in a language without spaces. A model
-        that paraphrases loosely still scores high; one that invents a fact does not.
+        Character n-grams, because this must work in a language without spaces. A model
+        that compresses hard still scores high; one that invents a fact, restates the
+        title, or — the case that matters most — inverts a negation, does not.
         """
+        floor = cls.GROUNDING_FLOOR if floor is None else floor
         t = re.sub(r"\s+", "", trigger)
         d = re.sub(r"\s+", "", desc)
         if not t:
             return False
-        if len(t) < 3:
+        if len(t) < cls.GRAM:
             return t in d
-        grams = [t[i:i + 3] for i in range(len(t) - 2)]
+        grams = [t[i:i + cls.GRAM] for i in range(len(t) - cls.GRAM + 1)]
         return sum(1 for g in grams if g in d) / len(grams) >= floor
 
     def _acceptable(self, trigger: str, title: str, desc: str = "") -> bool:
@@ -401,6 +413,12 @@ class Loom:
                 cand = re.sub(r"\s+", " ", out.strip().strip("`\"\'")).strip()
                 cand = cand.splitlines()[0] if cand else ""
                 cand = self._keep_markers(desc, self._balance(cand))
+                # Over budget is not a reason to throw the model's work away: its
+                # compression is better than the mechanical one, so cut it to fit and
+                # keep it. Only ungrounded or empty answers fall back.
+                if self._grounded(cand, desc) and estimate(cand) > self.trigger_tokens * 1.4:
+                    cand = self._keep_markers(
+                        desc, self._balance(self._soft_cut(cand, self._char_budget(desc))))
                 if self._acceptable(cand, title, desc):
                     return cand, True
         return self._keep_markers(desc, self._mechanical(desc)), False

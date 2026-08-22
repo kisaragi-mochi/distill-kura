@@ -84,7 +84,7 @@ dsh-plugin/      the DeepSeek Harness plugin (JavaScript)
 examples/        a runnable config, two demo stores, DSH preset wiring
 bench/fixtures/  a synthetic corpus with facts planted on purpose, and their questions
 scripts/         the clean-room demo and its scripted model
-tests/           155 tests, no model needed
+tests/           156 tests, no model needed
 ```
 
 ## House style

@@ -56,6 +56,37 @@ def test_an_invented_trigger_is_still_rejected(tmp_path):
     assert not loom._acceptable("the model made this up entirely", "題名", desc)
 
 
+# The calibration table for the grounding rule. The constant in `Loom` was chosen from
+# these seven cases, all real: change GRAM or GROUNDING_FLOOR and this will tell you what
+# it costs. The one that matters most is the inverted negation — a trigger that turns
+# "this is NOT a workshop" into "soil and workshop" reads perfectly and is a lie.
+GROUNDING_CASES = [
+    ("heavy compression, particles dropped",
+     "★背景で日誌消化+前景0.15秒応答。記憶の新陳代謝はこの形。GPU普段0%=消化はタダ",
+     "★背景日誌消化+前景0.15s応答、GPU0%=タダ", True),
+    ("heavy compression, mixed scripts",
+     ":8085 記憶への唯一の入り口。索引常駐＋意味の再認＋リンク歩行0.4秒。雲/ローカル/足軽/声が共有",
+     ":8085 記憶唯一入口。索引常駐+再認+リンク0.4秒。雲/ローカル/足軽/声共有", True),
+    ("compression with English identifiers",
+     "persona JSON + IDENTITY.md(同期), 3.7 seed, ケンの関係性・正典決定",
+     "YUKI persona JSON + IDENTITY.md, 3.7 seed, ケン関係性・正典", True),
+    ("short trigger, verbatim", "★夜空が澄むと星座が見える。周囲の軽さが詳細より重要で、掟の行は同一",
+     "★夜空が澄むと星座が見える", True),
+    ("INVERTED NEGATION", "ケンの願い: ここは私自身の自律進化の土壌、工房ではない。種を育てよ",
+     "YUKI進化プラットフォーム: ケンの願い、自律進化の土壌・工房、種を育てよ", False),
+    ("invention", "★夜空が澄むと星座が見える。周囲の軽さが詳細より重要",
+     "全く関係のない捏造された主張です", False),
+    ("a restatement of nothing", "索引を毎回の会話に常駐させると、モデルは自分が何を知らないかを知る",
+     "常在の地図についての重要な知見", False),
+]
+
+
+def test_grounding_calibration(tmp_path):
+    loom = Loom(Store(name="s", path=str(tmp_path / "s")), scribe=None)
+    for label, desc, trigger, expected in GROUNDING_CASES:
+        assert loom._grounded(trigger, desc) is expected, label
+
+
 def test_grounding_survives_light_paraphrase(tmp_path):
     loom = Loom(Store(name="s", path=str(tmp_path / "s")), scribe=None)
     desc = "索引を毎回の会話に常駐させると、モデルは自分が何を知らないかを知る"
