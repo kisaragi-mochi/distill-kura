@@ -67,7 +67,7 @@ DEFAULT_TRIGGER_TOKENS = 24
 # code that wrote it", so without a version the trimmer can be improved and nothing
 # happens. Observed exactly that: a fix for dropped ★ markers changed nothing until the
 # ledger was invalidated.
-LEDGER_VERSION = 2
+LEDGER_VERSION = 3
 
 # Markers that carry the point of a line. A trimmer that drops them keeps the words and
 # loses the meaning: ⚠️ says "this will bite you again", ★ says "this is the important
@@ -340,16 +340,47 @@ class Loom:
         return self._balance(self._soft_cut(" ".join(keep), limit))
 
     # ── quality bar ──────────────────────────────────────────────────────
-    def _acceptable(self, trigger: str, title: str) -> bool:
+    @staticmethod
+    def _grounded(trigger: str, desc: str, floor: float = 0.6) -> bool:
+        """Is the trigger made of the description, or did the model write something new?
+
+        Character 3-grams, because this must work in a language without spaces. A model
+        that paraphrases loosely still scores high; one that invents a fact does not.
+        """
+        t = re.sub(r"\s+", "", trigger)
+        d = re.sub(r"\s+", "", desc)
+        if not t:
+            return False
+        if len(t) < 3:
+            return t in d
+        grams = [t[i:i + 3] for i in range(len(t) - 2)]
+        return sum(1 for g in grams if g in d) / len(grams) >= floor
+
+    def _acceptable(self, trigger: str, title: str, desc: str = "") -> bool:
+        """Is this trigger worth putting in front of the reader on every turn?
+
+        The old test demanded a digit, three ASCII letters, or ⚠ as proof of
+        "specificity". That is a test of SCRIPT, not of substance: a perfectly good
+        Japanese trigger — 「周囲の軽さが詳細より重要」, 「★夜空が澄むと星座が見える」 —
+        carries none of them and was rejected, so a model that wrote well was overruled
+        and the mechanical trimmer used instead. Measured on a Japanese store, all four
+        handwritten examples failed, ★ included, even though ★ is the store's own marker.
+
+        What actually matters is that the trigger came from the memory rather than from
+        the model's imagination, which is script-neutral and checkable.
+        """
         t = trigger.strip()
-        if len(t) < 6 or estimate(t) > self.trigger_tokens * 1.4:
+        if len(t) < 4 or estimate(t) > self.trigger_tokens * 1.4:
             return False
         if t.lower() in DEAD_WORDS:
             return False
-        if t.strip("*` 　").lower() == title.strip().lower():
+        if t.strip("*`★⚠️ 　").lower() == title.strip().lower():
             return False        # saying the title twice wastes the only line we get
-        # It has to carry SOMETHING specific: a number, an identifier, or a warning.
-        return bool(re.search(r"\d|[A-Za-z]{3}|⚠", t))
+        if desc:
+            return self._grounded(t, desc)
+        # No source to compare against: fall back to the old specificity heuristic, now
+        # including ★ (the marker the previous version forgot).
+        return bool(re.search(r"\d|[A-Za-z]{3}|⚠|★", t))
 
     @staticmethod
     def _keep_markers(desc: str, trigger: str) -> str:
@@ -370,7 +401,7 @@ class Loom:
                 cand = re.sub(r"\s+", " ", out.strip().strip("`\"\'")).strip()
                 cand = cand.splitlines()[0] if cand else ""
                 cand = self._keep_markers(desc, self._balance(cand))
-                if self._acceptable(cand, title):
+                if self._acceptable(cand, title, desc):
                     return cand, True
         return self._keep_markers(desc, self._mechanical(desc)), False
 

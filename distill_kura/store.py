@@ -16,12 +16,16 @@ overlap instead of going silent.
 """
 from __future__ import annotations
 
+import fcntl
 import glob
 import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+
+from .tokens import estimate
 
 INDEX = "MEMORY.md"
 
@@ -366,6 +370,31 @@ class Store:
         """Deprecated alias for `remember_direct`, kept so existing callers keep working."""
         return self.remember_direct(slug, description, body, type_, hook, title)
 
+    @contextmanager
+    def _locked(self):
+        """One writer at a time, per store.
+
+        A memory and its index line are two files. Without a lock, two writers
+        interleave and the second one's read-modify-write of `MEMORY.md` drops the
+        first's line: the memory exists and nothing points at it, which makes it
+        invisible to recall — the failure `doctor()` reports as `not_in_index`, after
+        the fact. Cheap enough to take on every write."""
+        os.makedirs(self.still, exist_ok=True)
+        with open(os.path.join(self.still, "store.lock"), "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lk, fcntl.LOCK_UN)
+
+    def _write_index(self, text: str) -> None:
+        """Replace the index atomically. A crash mid-append used to leave a half-written
+        line in the one file that is read on every single turn."""
+        tmp = self.index_path + f".tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, self.index_path)
+
     def _still_ourselves(self) -> bool:
         """The directory we were constructed against is still that directory.
 
@@ -394,40 +423,43 @@ class Store:
         # shell, and silently rewriting a body corrupts exactly the memories that carry
         # the most detail. Escaping belongs to whoever renders a template, at render time.
         os.makedirs(self.path, exist_ok=True)
-        path = self.file_of(slug)
-        existed = os.path.exists(path)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(_FRONT.format(slug=slug, desc=description.replace("\n", " "),
-                                  type=type_, body=body.rstrip() + "\n"))
-        os.replace(tmp, path)
-        self._titles = None
-        self._slugs_cache = None
+        # Memory file and index line are one change. Serialise it, and replace the index
+        # atomically, so a crash or a concurrent writer cannot leave a memory that
+        # nothing points at (invisible to recall) or a half-written index line.
+        with self._locked():
+            path = self.file_of(slug)
+            existed = os.path.exists(path)
+            tmp = path + f".tmp.{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(_FRONT.format(slug=slug, desc=description.replace("\n", " "),
+                                      type=type_, body=body.rstrip() + "\n"))
+            os.replace(tmp, path)
+            self._titles = None
+            self._slugs_cache = None
 
-        d1 = (hook or description).replace("\n", " ").strip()
-        t1 = (title or "").replace("\n", " ").strip()
-        cur = self.index_text()
-        if existed and d1:
-            out, hit = [], False
-            for l in cur.splitlines():
-                m = re.match(rf"- \[([^\]]+)\]\({re.escape(slug)}\.md\) — (.+)", l)
-                if m and not hit:
-                    out.append(f"- [{t1 if 0 < len(t1) <= 40 else m.group(1)}]({slug}.md) — {d1}")
-                    hit = True
-                else:
-                    out.append(l)
-            if hit:
-                open(self.index_path, "w", encoding="utf-8").write("\n".join(out) + "\n")
-                return {"ok": True, "slug": slug, "created": False, "indexed": "updated"}
-        if f"({slug}.md)" not in cur:
-            # Title must be a name one can say aloud — never a truncated description.
-            t1 = t1 if 0 < len(t1) <= 40 else (d1 if len(d1) <= 34 else slug)
-            with open(self.index_path, "a", encoding="utf-8") as f:
-                if cur and not cur.endswith("\n"):
-                    f.write("\n")
-                f.write(f"- [{t1}]({slug}.md) — {d1}\n")
-            return {"ok": True, "slug": slug, "created": not existed, "indexed": True}
-        return {"ok": True, "slug": slug, "created": not existed, "indexed": False}
+            d1 = (hook or description).replace("\n", " ").strip()
+            t1 = (title or "").replace("\n", " ").strip()
+            cur = self.index_text()
+            if existed and d1:
+                out, hit = [], False
+                for l in cur.splitlines():
+                    m = re.match(rf"- \[([^\]]+)\]\({re.escape(slug)}\.md\) — (.+)", l)
+                    if m and not hit:
+                        out.append(f"- [{t1 if 0 < len(t1) <= 40 else m.group(1)}]"
+                                   f"({slug}.md) — {d1}")
+                        hit = True
+                    else:
+                        out.append(l)
+                if hit:
+                    self._write_index("\n".join(out) + "\n")
+                    return {"ok": True, "slug": slug, "created": False, "indexed": "updated"}
+            if f"({slug}.md)" not in cur:
+                # Title must be a name one can say aloud — never a truncated description.
+                t1 = t1 if 0 < len(t1) <= 40 else (d1 if len(d1) <= 34 else slug)
+                sep = "" if (not cur or cur.endswith("\n")) else "\n"
+                self._write_index(f"{cur}{sep}- [{t1}]({slug}.md) — {d1}\n")
+                return {"ok": True, "slug": slug, "created": not existed, "indexed": True}
+            return {"ok": True, "slug": slug, "created": not existed, "indexed": False}
 
     # ── read log (append-only; NEVER used for ranking) ───────────────────
     def note_read(self, names: list[str], why: str = "recall") -> None:
@@ -489,7 +521,9 @@ class Store:
             "hardlinked": self.hardlinked(),
             "hubs": sorted(((len(v), k) for k, v in back.items()), reverse=True)[:5],
             "index_lines": sum(1 for l in idx.splitlines() if l.startswith("- [")),
-            "index_tokens_est": len(idx) // 2,
+            # The fitted estimator, not len//2: chars/2 is biased 8-23% LOW against real
+            # tokenizers, and low is the direction that silently overflows a window.
+            "index_tokens_est": estimate(idx),
             "write_policy": self.write_policy,
             "model_profile": self.model_profile,
             "persona": self.persona,

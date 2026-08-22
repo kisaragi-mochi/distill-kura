@@ -30,7 +30,10 @@ default = "main"       # which kura answers when a request names none
 [models.thinker]
 url = "http://127.0.0.1:8000/v1"
 model = "local-model"
-effort = "low"          # low | medium | high — sent in every dialect at once
+effort = "low"          # low | medium | high
+# dialect = "vllm"      # vllm (default: sends chat_template_kwargs) | openai | generic
+#   A strict OpenAI service 400s on unknown top-level fields; the client retries once
+#   with a minimal body, and records why in `last_error`.
 # api_key_env = "LOCAL_LLM_KEY"   # some local servers demand a key even unauthenticated
 
 # ── upgrade examples (delete what you do not use) ───────────────────────────
@@ -40,11 +43,14 @@ effort = "low"          # low | medium | high — sent in every dialect at once
 # model = "big-local"
 # effort = "medium"       # `low` makes some models go quiet on list-making work
 #
-# An online API for the writing work:
+# An online API for the writing work. It must answer POST <url>/chat/completions in the
+# OpenAI shape — which is NOT the same as "any provider": a vendor's native API needs an
+# OpenAI-compatible gateway in front of it, and its own URL will not do.
 # [models.scribe]
-# url = "https://api.anthropic.com/v1"      # any OpenAI-compatible endpoint
-# model = "claude-sonnet-5"
-# api_key_env = "ANTHROPIC_API_KEY"
+# url = "https://your-openai-compatible-gateway.example/v1"
+# model = "some-strong-model"
+# api_key_env = "MY_API_KEY"        # read from the environment, never stored here
+# dialect = "openai"                # omit chat_template_kwargs on a strict service
 # temperature = 0.4
 #
 # A slow, deep local model as the scribe (this is the setup the design came from:

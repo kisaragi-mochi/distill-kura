@@ -167,22 +167,44 @@ function mapCache(cfg, state) {
     `<<<END KURA-MAP>>>\n`;
 
   return {
-    text: () => (state.map.ok ? state.map.text : missing()),
+    // The map ALWAYS carries the store it describes, and it is only served while that
+    // store is the one being recalled from. Without this, a failed switch left the
+    // previous kura's index in the prompt while recall went to the new one: the agent
+    // read one household's map and answered from another's, and the staleness grace
+    // period kept it there for minutes.
+    text: () => (state.map.ok && state.map.store === (state.bound ? cfg.store : state.current)
+                 ? state.map.text : missing()),
+    invalidate(target) {
+      if (state.map.store !== target) {
+        state.map = { ok: false, store: target, text: "", etag: "", at: 0 };
+      }
+    },
     async refresh() {
       const target = state.bound ? cfg.store : state.current;
+      this.invalidate(target);
       try {
         const d = await call(cfg, "GET", "/prefill" + q(target));
+        // The server names the store it answered for. If that is not the one asked for,
+        // the map is not ours to show.
+        if (d.store !== undefined && target && d.store !== target) {
+          state.map = { ok: false, store: target, text: "", etag: "", at: 0,
+                        error: `asked for ${target}, served ${d.store}` };
+          return false;
+        }
         // Only swap when the content actually differs: replacing the string with an
         // identical one is free, but replacing it with a *re-ordered* one is not, and
         // this makes the etag the single source of truth for "did the map change".
-        if (d.etag !== state.map.etag) {
-          state.map = { ok: true, text: d.text, etag: d.etag, at: Date.now(), stats: d };
+        if (d.etag !== state.map.etag || !state.map.ok) {
+          state.map = { ok: true, store: target, text: d.text, etag: d.etag,
+                        at: Date.now(), stats: d };
         } else {
           state.map.at = Date.now();
         }
         return true;
       } catch (err) {
-        state.map.ok = state.map.ok && Date.now() - state.map.at < cfg.refreshMs * 5;
+        // A staleness grace period is only ever granted to the store the map is FOR.
+        state.map.ok = state.map.ok && state.map.store === target
+          && Date.now() - state.map.at < cfg.refreshMs * 5;
         state.map.error = String(err && err.message ? err.message : err);
         return false;
       }
@@ -348,11 +370,11 @@ function tools(cfg, state) {
           return `No kura called '${args.store}'. Known: ${JSON.stringify([...known])}`;
         }
         state.current = args.store;
-        // Swap the resident map too. Switching memory while still wearing the previous
-        // kura's index is the worst of both: the agent reads one household's map and
-        // recalls from another's.
-        if (state.cache) await state.cache.refresh();
+        // Swap the resident map too, and say so honestly when it could not be fetched:
+        // recalling from one kura while wearing another's index is the worst of both.
+        const got = state.cache ? await state.cache.refresh() : true;
         return `${head(state.current)} Now recalling from '${args.store}'. ` +
+          (got ? "" : "⚠ its index could not be read, so you are carrying no map for it. ") +
           `(Memory only — the persona belongs to the preset.)`;
       },
     }));
@@ -408,7 +430,7 @@ function apply(ctx, config) {
   const state = {
     current: cfg.store,
     bound: cfg.store !== "" && !cfg.allowSwitch,
-    map: { ok: false, text: "", etag: "", at: 0 },
+    map: { ok: false, store: cfg.store, text: "", etag: "", at: 0 },
   };
   const cache = mapCache(cfg, state);
   state.cache = cache;

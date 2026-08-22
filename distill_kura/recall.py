@@ -17,6 +17,7 @@ import time
 
 from .store import Store
 from .thinker import Endpoint
+from .tokens import estimate
 
 PICK_SYS = (
     "You are the long-term memory of {label}. Below is the INDEX of everything remembered — "
@@ -100,7 +101,14 @@ def fit(text: str, question: str, budget: int) -> str:
 
 
 def recall(store: Store, thinker: Endpoint | None, question: str, hops: int = 1,
-           top: int = 3, chars: int = 6000) -> dict:
+           top: int = 3, chars: int = 6000, total_chars: int | None = None) -> dict:
+    """Recall by recognition.
+
+    `chars` is the budget for ONE memory, not for the answer: link-walking can return
+    ten of them, so a caller reading it as a ceiling on the response was out by an order
+    of magnitude. `total_chars` is the ceiling on the whole context; memories are filled
+    in walk order until it runs out, and the reply says how much of each budget was used.
+    """
     t0 = time.time()
     picked = pick_by_meaning(store, thinker, question, top) if thinker else None
     if picked is None:
@@ -110,9 +118,33 @@ def recall(store: Store, thinker: Endpoint | None, question: str, hops: int = 1,
     else:
         how = "meaning"
     order = store.walk(picked, hops)
-    ctx = "\n\n".join(f"=== {store.label}: {s} ===\n{fit(store.read(s), question, chars)}"
-                      for s in order)
-    store.note_read(order, "recall")
+    parts, used, included = [], 0, []
+    for s in order:
+        room = chars if total_chars is None else min(chars, total_chars - used)
+        if room <= 0:
+            break                       # the budget is spent; say so rather than trim to nothing
+        piece = f"=== {store.label}: {s} ===\n{fit(store.read(s), question, room)}"
+        # A ceiling that is exceeded by a little is not a ceiling. `fit` keeps a memory's
+        # opening whole (cutting from the top loses the frontmatter), so a piece can come
+        # back larger than the room it was given — in which case it does not go in at all.
+        if total_chars is not None and used + len(piece) + 2 > total_chars:
+            break
+        parts.append(piece)
+        included.append(s)
+        used += len(piece) + 2
+    if order and not included and total_chars:
+        # A budget too small for even one memory must not answer with silence. Give back
+        # the best-ranked one, cut to fit and labelled as cut: a partial memory is an
+        # answer, an empty context reads as "nothing is remembered".
+        head = fit(store.read(order[0]), question, max(120, total_chars - 80))
+        parts = [f"=== {store.label}: {order[0]} (truncated) ===\n"
+                 + head[:max(0, total_chars - 60)]]
+        included = [order[0]]
+    ctx = "\n\n".join(parts)
+    store.note_read(included, "recall")
     return {"store": store.name, "question": question, "how": how, "picked": picked,
-            "walked": order, "context": ctx, "chars": len(ctx),
+            "walked": order, "included": included,
+            "dropped_for_budget": [s for s in order if s not in included],
+            "context": ctx, "chars": len(ctx), "chars_per_memory": chars,
+            "total_chars": total_chars, "tokens_est": estimate(ctx),
             "elapsed_s": round(time.time() - t0, 2)}

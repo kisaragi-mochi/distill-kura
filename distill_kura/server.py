@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import prefill as prefill_mod
 from .recall import recall
+from .tokens import estimate
 from .registry import Registry
 
 
@@ -111,7 +112,8 @@ def _make_handler(reg: Registry):
                 return self._send(200, pf.as_dict())
             if path.startswith("/index"):
                 t = st.index_text()
-                return self._send(200, {"store": st.name, "index": t, "tokens_est": len(t) // 2})
+                return self._send(200, {"store": st.name, "index": t,
+                                        "tokens_est": estimate(t)})
             if path.startswith("/profile"):
                 # Persona lives on the HOST side (in DSH: the `persona` plugin and the
                 # agent preset). We only record WHICH persona belongs with this kura and
@@ -146,10 +148,12 @@ def _make_handler(reg: Registry):
             if err:
                 return self._send(404, err)
             if path.startswith("/recall"):
+                tot = p.get("total_chars")
                 return self._send(200, recall(st, reg.models_for(st).thinker,
                                               p.get("question", ""),
                                               int(p.get("hops", 1)), int(p.get("top", 3)),
-                                              int(p.get("chars", 6000))))
+                                              int(p.get("chars", 6000)),
+                                              int(tot) if tot else None))
             if path.startswith("/remember"):
                 # A tool call or a script: a DIRECT write, refused unless the store's
                 # policy allows one. The distiller's verified pour is a different door.

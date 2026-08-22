@@ -353,3 +353,57 @@ test("the listing shows the STORE's policy, not this client's switch", async () 
     assert.ok(!out.includes("[direct-allowed]"));
   } finally { srv.close(); }
 });
+
+test("a failed switch never leaves the previous kura's map in the prompt", async () => {
+  // The reported break: current moved to eq, eq's /prefill failed, and the staleness
+  // grace period kept maker's index in the system prompt for minutes while recall went
+  // to eq. The agent read one household's map and answered from another's.
+  const seen = [];
+  const srv = createServer((req, res) => {
+    seen.push(req.url);
+    res.setHeader("content-type", "application/json");
+    if (req.url.startsWith("/prefill") && req.url.includes("talking")) {
+      res.statusCode = 500;
+      return res.end(JSON.stringify({ error: "eq is down" }));
+    }
+    if (req.url.startsWith("/prefill")) {
+      return res.end(JSON.stringify({ text: "<<<KURA-MAP store=maker>>>\ntrigger for maker\n",
+                                      etag: "e-maker", store: "maker" }));
+    }
+    res.end(JSON.stringify({ default: "maker",
+                             stores: { maker: { label: "m", memories: 1 },
+                                       eq: { label: "e", memories: 2 } },
+                             modes: { talking: "eq" } }));
+  });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url: `http://127.0.0.1:${srv.address().port}` });
+    const sec = ctx.sections.get("distill-kura:map");
+    await until(() => sec.text({}).includes("trigger for maker"));
+    const out = await ctx.registered.get("kura_use").execute({ store: "talking" }, {});
+    assert.match(out, /could not be read/);
+    const text = sec.text({});
+    assert.ok(!text.includes("trigger for maker"), "the old kura's map is still being worn");
+    assert.match(text, /MISSING/);
+  } finally { srv.close(); }
+});
+
+test("a server that answers for the wrong store is not believed", async () => {
+  const srv = createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.url.startsWith("/prefill")) {
+      // Answers for `maker` no matter what was asked.
+      return res.end(JSON.stringify({ text: "<<<KURA-MAP store=maker>>>\nsomebody else\n",
+                                      etag: "e", store: "maker" }));
+    }
+    res.end(JSON.stringify({ default: "maker", stores: {}, modes: {} }));
+  });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url: `http://127.0.0.1:${srv.address().port}`, store: "eq", allowSwitch: false });
+    await new Promise((r) => setTimeout(r, 150));
+    assert.match(ctx.sections.get("distill-kura:map").text({}), /MISSING/);
+  } finally { srv.close(); }
+});

@@ -21,9 +21,14 @@ Japanese/English index and checked against six actual tokenizers:
     cl100k (GPT-4)       10,888     -23%       -17%
 
 Two lessons in that spread. The tokenizers disagree with each other by 1.27x, so no
-character-based estimate can do better than roughly +/-15% — do not chase precision
-here. And the naive `chars/2` is biased LOW, which is the dangerous direction: a budget
-that under-counts silently overflows the window it was meant to protect.
+character-based estimate can do better than roughly +/-15-20% against an arbitrary
+tokenizer — the fitted weights land within a percent of the two they were checked
+against and -12%/-17% against the widest outliers. Do not chase precision here, and do
+not use this number to support a claim about compression: measure with the real
+tokenizer for that (`kura bench compress --tokenizer-command ...`).
+
+And the naive `chars/2` is biased LOW, which is the dangerous direction: a budget that
+under-counts silently overflows the window it was meant to protect.
 
 This is an ESTIMATE and is labelled as one everywhere it surfaces. Budgets built on it
 leave headroom rather than sitting exactly on the limit.
@@ -48,8 +53,9 @@ _ASCII = re.compile(r"[\x00-\x7f]")
 
 
 def estimate(text: str) -> int:
-    """Approximate tokens in `text`. One pass over five character classes: no tables,
-    no tokenizer dependency, accurate to roughly +/-10% on mixed Japanese/English."""
+    """Approximate tokens in `text`. One pass over five character classes: no tables and
+    no tokenizer dependency, within a few percent of the tokenizers it was fitted against
+    and up to ~20% out against the extremes. An ESTIMATE, labelled as one everywhere."""
     if not text:
         return 0
     hira = len(_HIRA.findall(text))
