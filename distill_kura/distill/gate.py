@@ -137,7 +137,9 @@ def verify_tags(proposed, evidence: list[dict], recurred_ok: bool = False
     for t in tags:
         if t in FORGETTING_TAGS:
             refused[t] = "reserved for the forgetting pass; a model may not assign it"
-        elif t == "emotion-carried":
+        elif t in ("emotion-carried", "commitment"):
+            # Both are claims about the human — what they felt, what they undertook
+            # — and neither can rest on tool output or the agent's prose.
             if user_quotes:
                 kept.append(t); basis[t] = {"class": "USER", "quote": user_quotes[0]}
             else:

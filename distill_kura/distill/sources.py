@@ -111,12 +111,21 @@ class ClaudeCodeSource(Source):
                 except ValueError:
                     continue
                 t = d.get("type")
+                # A subagent's transcript records the PARENT MODEL's instructions as
+                # `type: user` with `isSidechain: true`. That text is model-written:
+                # classed [USER] it would be the human's own words, and "the owner
+                # approved X" in a delegation prompt would pass the gate as a decision.
+                # Tool results stay [TOOL]; everything else in a sidechain is [SELF].
+                side = bool(d.get("isSidechain"))
                 c = (d.get("message") or {}).get("content")
                 parts = c if isinstance(c, list) else ([c] if isinstance(c, str) else [])
                 for p in parts:
                     cls = None
                     if t == "user":
-                        cls = "TOOL" if (isinstance(p, dict) and p.get("type") == "tool_result") else "USER"
+                        if isinstance(p, dict) and p.get("type") == "tool_result":
+                            cls = "TOOL"
+                        else:
+                            cls = "SELF" if side else "USER"
                     elif t == "assistant":
                         if isinstance(p, dict) and p.get("type") == "text":
                             cls = "SELF"

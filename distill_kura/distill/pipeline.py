@@ -239,7 +239,10 @@ class Distiller:
     # has no known origin, and "different occasion" cannot be decided. It is left alone
     # and the fact is logged; widening this is a decision for a person, not a default.
     def _origin_key(self, slug: str) -> str | None:
-        ref = self.store.frontmatter(slug).get("evidence_manifest", "")
+        fm = self.store.frontmatter(slug)
+        # The ORIGIN, not the latest extension: `evidence_manifest` moves with every
+        # EXTENDS pour; `origin_manifest` is pinned to the first and never overwritten.
+        ref = fm.get("origin_manifest") or fm.get("evidence_manifest", "")
         if not ref.startswith("sha256:"):
             return None
         try:
@@ -277,7 +280,10 @@ class Distiller:
         """Write `_still/profile.draft.md` from THIS store's memories. Observable, never
         applied: the file a person reads before deciding is the whole output. A store
         with no memories yields no draft — there is nothing to have learned from."""
-        slugs = self.store.slugs()
+        # Memories first, the study shelf last: `slugs()` sorts `_study/` before the
+        # letters, and a few long notes used to spend the whole budget before the
+        # draft had seen a single memory.
+        slugs = sorted(self.store.slugs(), key=lambda x: (x.startswith("_study/"), x))
         if not slugs:
             return {"ok": False, "why": "no memories: nothing to draft a profile from"}
         bodies = []
@@ -721,7 +727,11 @@ class Distiller:
             fixed += 1
             _log(f"  ✎ {slug} — {why}")
         if fixed:
-            open(self.store.index_path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+            # Under the store lock and through the atomic replace, like every other
+            # index write: a bare open() here could interleave with a pour and drop
+            # the line it was adding, or leave a half-written index after a crash.
+            with self.store._locked():
+                self.store._write_index("\n".join(lines) + "\n")
         return {"ok": True, "fixed": fixed, "still_ragged": len(targets) - fixed}
 
     # ── the pass ─────────────────────────────────────────────────────────

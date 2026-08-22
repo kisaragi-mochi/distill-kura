@@ -79,6 +79,20 @@ material. The ratio is a property of the corpus, not of the tool.
 
 - a FIX verdict kept only the first draft header line, so DESC was lost and the
   memory poured with its slug as the index trigger
+- a Claude Code subagent transcript records the PARENT MODEL's prompt as `type: user`
+  with `isSidechain: true`; it was classed [USER], so a model's "the owner approved X"
+  could pass the gate as the human's decision. Sidechain text is [SELF] now (tool
+  results stay [TOOL]). 360 of the house's 391 journal files were sidechains
+- `tidy()` wrote the index with a bare `open()`, outside the store lock and the atomic
+  replace every other index write uses
+- an EXTENDS pour overwrote `evidence_manifest`, erasing where the memory came from;
+  the first manifest is now pinned as `origin_manifest` and `recur()` reads that
+- `profile_draft()` read `_study/` notes first (underscore sorts before letters) and
+  a few long notes spent the whole budget before it saw a memory
+- `known_slugs()` matched `(AGENTS.md)` inside an index line's prose and reported an
+  orphan that was never a memory; only link targets count now
+- `commitment` passed `verify_tags()` unconditionally; it is a claim about the human
+  and now needs a [USER] quote like `emotion-carried`
 - the resident map had no store identity: a failed switch left the previous kura's index
   in the prompt while recall went to the new one
 - the trigger quality gate tested the alphabet, rejecting good Japanese triggers (and ★)

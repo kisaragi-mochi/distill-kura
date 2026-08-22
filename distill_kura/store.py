@@ -273,7 +273,9 @@ class Store:
 
     def known_slugs(self) -> list[str]:
         """Slugs as the index names them (what a model may echo back)."""
-        return re.findall(r"\(([^)]+)\.md\)", self._uncommented(self.index_text()))
+        # Only link TARGETS: `作法(AGENTS.md)` in a line's prose used to match and
+        # produce an index orphan that was never a memory.
+        return re.findall(r"\]\(([^)]+)\.md\)", self._uncommented(self.index_text()))
 
     def titles(self) -> dict[str, str]:
         """index display title (lowercased) → slug. Models sometimes answer with the
@@ -651,6 +653,11 @@ class Store:
                 kept_tags = self.tags(slug)
                 kept_ann = self.annotations(slug)
             merged = {**kept, **(meta or {})}
+            # The first evidence manifest is the memory's origin. Later pours (an
+            # EXTENDS) bring their own manifest and must not erase where the memory
+            # came from, so the origin is pinned once and never overwritten.
+            if merged.get("evidence_manifest") and not kept.get("origin_manifest"):
+                merged["origin_manifest"] = kept.get("evidence_manifest") or merged["evidence_manifest"]
             tmp = path + f".tmp.{os.getpid()}"
             with open(tmp, "w", encoding="utf-8") as f:
                 f.write(self._render(slug, description, type_, body, merged,
