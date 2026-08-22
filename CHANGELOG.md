@@ -54,6 +54,10 @@ material. The ratio is a property of the corpus, not of the tool.
 - `tidy()` and `init_files()` wrote into frozen stores
 - `pour '../../../x'` read a file from anywhere on the filesystem into the store
 - hardlinks: reported on the read side, filtered by inode on the intake side
+- the DSH plugin pinned `@deepseek-ai/dsh-tools` as a direct dependency, so a profile
+  could load a second physical copy and split its module-local Symbol identity — the
+  first tool call died on `undefined.prepare`. Now a `"*"` peer: the host supplies the
+  one copy it already has. First outside contribution, by @kisaragi-mochi (#1)
 
 ### Compatibility
 
