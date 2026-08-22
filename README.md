@@ -242,6 +242,14 @@ store. Bind them and one preset change moves the whole self:
     #  out of the model's hands. Naming a store already binds the preset.)
 ```
 
+**One dependency, and why it is a peer.** The plugin imports `defineTool` from
+`@deepseek-ai/dsh-tools`. A profile-local second copy can split the package's
+module-local Symbol identity — even at the same version — and make the first tool
+call fail on `undefined.prepare`. The plugin therefore declares the package as a
+`"*"` peer so the profile supplies its copy without a version mismatch. A stale
+physical duplicate can still require deduplication; see the install checks in
+[`examples/dsh-presets/`](examples/dsh-presets/).
+
 Leave `allowSwitch` at its default and the agent also gets `kura_use`, so it can move
 between kura mid-conversation without a preset change. Tools: `kura_recall`,
 `kura_read`, `kura_doctor`, `kura_list`, `kura_use`, and `kura_remember` (only when the
