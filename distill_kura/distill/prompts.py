@@ -54,8 +54,8 @@ trigger points at what is inside.
 """
 
 SPOT_SYS = """You read a raw journal between a human and an AI agent, and pick out what
-deserves to become a permanent memory. Think and answer in English; a separate writer
-does the final prose.
+deserves to become a permanent memory IN THIS STORE. Think and answer in English; a
+separate writer does the final prose.
 
 Every line is tagged with its EVIDENCE CLASS. This matters more than anything else:
   [USER] the human's own words  — primary evidence.
@@ -64,15 +64,24 @@ Every line is tagged with its EVIDENCE CLASS. This matters more than anything el
   [SELF] the agent's own prose  — not external evidence, but not worthless: a
                                   considered judgement is worth keeping, as a judgement.
 
-WHAT IS WORTH KEEPING (in order):
- 1. A decision the human made, especially with their reasoning — and especially if
-    they pushed back on something.
- 2. Something that surprised, delighted, or annoyed the human. Emotion is what makes
-    a fact stick, even a clerical one.
- 3. A topic the human RETURNED to after a gap. Coming back to something is how a
-    person shows what is really on their mind.
- 4. A measured number, or a landmine (a failure mode that will recur) — from [TOOL] only.
- 5. A doctrine: how work should be done here, and WHY.
+WHAT DECIDES: the charter above. It says what this store is FOR. The same afternoon
+yields a different memory in a research store ("what became known"), a build store
+("how it was made to work"), a management store ("what it changed in the plan") and a
+relationship store ("what was felt, and what settled it"). Keep what THIS charter would
+want, written from the side this charter cares about. If the charter would not miss
+it, it does not belong here — even if another store would want it.
+
+For each candidate, say WHY IT BELONGS HERE in one sentence (`belongs_because`). A
+sentence that would fit any store — "it is important", "it was discussed" — means the
+candidate does not belong anywhere yet.
+
+DO NOT WALK PAST (observations, not a ranking — the charter ranks):
+ · a decision the human made, especially with reasoning, especially a push-back
+ · something that surprised, delighted or annoyed the human
+ · a topic the human RETURNED to after a gap
+ · a measured number, or a landmine (a failure that will recur) — from [TOOL] only
+ · a doctrine: how work is done here, and WHY
+ · a negation or a reversal; a condition attached to a rule
 
 WHAT IS NOT WORTH KEEPING:
  - Anything a repository, git history, or a config file already records.
@@ -80,6 +89,18 @@ WHAT IS NOT WORTH KEEPING:
  - A bare fact whose only support is [SELF]. If the agent merely asserted it, it is
    not a fact. (A judgement OF the agent's may be kept — set `kind: "feedback"` and
    say in `why` that it is a judgement.)
+
+TAGS are words about the memory's character, several per memory, lower-case kebab.
+Content: hypothesis, evidence, research-result, decision, implementation, commitment,
+reference, feedback. Character: emotion-carried (the human's feeling is in the
+evidence), entrusted (the human asked for it to be kept — quote the asking),
+formative (it shaped a plan, a judgement, a relationship), landmine (forgetting it
+repeats a failure), resolved, settled. Use the store's own words too. A tag is a
+description, never a weight: more tags do not make a memory matter more. Tags that
+claim something about the human are checked against your quotes.
+
+`keep` is the meaning that must survive any later thinning; `may_fade` is the detail
+that need not. Both are one sentence. They decide nothing today.
 
 For each candidate you MUST supply `quotes`: VERBATIM substrings copied exactly from
 the material above, keeping the [CLASS] tag at the start. Do not paraphrase, do not
@@ -100,10 +121,14 @@ Output ONLY a JSON array (empty if nothing qualifies), at most {max_items} items
 [{{"topic":"<short english slug-ish name>",
   "kind":"user|feedback|project|reference|idea",
   "why":"<ONE line>",
+  "belongs_because":"<ONE sentence: why THIS store wants it>",
+  "tags":["decision","landmine"],
+  "keep":"<ONE sentence>", "may_fade":"<ONE sentence>",
   "quotes":["[USER] ...", "[TOOL] ..."]}}]"""
 
 COVERAGE_SYS = """A first pass over this material already took the candidates listed
-below. Your job is the opposite one: name what it WALKED PAST.
+below. Your job is the opposite one: name what it WALKED PAST — judged, as before, by
+the charter above: what would THIS store miss?
 
 One pass optimises for the most striking thing in a batch. What it reliably misses:
  · a second or third decision, once the first one has been found
@@ -112,14 +137,17 @@ One pass optimises for the most striking thing in a batch. What it reliably miss
  · a condition or an exception attached to a rule
  · a landmine mentioned in passing
  · a topic the human returned to after a gap
+ · a feeling the human stated plainly, in a store whose charter cares about that
 
 Same rules as the first pass: VERBATIM quotes with their [CLASS] tag, kept short, or the
-candidate is discarded. Do not restate anything on the taken list in different words.
+candidate is discarded. Say why each one belongs HERE. Do not restate anything on the
+taken list in different words.
 
 Output ONLY a JSON array, at most {max_items} items, empty if the first pass really did
 take everything:
 [{{"topic":"...","kind":"user|feedback|project|reference|idea","why":"<ONE line>",
-  "quotes":["[USER] ..."]}}]"""
+  "belongs_because":"<ONE sentence>","tags":["..."],"keep":"<ONE sentence>",
+  "may_fade":"<ONE sentence>","quotes":["[USER] ..."]}}]"""
 
 
 NOVEL_SYS = """You decide whether a distilled candidate is actually NEW to a memory store.
@@ -152,11 +180,23 @@ Rules:
 - Do not write what a repository or git history already records. Only the non-obvious.
 - Never hedge with "roughly" / "it seems" to cover a gap. If you do not know, say so.
 
+Four CURATION lines go with the memory. They are your judgement about where it sits,
+read against the charter above — not new facts, and never a reason to widen the body:
+  TAGS            words about its character (JSON array, lower-case kebab). Several is
+                  normal. A description, never a weight.
+  BELONGS_BECAUSE one sentence: why THIS store wants it. If you cannot say, say so.
+  KEEP            one sentence: the meaning that must outlive any later thinning.
+  MAY_FADE        one sentence: the detail that need not.
+
 Output exactly this shape, no preamble, no epilogue:
 
 SLUG: <short a-z0-9- name>
 TITLE: <index title. A name you can say aloud.>
 DESC: <the index trigger. One line. Not a summary.>
+TAGS: ["decision", "landmine"]
+BELONGS_BECAUSE: <one sentence>
+KEEP: <one sentence>
+MAY_FADE: <one sentence>
 BODY:
 <3-10 lines. The fact → **Why:** why it is worth keeping → **How to apply:** how to
  use it next time. Link related memories as [[their-slug]].>"""
@@ -169,9 +209,14 @@ here) > [ACT] an action taken. [SELF] the agent's own prose is not support.
 **Do not repeat one word of what the memory already says.** Add the delta only.
 Nothing outside the evidence. Numbers only from [TOOL].
 
+If the new evidence changes the memory's character, say so in TAGS (words to ADD —
+existing tags are kept) and, if the reason it belongs here has changed, BELONGS_BECAUSE.
+Otherwise omit both lines.
+
 Output exactly:
 
 SECTION: <a short "## " heading, including the date>
+TAGS: ["..."]            (optional)
 BODY:
 <2-6 lines: what is newly known. Add a one-line **How to apply:** if it earns one.>"""
 
@@ -190,9 +235,16 @@ Three verdicts. Put one on the first line, then one line of reason:
             · anything a repository or git history already shows (not non-obvious)
             · effectively the same as an existing memory, with no new fact
             · a one-off work log that helps nobody later
+            · nothing in it is what THIS store's charter is for — a true thing in
+              the wrong room is still TOSS here
 
 **Do not be afraid to TOSS.** A store is worth what it returns when queried, not what
 it weighs. Better empty than padded.
+
+The draft's BELONGS_BECAUSE must actually answer for this charter. Missing, or a
+sentence that would fit any store, is grounds for FIX — write the sentence — unless
+you cannot, in which case it is TOSS. This is a second question, not a substitute
+for the first: evidence is still checked by the gate, not by you.
 
 ⚠️ Numbers need [TOOL] backing. An unbacked number is by itself grounds for FIX (drop
    the number) or TOSS.
@@ -202,6 +254,7 @@ it weighs. Better empty than padded.
 Output shape (nothing else):
   <POUR|FIX|TOSS>
   reason: <one line>
+  BELONGS_BECAUSE: <only for FIX, only if you are supplying the missing sentence>
   BODY:
   <only for FIX: the entire corrected body>"""
 

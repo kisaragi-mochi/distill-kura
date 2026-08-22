@@ -574,9 +574,11 @@ class Distiller:
         v = next((x for x in ("POUR", "FIX", "TOSS") if x in first), None)
         why = (re.search(r"^reason[:：]\s*(.+)$", out, re.M | re.I) or [None, ""])[1] if v else ""
         m = re.search(r"^BODY:\s*\n(.*)$", out, re.S | re.M)
+        bb = re.search(r"^BELONGS_BECAUSE:\s*(.+)$", out.split("BODY:", 1)[0], re.M)
         return {"slug": slug, "verdict": v or "TOSS",
                 "why": (why or "the scribe did not keep the shape")[:160],
-                "new_body": m.group(1).strip() if m else None}
+                "new_body": m.group(1).strip() if m else None,
+                "belongs_because": bb.group(1).strip() if bb else None}
 
     def drain(self, limit: int = 0) -> dict:
         ds = sorted(glob.glob(os.path.join(self.drafts_dir, "*.md")))
@@ -604,6 +606,8 @@ class Distiller:
                     # only TITLE dropped DESC, and the memory poured with its slug as
                     # the index trigger. The scribe rewrote the BODY, nothing else.
                     hd, _ = _split_draft(self._draft_body(raw))
+                    if j.get("belongs_because"):
+                        hd["BELONGS_BECAUSE"] = j["belongs_because"]
                     keep_head = [f"{k}: {v}" for k, v in hd.items()]
                     body = ("\n".join(keep_head) + "\n\n" if keep_head else "") + j["new_body"] + "\n"
                     # The scribe rewrote the body with the evidence in front of it, so it

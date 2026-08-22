@@ -333,3 +333,37 @@ def test_tags_never_move_a_memory_and_no_move_exists(tmp_path):
     for cls in (Store, Distiller, pipeline):
         for name in dir(cls):
             assert not any(w in name.lower() for w in ("move", "migrate", "copy_to", "transfer")), name
+
+
+def test_a_fix_may_supply_the_missing_belongs_because(tmp_path):
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    spot_plain = json.dumps([{"topic": "archive-on-slow-disk", "kind": "project", "why": "disks",
+                              "quotes": ["[USER] put the archive on the slow disk"]}])
+    script(d, {"deserves to become a permanent memory": spot_plain, "actually NEW": "NEW\n",
+               "You write the final memory": SCRIBE,
+               "draw the last line": ("FIX\nreason: it never said why it is here\n"
+                                      "BELONGS_BECAUSE: this store keeps storage decisions\n"
+                                      "BODY:\nThe archive goes on the slow disk.\n")})
+    d.run(chunks=1)
+    assert d.drain()["poured"] == 1
+    assert store.annotations("archive-on-slow-disk")["belongs_because"] == "this store keeps storage decisions"
+    assert store.tags("archive-on-slow-disk") == ("decision", "landmine")
+
+
+def test_the_prompts_rank_by_charter_not_by_a_universal_list():
+    """Emotion and recurrence are things not to miss, not reasons that outrank the
+    store's purpose. The words that made them a universal ranking are gone."""
+    from distill_kura.distill import prompts
+    assert "WHAT IS WORTH KEEPING (in order)" not in prompts.SPOT_SYS
+    assert "Emotion is what makes a fact stick" not in prompts.SPOT_SYS
+    assert "the charter above" in prompts.SPOT_SYS and "belongs_because" in prompts.SPOT_SYS
+    assert "charter" in prompts.COVERAGE_SYS and "charter" in prompts.POUR_SYS
+    for line in ("TAGS:", "BELONGS_BECAUSE:", "KEEP:", "MAY_FADE:"):
+        assert line in prompts.SCRIBE_SYS
+    # no score vocabulary anywhere a model could pick it up
+    for name in ("SPOT_SYS", "COVERAGE_SYS", "SCRIBE_SYS", "POUR_SYS", "EXTEND_SYS"):
+        t = getattr(prompts, name).lower()
+        for w in ("score", "salience", "priority_", "rank by", "more important than"):
+            assert w not in t, (name, w)
