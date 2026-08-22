@@ -38,6 +38,26 @@ halves can be kept in step by whoever owns the preset.
 Then in the **preset** (`.agent-presets/<name>/agent.cordis.yml`), not the host
 composition — see `maker/agent.cordis.yml` and `eq/agent.cordis.yml` here.
 
+The plugin declares `@deepseek-ai/dsh-tools` as a `"*"` peer. Install the plugin
+through DSH so the dependency is resolved in the same profile that will load it:
+
+```sh
+dsh plugin --profile <profile> add <path-or-package>
+dsh plugin --profile <profile> why @deepseek-ai/dsh-tools
+```
+
+If `why` reports a profile-local or stale second copy, deduplicate that profile
+and restart its DSH host before testing a fresh tool call:
+
+```sh
+dsh plugin --profile <profile> dedupe
+dsh plugin --profile <profile> why @deepseek-ai/dsh-tools
+```
+
+The final `why` output must resolve `dsh-tools` through the profile's host copy;
+matching version strings alone do not prove that both imports share one physical
+module instance.
+
 ## MCP bridge
 
 See `mcp-bridge.cordis.yml`. A service row must sit inside a group carrying an

@@ -8,6 +8,7 @@
  *   node --import ./test/register.mjs --test test/plugin.test.mjs
  */
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import test from "node:test";
 
@@ -339,6 +340,33 @@ test("the map section and its timer are both disposable", async () => {
     assert.equal(ctx.sections.size, 0);
     assert.equal(ctx.registered.size, 0);
   } finally { srv.close(); }
+});
+
+/**
+ * The dependency itself is the bug, so test the dependency.
+ *
+ * A profile-local copy of dsh-tools can split module-local Symbol identity even
+ * at byte-identical versions, so the first tool call can die on
+ * `undefined.prepare`. Keeping it out of `dependencies` and using a `"*"` peer
+ * avoids asking the profile installer for a separate version.
+ *
+ * This test locks that package-manifest contract. It does not simulate profile
+ * installation because this repository stubs dsh-tools in its unit tests.
+ */
+test("dsh-tools stays at the host peer boundary",
+     async () => {
+  const raw = await readFile(
+    new URL("../package.json", import.meta.url), "utf8");
+  const pkg = JSON.parse(raw);
+  assert.ok(
+    pkg.peerDependencies && "@deepseek-ai/dsh-tools" in pkg.peerDependencies,
+    "package.json lost dsh-tools in peerDependencies");
+  const range = pkg.peerDependencies["@deepseek-ai/dsh-tools"];
+  assert.equal(range, "*",
+    `dsh-tools peer range drifted from "*": ${JSON.stringify(range)}`);
+  const deps = pkg.dependencies || {};
+  assert.ok(!deps["@deepseek-ai/dsh-tools"],
+            `dsh-tools is back in dependencies: ${JSON.stringify(deps["@deepseek-ai/dsh-tools"])}`);
 });
 
 test("the listing shows the STORE's policy, not this client's switch", async () => {
