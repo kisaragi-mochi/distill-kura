@@ -173,7 +173,14 @@ the store directory and fall under the same boundary as the memories: a process 
 can read the store can read them, a process that cannot, cannot. The write side keeps
 its two doors: a tag goes on through `annotate_direct` (refused on `distiller-only`)
 or `annotate_verified` (the distiller, with evidence in the manifest), and `frozen`
-refuses both. The profile is read by that store's distiller only and drafted from that
+refuses both. The verified door also **signs** the curation it leaves — a
+`curation_mark` over slug, tags and the three sentences, with the same per-store key
+the gate signs drafts with — so on a `distiller-only` store a tag written into the
+file by hand shows in `doctor` as `unsigned`, and one edited after the fact as
+`tampered`. The reader still reads the tag; the mark changes what `doctor` says, not
+what recall returns. Its limit is the gate mark's limit: the key sits beside the
+memories, so this is a guard against a tool with a file handle, not against a
+principal with the filesystem. The profile is read by that store's distiller only and drafted from that
 store's memories only; it is never carried into another store's prompt. Nothing here
 is a permission layer, and nothing here should be read as one.
 

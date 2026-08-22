@@ -138,3 +138,98 @@ def test_commitment_needs_the_humans_words():
     assert kept == () and "commitment" in refused
     kept, basis, _ = verify_tags(["commitment"], [{"class": "USER", "text": "I will move the archive tonight"}])
     assert kept == ("commitment",) and basis["commitment"]["class"] == "USER"
+
+
+# ── 7. landmine needs an actual failure, danger, correction or warning ───
+
+def test_landmine_needs_a_failure_in_the_evidence_not_just_a_tool_line():
+    """The spec: a landmine rests on an actual failure, danger, correction or warning.
+    A quiet `df` line is tool output and is not any of those — tagging it `landmine`
+    turned every bake log into a minefield."""
+    quiet = [{"class": "TOOL", "text": "/data 3.2T used 1.1T avail"}]
+    kept, _, refused = verify_tags(["landmine"], quiet)
+    assert kept == () and "landmine" in refused
+    failed = [{"class": "TOOL", "text": "RPC call to sample_tokens timed out; engine dead"}]
+    kept, basis, _ = verify_tags(["landmine"], failed)
+    assert kept == ("landmine",) and basis["landmine"]["class"] == "TOOL"
+    assert "timed out" in basis["landmine"]["quote"]
+    jp = [{"class": "TOOL", "text": "CUDA graph capture で落ちた: out of memory"}]
+    assert verify_tags(["landmine"], jp)[0] == ("landmine",)
+
+
+def test_landmine_from_the_human_needs_a_warning_or_a_correction():
+    plain = [{"class": "USER", "text": "put the archive on the slow disk"}]
+    assert verify_tags(["landmine"], plain)[0] == ()
+    warned = [{"class": "USER", "text": "⚠ NASから直接ロードしないで、OOMする"}]
+    kept, basis, _ = verify_tags(["landmine"], warned)
+    assert kept == ("landmine",) and basis["landmine"]["class"] == "USER"
+    corrected = [{"class": "USER", "text": "いや、それは違う。x4縮退は接触で移動する"}]
+    assert verify_tags(["landmine"], corrected)[0] == ("landmine",)
+    en = [{"class": "USER", "text": "don't load from the NAS directly, it OOMs"}]
+    assert verify_tags(["landmine"], en)[0] == ("landmine",)
+
+
+def test_landmine_never_rests_on_the_agents_prose():
+    self_only = [{"class": "SELF", "text": "I think this failed because of the driver"}]
+    assert verify_tags(["landmine"], self_only)[0] == ()
+    # an [ACT] alone is an action, not a failure
+    act = [{"class": "ACT", "text": "Bash {\"command\": \"docker rm -f huihui\"}"}]
+    assert verify_tags(["landmine"], act)[0] == ()
+
+
+# ── 8. curation is signed on the verified door ───────────────────────────
+
+def test_a_verified_pour_signs_its_tags_and_a_hand_edit_is_tampering(tmp_path):
+    s = Store(name="m", path=str(tmp_path / "m"), write_policy="distiller-only"); s.init_files()
+    s.pour_verified("x", "d", "b", tags=["decision"], annotations={"keep": "the decision"})
+    assert s.curation_state("x") == "verified"
+    assert s.doctor()["curation"]["tampered"] == [] and s.doctor()["curation"]["verified"] == 1
+    # someone edits the file by hand and promotes the memory to `entrusted`
+    p = s.file_of("x")
+    t = open(p, encoding="utf-8").read().replace('["decision"]', '["decision", "entrusted"]')
+    open(p, "w", encoding="utf-8").write(t)
+    assert s.tags("x") == ("decision", "entrusted")            # the reader still reads it…
+    assert s.curation_state("x") == "tampered"                 # …and doctor names it
+    assert s.doctor()["curation"]["tampered"] == ["x"]
+
+
+def test_the_direct_door_writes_unsigned_and_that_is_normal_where_it_is_allowed(tmp_path):
+    s = Store(name="m", path=str(tmp_path / "m")); s.init_files()          # direct-allowed
+    s.remember_direct("x", "d", "b", tags=["decision"])
+    assert s.curation_state("x") == "unsigned"
+    d = s.doctor()["curation"]
+    assert d["unsigned"] == 1 and d["tampered"] == [] and d["unsigned_names"] == []   # not listed: allowed here
+    # a verified annotation on top signs it; a later direct annotation drops the mark
+    s.annotate_verified("x", tags=["landmine"])
+    assert s.curation_state("x") == "verified"
+    s.annotate_direct("x", tags=["reference"])
+    assert s.curation_state("x") == "unsigned"
+    assert s.doctor()["curation"]["tampered"] == []
+
+
+def test_on_a_distiller_only_store_hand_written_tags_are_named(tmp_path):
+    s = Store(name="m", path=str(tmp_path / "m"), write_policy="distiller-only"); s.init_files()
+    s.pour_verified("x", "d", "b")                              # no curation, no mark: fine
+    assert s.curation_state("x") == "none"
+    p = s.file_of("x")
+    t = open(p, encoding="utf-8").read().replace("  type: project\n", '  type: project\n  tags: ["entrusted"]\n')
+    open(p, "w", encoding="utf-8").write(t)
+    assert s.curation_state("x") == "unsigned"
+    assert s.doctor()["curation"]["unsigned_names"] == ["x"]   # listed: nobody but the gate should write here
+
+
+def test_the_mark_is_stable_so_an_identical_merge_still_touches_nothing(tmp_path):
+    s = Store(name="m", path=str(tmp_path / "m"), write_policy="distiller-only"); s.init_files()
+    s.pour_verified("x", "d", "b", tags=["decision"])
+    before = open(s.file_of("x"), "rb").read()
+    r = s.annotate_verified("x", tags=["decision"])
+    assert not r["changed"] and open(s.file_of("x"), "rb").read() == before
+    assert s.curation_state("x") == "verified"
+
+
+def test_recurred_is_signed_too(tmp_path):
+    s = Store(name="m", path=str(tmp_path / "m"), write_policy="distiller-only"); s.init_files()
+    s.pour_verified("x", "d", "b")
+    s.annotate_verified("x", tags=["recurred"], meta={"recurred_manifest": "sha256:" + "f" * 64})
+    assert s.curation_state("x") == "verified"
+    assert s.frontmatter("x")["recurred_manifest"].startswith("sha256:")

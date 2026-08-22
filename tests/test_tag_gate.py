@@ -45,7 +45,9 @@ def test_emotion_carried_needs_a_user_quote():
 
 def test_landmine_and_formative_do_not_rest_on_the_agents_prose_alone():
     assert verify_tags(["landmine", "formative"], [S])[0] == ()
-    assert verify_tags(["landmine", "formative"], [S, T])[0] == ("formative", "landmine")
+    assert verify_tags(["landmine", "formative"], [S, T])[0] == ("formative",)   # a quiet df line
+    T_FAIL = {"class": "TOOL", "text": "docker: Error response: OOM killed"}
+    assert verify_tags(["landmine", "formative"], [S, T_FAIL])[0] == ("formative", "landmine")
 
 
 def test_the_forgetting_words_are_refused_from_a_model():
@@ -134,22 +136,23 @@ def test_tags_and_sentences_travel_from_candidate_to_store(tmp_path):
     assert r["drafts"] == ["archive-on-slow-disk"]
     draft = open(os.path.join(d.drafts_dir, "archive-on-slow-disk.md"), encoding="utf-8").read()
     # the kept tags are in the SIGNED text; the refused ones are named in the header
-    assert 'TAGS: ["decision", "emotion-carried", "entrusted", "landmine"]' in draft
-    assert "tags refused: expired" in draft
+    assert 'TAGS: ["decision", "emotion-carried", "entrusted"]' in draft
+    assert "tags refused: expired" in draft and "landmine (needs an actual failure" in draft
     assert "KEEP: the disk, not the numbers" in draft             # the scribe's sentence wins
     assert "BELONGS_BECAUSE: this store holds storage decisions" in draft
     # the manifest says why each claiming tag exists, and why one does not
     ref = [l for l in draft.splitlines() if "evidence_manifest:" in l][0].split("sha256:")[1].strip()
     man = json.load(open(os.path.join(store.path, "_evidence", ref + ".json")))
     assert man["gate_version"] == 2
-    assert man["tags"] == ["decision", "emotion-carried", "entrusted", "landmine"]
+    assert man["tags"] == ["decision", "emotion-carried", "entrusted"]
     assert man["tag_evidence"]["entrusted"]["quote"].endswith("remember that")
-    assert man["tags_refused"] == {"expired": "reserved for the forgetting pass; a model may not assign it"}
+    assert man["tags_refused"]["expired"] == "reserved for the forgetting pass; a model may not assign it"
+    assert "landmine" in man["tags_refused"]
     assert man["annotations"]["keep"] == "the disk, not the numbers"
     # and the pour keeps all of it, with the body free of the header lines
     out = d.drain()
     assert out["poured"] == 1
-    assert store.tags("archive-on-slow-disk") == ("decision", "emotion-carried", "entrusted", "landmine")
+    assert store.tags("archive-on-slow-disk") == ("decision", "emotion-carried", "entrusted")
     assert store.annotations("archive-on-slow-disk") == {
         "belongs_because": "this store holds storage decisions",
         "keep": "the disk, not the numbers", "may_fade": "the df numbers"}
@@ -202,7 +205,7 @@ def test_a_tag_edited_into_a_staged_draft_breaks_the_gate_mark(tmp_path):
                "You write the final memory": SCRIBE, "draw the last line": "POUR\nreason: ok"})
     d.run(chunks=1)
     p = os.path.join(d.drafts_dir, "archive-on-slow-disk.md")
-    t = open(p, encoding="utf-8").read().replace('"landmine"]', '"landmine", "fulfilled"]')
+    t = open(p, encoding="utf-8").read().replace('"entrusted"]', '"entrusted", "fulfilled"]')
     open(p, "w", encoding="utf-8").write(t)
     r = d.pour("archive-on-slow-disk")
     assert not r["ok"] and "gate mark" in r["why"]
@@ -223,7 +226,7 @@ def test_fix_keeps_every_header_line_not_just_the_first(tmp_path):
     assert out["fixed"] == 1 and out["poured"] == 1
     assert "- [Archive on the slow disk](archive-on-slow-disk.md) — the archive lives on the slow disk" \
         in store.index_text()
-    assert store.tags("archive-on-slow-disk") == ("decision", "emotion-carried", "entrusted", "landmine")
+    assert store.tags("archive-on-slow-disk") == ("decision", "emotion-carried", "entrusted")
     assert store.read("archive-on-slow-disk").rstrip().endswith("The archive goes on the slow disk.")
 
 
@@ -349,7 +352,7 @@ def test_a_fix_may_supply_the_missing_belongs_because(tmp_path):
     d.run(chunks=1)
     assert d.drain()["poured"] == 1
     assert store.annotations("archive-on-slow-disk")["belongs_because"] == "this store keeps storage decisions"
-    assert store.tags("archive-on-slow-disk") == ("decision", "landmine")
+    assert store.tags("archive-on-slow-disk") == ("decision",)          # landmine: no failure in the evidence
 
 
 def test_the_prompts_rank_by_charter_not_by_a_universal_list():

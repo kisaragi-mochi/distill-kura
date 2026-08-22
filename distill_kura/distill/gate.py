@@ -113,6 +113,17 @@ _ENTRUST = re.compile(
     r"write (this|that|it) down|覚えて|忘れないで|記憶して|メモして|覚えておいて|覚えといて)", re.I)
 FORGETTING_TAGS = frozenset({"superseded", "absorbed", "fulfilled", "expired",
                              "corrected", "released", "incidental"})
+# A landmine is "the failure that will recur". It rests on an ACTUAL failure in tool
+# output, or on the human warning or correcting — not on a quiet `df` line, which is
+# tool output and nothing else. Measured on the house: without this, every bake log
+# line could carry the tag, and a tag that every memory can carry protects none.
+_FAILURE = re.compile(
+    r"(\berror\b|errno|exception|traceback|\bfail(ed|ure|s)?\b|fatal|panic|\boom\b|out of memory|"
+    r"timed? ?out|segfault|crash|killed|refused|denied|corrupt|broken|dead\b|"
+    r"落ち|失敗|死ん|壊れ|止まっ|エラー|例外|タイムアウト|固まっ|動かな)", re.I)
+_WARNING = re.compile(
+    r"(⚠|注意|警告|やめ|ダメ|駄目|違う|間違|禁止|危な|二度と|しないで|するな|"
+    r"don'?t\b|never\b|wrong|careful|warning|danger|\bstop\b|must not|mistake|not like that)", re.I)
 
 
 def verify_tags(proposed, evidence: list[dict], recurred_ok: bool = False
@@ -155,7 +166,19 @@ def verify_tags(proposed, evidence: list[dict], recurred_ok: bool = False
                 kept.append(t); basis[t] = {"class": "USER", "quote": user_quotes[0] if user_quotes else ""}
             else:
                 refused[t] = "recurrence is decided against a prior memory, not proposed"
-        elif t in ("formative", "landmine"):
+        elif t == "landmine":
+            fail = next((e for e in evidence if e["class"] in ("TOOL", "ACT")
+                         and _FAILURE.search(e["text"])), None)
+            warn = next((e for e in evidence if e["class"] == "USER" and _WARNING.search(e["text"])), None)
+            # The human's warning outranks the machine's error as the basis: it is
+            # the class that can later protect the memory absolutely.
+            hit = warn or fail
+            if hit:
+                kept.append(t); basis[t] = {"class": hit["class"], "quote": hit["text"]}
+            else:
+                refused[t] = ("needs an actual failure in [TOOL] output or a warning/correction "
+                              "in the human's words; a quiet tool line is neither")
+        elif t == "formative":
             if classes - {"SELF"}:
                 kept.append(t); basis[t] = {"class": sorted(classes - {"SELF"})[0]}
             else:

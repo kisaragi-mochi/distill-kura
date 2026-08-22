@@ -18,9 +18,12 @@ from __future__ import annotations
 
 import fcntl
 import glob
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -467,7 +470,7 @@ class Store:
         if (r := self._direct_refused()):
             return r
         return self._write(slug, description, body, type_, hook, title,
-                           tags=tags, annotations=annotations)
+                           tags=tags, annotations=annotations, signed=False)
 
     def pour_verified(self, slug: str, description: str, body: str,
                       type_: str = "project", hook: str | None = None,
@@ -481,7 +484,54 @@ class Store:
         if self.write_policy == FROZEN:
             return {"ok": False, "error": f"store '{self.name}' is frozen: nothing may write"}
         return self._write(slug, description, body, type_, hook, title, meta,
-                           tags=tags, annotations=annotations)
+                           tags=tags, annotations=annotations, signed=True)
+
+    # ── the gate's key, and the mark on curation ─────────────────────────
+    #
+    # `_still/gate.key` is the same key the distiller signs drafts with (it used to be
+    # read from pipeline.py; it lives here now so the store can sign what it writes
+    # through the verified door). The mark covers the memory's curation — slug, tags,
+    # the three sentences — so a tag added by hand to a file in a `distiller-only`
+    # store shows up in `doctor` as tampering instead of reading as the gate's word.
+    #
+    # Honest about its limit, as in docs/TRUST.md: the key sits next to the memories,
+    # so whoever can write the directory can usually read the key. This stops a tool
+    # with a file handle and an accident, not a principal with the filesystem.
+    def gate_key(self) -> bytes:
+        path = os.path.join(self.still, "gate.key")
+        try:
+            with open(path, "rb") as f:
+                key = f.read()
+            if len(key) >= 32:
+                return key
+        except OSError:
+            pass
+        key = secrets.token_bytes(32)
+        os.makedirs(self.still, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(key)
+        return key
+
+    def _curation_mark(self, slug: str, tags: tuple[str, ...], annotations: dict) -> str:
+        blob = json.dumps({"slug": slug, "tags": list(tags),
+                           "annotations": {k: annotations[k] for k in ANNOTATION_KEYS if annotations.get(k)}},
+                          ensure_ascii=False, sort_keys=True)
+        return hmac.new(self.gate_key(), blob.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+
+    def curation_state(self, slug: str) -> str:
+        """none (no tags, no sentences) | verified (mark matches) | unsigned (no mark)
+        | tampered (a mark is there and does not match what the file now says)."""
+        s = self.resolve_exact(slug)
+        if not s:
+            return "none"
+        tags, ann = self.tags(s), self.annotations(s)
+        if not tags and not ann and not self.tag_problems(s):
+            return "none"
+        mark = self.frontmatter(s).get("curation_mark", "")
+        if not mark:
+            return "unsigned"
+        return "verified" if hmac.compare_digest(mark, self._curation_mark(s, tags, ann)) else "tampered"
 
     # ── annotating: tags and the three sentences, without touching the body ──
     #
@@ -494,15 +544,16 @@ class Store:
     def annotate_direct(self, slug: str, tags=None, annotations: dict | None = None) -> dict:
         if (r := self._direct_refused()):
             return r
-        return self._annotate(slug, tags, annotations, None)
+        return self._annotate(slug, tags, annotations, None, signed=False)
 
     def annotate_verified(self, slug: str, tags=None, annotations: dict | None = None,
                           meta: dict | None = None) -> dict:
         if self.write_policy == FROZEN:
             return {"ok": False, "error": f"store '{self.name}' is frozen: nothing may write"}
-        return self._annotate(slug, tags, annotations, meta)
+        return self._annotate(slug, tags, annotations, meta, signed=True)
 
-    def _annotate(self, slug: str, tags, annotations: dict | None, meta: dict | None) -> dict:
+    def _annotate(self, slug: str, tags, annotations: dict | None, meta: dict | None,
+                  signed: bool = False) -> dict:
         """Merge tags (union) and annotations (given keys override) into one memory's
         frontmatter. Body, description and the index line are untouched.
 
@@ -535,8 +586,13 @@ class Store:
             new_tags = normalize_tags(tuple(have) + add)
             new_ann = {**self.annotations(s), **{k: v for k, v in (annotations or {}).items() if v}}
             new_meta = {**{k: v for k, v in fm.items()
-                           if k not in ("name", "description", "type", "tags") and k not in ANNOTATION_KEYS},
+                           if k not in ("name", "description", "type", "tags", "curation_mark")
+                           and k not in ANNOTATION_KEYS},
                         **(meta or {})}
+            # The verified door signs the curation it leaves behind; the direct door
+            # leaves it unsigned (and drops a mark that no longer describes the file).
+            if signed and (new_tags or new_ann):
+                new_meta["curation_mark"] = self._curation_mark(s, new_tags, new_ann)
             rendered = self._render(s, fm.get("description", ""), fm.get("type", "project"),
                                     body, new_meta, new_tags, new_ann)
             if rendered == text:
@@ -602,7 +658,8 @@ class Store:
 
     def _write(self, slug: str, description: str, body: str, type_: str = "project",
                hook: str | None = None, title: str | None = None,
-               meta: dict | None = None, tags=None, annotations: dict | None = None) -> dict:
+               meta: dict | None = None, tags=None, annotations: dict | None = None,
+               signed: bool = False) -> dict:
         """Write ONE fact; add one index line. Existing file → body replaced and the
         index line refreshed (a stale index line keeps speaking the old fact).
 
@@ -646,7 +703,7 @@ class Store:
             kept_ann: dict[str, str] = {}
             if existed:
                 kept = {k: v for k, v in self.frontmatter(slug).items()
-                        if k not in ("name", "description", "type", "tags")
+                        if k not in ("name", "description", "type", "tags", "curation_mark")
                         and k not in ANNOTATION_KEYS}
                 # Tags and annotations survive a body rewrite the same way: a caller
                 # that does not mention them has not asked to remove them.
@@ -658,11 +715,13 @@ class Store:
             # came from, so the origin is pinned once and never overwritten.
             if merged.get("evidence_manifest") and not kept.get("origin_manifest"):
                 merged["origin_manifest"] = kept.get("evidence_manifest") or merged["evidence_manifest"]
+            all_tags = normalize_tags(kept_tags + new_tags)
+            all_ann = {**kept_ann, **{k: v for k, v in (annotations or {}).items() if v}}
+            if signed and (all_tags or all_ann):
+                merged["curation_mark"] = self._curation_mark(slug, all_tags, all_ann)
             tmp = path + f".tmp.{os.getpid()}"
             with open(tmp, "w", encoding="utf-8") as f:
-                f.write(self._render(slug, description, type_, body, merged,
-                                     normalize_tags(kept_tags + new_tags),
-                                     {**kept_ann, **{k: v for k, v in (annotations or {}).items() if v}}))
+                f.write(self._render(slug, description, type_, body, merged, all_tags, all_ann))
             os.replace(tmp, path)
             self._titles = None
             self._slugs_cache = None
@@ -793,6 +852,8 @@ class Store:
                     os.path.join(self.path, "_evidence", ref[7:] + ".json")):
                 missing_manifest.append(n)
         body_tokens = sum(estimate(self._split(t)[1]) for t in files.values())
+        cur = {n: self.curation_state(n) for n in files}
+        unsigned = sorted(n for n, c in cur.items() if c == "unsigned")
         return {
             "store": self.name,
             "path": self.path,
@@ -816,6 +877,15 @@ class Store:
             "invalid_tags": invalid_tags,
             "missing_manifest": sorted(missing_manifest),
             "tagged": sum(1 for n in files if self.tags(n)),
+            # Who wrote the curation. `tampered` is always named. `unsigned` is named
+            # only where nobody but the gate should be writing — on a direct-allowed
+            # store a hand-written tag is the normal case and listing it would be noise.
+            "curation": {
+                "verified": sum(1 for c in cur.values() if c == "verified"),
+                "unsigned": len(unsigned),
+                "unsigned_names": unsigned if self.write_policy != DIRECT_ALLOWED else [],
+                "tampered": sorted(n for n, c in cur.items() if c == "tampered"),
+            },
             # Capacity is OBSERVED here and decided nowhere. Four candidate units are
             # reported side by side because which one a shelf is measured in — memories,
             # index tokens, body tokens, bytes — is a decision that has not been made,

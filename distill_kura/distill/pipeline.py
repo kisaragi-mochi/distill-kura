@@ -24,7 +24,6 @@ import hmac
 import json
 import os
 import re
-import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -528,20 +527,7 @@ class Distiller:
     # tool and an accident, not someone with the filesystem. The boundary there is still
     # permissions — docs/TRUST.md says so.
     def _gate_key(self) -> bytes:
-        path = os.path.join(self.still, "gate.key")
-        try:
-            with open(path, "rb") as f:
-                key = f.read()
-            if len(key) >= 32:
-                return key
-        except OSError:
-            pass
-        key = secrets.token_bytes(32)
-        os.makedirs(self.still, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(key)
-        return key
+        return self.store.gate_key()          # one key per store, shared with the curation mark
 
     @staticmethod
     def _draft_body(raw: str) -> str:

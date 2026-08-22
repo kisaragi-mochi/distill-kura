@@ -122,6 +122,8 @@ curl -s localhost:8085/doctor | python3 -m json.tool
 | `_still/tossed.jsonl` growing fast | the brain is proposing junk | look at what it proposes; the prompt or the journal source may be wrong |
 | `invalid_tags` non-empty | a `tags:` line a reader cannot parse; the memory reads as untagged | fix the line by hand (it is a JSON array of lower-case kebab words) |
 | `missing_manifest` non-empty | a memory points at an evidence manifest that is gone | restore `_evidence/` from backup; the memory still reads, its provenance does not |
+| `curation.tampered` non-empty | a memory's tags or sentences were edited after the gate signed them | read the file; restore from the manifest or re-pour. On a `distiller-only` store this is the one thing nobody but the gate should have done |
+| `curation.unsigned_names` non-empty | tags or sentences with no mark, on a store where only the gate writes | someone wrote frontmatter by hand; decide whether it stays (it reads fine; it just is not the gate's word) |
 | `learned_profile.state: broken` | `profile.md` is unreadable or carries numbers about how much things matter; it is NOT read and the fixed charter carries on | read `why`; rewrite the profile in sentences |
 | `capacity.*` | the store's size in four units — memories, index tokens, body tokens, bytes. `limit` and `pressure` are `None` on purpose | nothing acts on these yet. Watch them, and see the next section |
 

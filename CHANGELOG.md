@@ -40,6 +40,12 @@ after the charter by its own distiller and never entering the resident map.
 a person copying a file they have read. A profile carrying numbers about how much
 things matter is reported as broken and not read.
 
+A claiming tag needs its evidence, and `landmine` needs an *actual* failure — an
+error in `[TOOL]` output, or a warning or correction in the human's words; a quiet
+`df` line is tool output and nothing else. The verified door signs the curation it
+writes (`curation_mark`, same per-store key as the draft gate mark), and `doctor`
+names a hand-edited tag on a `distiller-only` store as `tampered` or `unsigned`.
+
 `POST /annotate`, `kura annotate`, `tags`/`belongs_because`/`keep`/`may_fade` on
 `/remember` and the MCP `kura_remember`; `GET /memory` returns them; `doctor` reports
 `invalid_tags`, `missing_manifest`, `learned_profile` and **capacity in four units
