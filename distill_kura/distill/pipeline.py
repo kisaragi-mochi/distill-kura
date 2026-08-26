@@ -35,7 +35,7 @@ from ..store import ANNOTATION_KEYS, FROZEN, Store, normalize_tags
 from . import prompts
 from .gate import attributes_to_human, gate, norm, salvage, verify_tags
 from .seeds import Seeds
-from .sources import Segment, as_evidence, discover_all, source_for
+from .sources import Segment, as_evidence, discover_all, source_for, IntakeReport
 from .watermark import Watermarks
 
 CHUNK_CHARS = 200_000        # one batch ≈ what a long-context reader swallows at once
@@ -771,10 +771,28 @@ class Distiller:
         c = self.marks.claim(self.files(session), self.chunk_chars, MIN_DRINK)
         if not c:
             return None
-        path, start, src = c
-        segs, nxt = src.sip(path, start, self.chunk_chars)
+        path, start, src, reserved = c
+        report = IntakeReport()
+        segs, nxt = src.sip(path, start, self.chunk_chars, until=reserved, report=report)
         self.marks.advance(src.key(path), nxt)
+        self._emit_intake(path, report)
         return segs, path, src.key(path)
+
+    def _emit_intake(self, path: str, report: IntakeReport) -> None:
+        """One bounded summary per sip. A diagnostic must never break a pass,
+        print evidence text, or grow without a cap — samples already are."""
+        self._intake_skipped = dict(report.skipped)
+        if not report.skipped:
+            return
+        try:
+            _log(f"intake: {os.path.basename(path)} skipped {report.total} "
+                 f"({', '.join(f'{k}={v}' for k, v in report.skipped.items())})")
+            row = {"source": os.path.basename(path), **report.as_dict()}
+            os.makedirs(self.still, exist_ok=True)
+            with open(os.path.join(self.still, "intake.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            pass                        # a diagnostic must never break a pass
 
     def _metric(self, row: dict) -> None:
         """One line per batch, so the pipeline's behaviour is a measurement rather than
@@ -873,6 +891,7 @@ class Distiller:
                 "draft_chars": draft_chars,
                 "draft_tokens_est": estimate("\n".join(draft_text)),
                 "index_tokens_est": estimate(self.store.index_text()),
+                "intake_skipped": getattr(self, "_intake_skipped", {}),
             })
         if not made and not killed and not covered and not sown:
             return {"ok": True, "why": "nothing worth drinking"}

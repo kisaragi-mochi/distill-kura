@@ -4,18 +4,26 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from distill_kura.distill.pipeline import Distiller, MIN_DRINK   # noqa: E402
 from distill_kura.distill.sources import (                  # noqa: E402
+    MAX_ID,
+    MAX_LINE,
     MAX_SEG,
     MAX_TOOL,
     ClaudeCodeSource,
     EvidenceJsonlSource,
+    IntakeReport,
+    Segment,
     discover_all,
     source_for,
 )
+from distill_kura.registry import Registry                    # noqa: E402
 from distill_kura.store import Store                          # noqa: E402
+from distill_kura.thinker import Models                       # noqa: E402
 
 
 def _event(cls: str, text: str, **extra) -> dict:
@@ -141,9 +149,12 @@ def test_incomplete_final_line_does_not_advance_watermark(tmp_path):
     segs1, pos1 = src.sip(str(p), 0, 10_000)
     assert len(segs1) == 1 and segs1[0].text == "first"
     assert pos1 == len(good) + 1
+    end, _ = src.claim_bound(str(p), 0, 10_000)
+    assert end == pos1 < p.stat().st_size
 
     with open(p, "ab") as f:
-        f.write(b', "session_id": "s", "turn_id": "t", "class": "USER", "text": "second"}\n')
+        f.write(b', "session_id": "s", "turn_id": "t", "class": "USER", '
+                b'"text": "second", "timestamp": "2026-08-27T00:00:01Z"}\n')
     segs2, pos2 = src.sip(str(p), pos1, 10_000)
     assert len(segs2) == 1 and segs2[0].text == "second"
     assert pos2 == p.stat().st_size
@@ -194,3 +205,306 @@ def test_a_hardlinked_memory_in_an_evidence_root_is_not_discovered(tmp_path):
     found = discover_all({"evidence": str(jr)}, exclude_roots=[st.path])
     names = [os.path.basename(f) for f in found]
     assert names == ["real.evidence.jsonl"]
+
+
+# ── timestamp contract ──────────────────────────────────────────────────────
+
+def test_missing_or_non_string_timestamp_is_skipped(tmp_path):
+    p = tmp_path / "ts.evidence.jsonl"
+    _write(p,
+           {k: v for k, v in _event("USER", "no ts").items() if k != "timestamp"},
+           {**_event("USER", "numeric", event_id="e2"), "timestamp": 1724716800},
+           {**_event("USER", "null", event_id="e3"), "timestamp": None})
+    segs, _ = EvidenceJsonlSource().sip(str(p), 0, 10_000)
+    assert segs == []
+
+
+def test_malformed_and_naive_timestamps_are_skipped(tmp_path):
+    p = tmp_path / "naive.evidence.jsonl"
+    _write(p,
+           {**_event("USER", "date-only"), "timestamp": "2026-08-27"},
+           {**_event("USER", "naive", event_id="e2"), "timestamp": "2026-08-27T00:00:00"},
+           {**_event("USER", "space", event_id="e3"), "timestamp": "2026-08-27 00:00:00Z"},
+           {**_event("USER", "leap", event_id="e4"), "timestamp": "2026-06-30T23:59:60Z"})
+    assert EvidenceJsonlSource().sip(str(p), 0, 10_000)[0] == []
+
+
+def test_rfc3339_z_offset_and_fractional_timestamps_are_accepted(tmp_path):
+    p = tmp_path / "ok-ts.evidence.jsonl"
+    _write(p,
+           _event("USER", "z"),
+           _event("USER", "frac", event_id="e2", timestamp="2026-08-27T00:00:00.123Z"),
+           _event("USER", "offset", event_id="e3", timestamp="2026-08-27T09:00:00+09:00"))
+    segs, _ = EvidenceJsonlSource().sip(str(p), 0, 10_000)
+    assert [s.text for s in segs] == ["z", "frac", "offset"]
+
+
+def test_timestamp_is_a_gate_not_a_stored_or_filled_field(tmp_path):
+    """A missing timestamp is skipped. The clock is not a fallback, and the
+    segment never gains a timestamp field — evidence is not rewritten."""
+    p = tmp_path / "clock.evidence.jsonl"
+    _write(p, {k: v for k, v in _event("USER", "no ts").items() if k != "timestamp"})
+    segs, _ = EvidenceJsonlSource().sip(str(p), 0, 10_000)
+    assert segs == []
+    assert set(Segment.__dataclass_fields__) == {"cls", "text"}
+
+
+def test_json_true_is_not_schema_version_one(tmp_path):
+    p = tmp_path / "bool.evidence.jsonl"
+    _write(p, {**_event("USER", "bool ver"), "schema_version": True})
+    assert EvidenceJsonlSource().sip(str(p), 0, 10_000)[0] == []
+
+
+# ── bounded parsing ─────────────────────────────────────────────────────────
+
+def test_oversized_ids_are_skipped_not_truncated(tmp_path):
+    p = tmp_path / "ids-size.evidence.jsonl"
+    _write(p,
+           _event("USER", "too long", event_id="e" * (MAX_ID + 1)),
+           _event("USER", "ordinary-uuid", event_id="550e8400-e29b-41d4-a716-446655440000"))
+    segs, _ = EvidenceJsonlSource().sip(str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "ordinary-uuid"
+
+
+def test_oversized_line_is_skipped_without_json_loads(tmp_path, monkeypatch):
+    p = tmp_path / "huge.evidence.jsonl"
+    huge = b'{"schema_version": 1, "event_id": "e", "text": "' + (b"A" * (MAX_LINE + 50)) + b'"}\n'
+    good = (json.dumps(_event("USER", "after the dump", event_id="ok")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(good)
+    called = {"n": 0}
+    real = json.loads
+
+    def spy(s, *a, **k):
+        called["n"] += 1
+        if isinstance(s, (bytes, bytearray)) and len(s) > MAX_LINE:
+            raise AssertionError("json.loads on an oversized line")
+        if isinstance(s, str) and len(s.encode()) > MAX_LINE:
+            raise AssertionError("json.loads on an oversized line")
+        return real(s, *a, **k)
+    monkeypatch.setattr("distill_kura.distill.sources.json.loads", spy)
+    segs, end = EvidenceJsonlSource().sip(str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "after the dump"
+    assert end == p.stat().st_size
+    assert called["n"] == 1
+
+
+# ── runtime reporting ───────────────────────────────────────────────────────
+
+def test_skips_are_reported_without_payloads_or_paths(tmp_path):
+    p = tmp_path / "secret-dir" / "j.evidence.jsonl"
+    secret = "credential-hunter2-not-for-logs"
+    os.makedirs(p.parent, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("this is not json and contains " + secret + "\n")
+        f.write(json.dumps({**_event("USER", "future " + secret), "schema_version": 2}) + "\n")
+        f.write(json.dumps({**_event("USER", "sys " + secret), "class": "SYSTEM"}) + "\n")
+        f.write(json.dumps({**_event("USER", "blank " + secret), "event_id": ""}) + "\n")
+        f.write(json.dumps({**_event("USER", ""), "text": ""}) + "\n")
+        f.write(json.dumps(_event("USER", "x" * (MAX_SEG + 1))) + "\n")
+        f.write(json.dumps({k: v for k, v in _event("USER", "no ts " + secret).items()
+                            if k != "timestamp"}) + "\n")
+        f.write('{"schema_version": 1, "event_id": "partial-' + secret + '"')
+    report = IntakeReport()
+    segs, pos = EvidenceJsonlSource().sip(str(p), 0, 10_000, report=report)
+    assert segs == []
+    assert pos < p.stat().st_size
+    assert report.skipped.get("malformed")
+    assert report.skipped.get("unknown_version")
+    assert report.skipped.get("unknown_class")
+    assert report.skipped.get("blank")
+    assert report.skipped.get("oversized")
+    assert report.skipped.get("missing")
+    assert report.skipped.get("partial")
+    blob = json.dumps(report.as_dict())
+    assert secret not in blob
+    assert "secret-dir" not in blob
+    assert str(p) not in blob
+    assert len(report.samples) <= IntakeReport.MAX_SAMPLES
+
+
+def test_reporting_is_bounded_on_a_flood_of_junk(tmp_path):
+    p = tmp_path / "flood.evidence.jsonl"
+    with open(p, "w", encoding="utf-8") as f:
+        for _ in range(200):
+            f.write("not-json\n")
+    report = IntakeReport()
+    EvidenceJsonlSource().sip(str(p), 0, 10_000, report=report)
+    assert report.skipped["malformed"] == 200
+    assert len(report.samples) == IntakeReport.MAX_SAMPLES
+
+
+def _blob(tag: str, n: int = 3500) -> str:
+    return (tag + " " + ("x" * n))[:n]
+
+
+def _distiller(tmp_path, journal_dir, chunk_chars=4000):
+    st = Store(name="s", path=str(tmp_path / "s"))
+    st.init_files()
+    models = Models.from_config({"thinker": {"url": "http://127.0.0.1:9/v1", "model": "none"}})
+    reg = Registry(stores={"s": st}, modes={}, models=models, default="s",
+                   raw={"distill": {"journals": {"evidence": str(journal_dir)}}})
+    return Distiller(reg, st, chunk_chars=chunk_chars), st
+
+
+# ── real claim + sip_one durability ─────────────────────────────────────────
+
+def test_sip_one_partial_tail_does_not_skip_unread_bytes(tmp_path):
+    """Luna: claim reserved byte 192, sip returned 156, max-forward kept 192."""
+    jr = tmp_path / "jr"
+    jr.mkdir()
+    p = jr / "j.evidence.jsonl"
+    events = [_event("USER", _blob(f"keep-{i}"), event_id=f"e{i}") for i in range(2)]
+    _write(p, *events, trailing_partial='{"schema_version": 1, "event_id": "tail')
+    complete = sum(len((json.dumps(e) + "\n").encode()) for e in events)
+    assert complete < p.stat().st_size
+    d, st = _distiller(tmp_path, jr, chunk_chars=20_000)
+    got = d.sip_one()
+    assert got is not None
+    segs, path, key = got
+    assert [s.text[:6] for s in segs] == ["keep-0", "keep-1"]
+    mark = d.marks.read()[key]
+    assert mark == complete
+    assert mark < p.stat().st_size
+    # completing the tail must be drinkable, not skipped
+    with open(p, "ab") as f:
+        f.write(b"\n")
+        f.write((json.dumps(_event("USER", _blob("keep-2"), event_id="e2")) + "\n").encode())
+        f.write((json.dumps(_event("USER", _blob("keep-3"), event_id="e3")) + "\n").encode())
+    got2 = d.sip_one()
+    assert got2 is not None
+    assert {s.text[:6] for s in got2[0]} == {"keep-2", "keep-3"}
+
+
+def test_sip_one_large_complete_events_are_not_skipped_by_overclaim(tmp_path):
+    """Luna: claim reserved 22000 while sip consumed only through 12309.
+
+    A 2.2× byte/char fudge in claim() reserved past sip's char-budget stop;
+    max-forward then skipped the unread complete record forever.
+    """
+    jr = tmp_path / "jr"
+    jr.mkdir()
+    p = jr / "j.evidence.jsonl"
+    events = [_event("USER", _blob(f"evt-{i}"), event_id=f"e{i}") for i in range(4)]
+    _write(p, *events)
+    d, _ = _distiller(tmp_path, jr, chunk_chars=4000)
+    first = d.sip_one()
+    second = d.sip_one()
+    assert first is not None and second is not None
+    assert [s.text[:5] for s in first[0] + second[0]] == ["evt-0", "evt-1", "evt-2", "evt-3"]
+    assert d.sip_one() is None
+    assert d.marks.read()[first[2]] == p.stat().st_size
+
+
+def test_sip_one_resume_does_not_redrink_or_skip(tmp_path):
+    jr = tmp_path / "jr"
+    jr.mkdir()
+    p = jr / "j.evidence.jsonl"
+    events = [_event("USER", _blob(f"n{i}"), event_id=f"e{i}") for i in range(4)]
+    _write(p, *events)
+    d, _ = _distiller(tmp_path, jr, chunk_chars=4000)
+    first = d.sip_one()
+    second = d.sip_one()
+    third = d.sip_one()
+    assert first and second
+    assert third is None
+    seen = [s.text[:2] for s in first[0] + second[0]]
+    assert seen == ["n0", "n1", "n2", "n3"]
+    assert d.marks.read()[first[2]] == p.stat().st_size
+
+
+def test_parallel_claims_reserve_disjoint_complete_records(tmp_path):
+    jr = tmp_path / "jr"
+    jr.mkdir()
+    p = jr / "j.evidence.jsonl"
+    events = [_event("USER", _blob(f"p{i}"), event_id=f"e{i}") for i in range(8)]
+    _write(p, *events)
+    d, st = _distiller(tmp_path, jr, chunk_chars=4000)
+    first = d.marks.claim([str(p)], 4000, MIN_DRINK)
+    second = d.marks.claim([str(p)], 4000, MIN_DRINK)
+    assert first is not None and second is not None
+    assert first[1] < second[1]
+    assert first[3] <= second[1]          # reserved end of A is B's start
+    assert second[3] > second[1]
+    # sip of each reservation drinks only that stretch
+    src = EvidenceJsonlSource()
+    a, a_end = src.sip(first[0], first[1], 4000, until=first[3])
+    b, b_end = src.sip(second[0], second[1], 4000, until=second[3])
+    assert a_end == first[3] and b_end == second[3]
+    assert {s.text[:2] for s in a}.isdisjoint({s.text[:2] for s in b})
+    d.marks.advance(src.key(str(p)), a_end)
+    d.marks.advance(src.key(str(p)), b_end)
+    assert d.marks.read()[src.key(str(p))] == max(a_end, b_end)
+
+
+def test_parallel_sip_one_does_not_overlap_or_skip(tmp_path):
+    jr = tmp_path / "jr"
+    jr.mkdir()
+    p = jr / "j.evidence.jsonl"
+    events = [_event("USER", _blob(f"t{i}"), event_id=f"e{i}") for i in range(8)]
+    _write(p, *events)
+    d1, st = _distiller(tmp_path, jr, chunk_chars=4000)
+    d2, _ = _distiller(tmp_path, jr, chunk_chars=4000)
+    d2.marks = d1.marks
+    bag = []
+
+    def worker(d):
+        got = d.sip_one()
+        if got:
+            bag.append([s.text[:2] for s in got[0]])
+
+    threads = [threading.Thread(target=worker, args=(d,)) for d in (d1, d2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    flat = [x for row in bag for x in row]
+    assert len(flat) == len(set(flat))
+    assert set(flat) <= {f"t{i}" for i in range(8)}
+    # leftover complete records are still drinkable
+    rest = d1.sip_one()
+    if rest:
+        flat += [s.text[:2] for s in rest[0]]
+    rest2 = d1.sip_one()
+    if rest2:
+        flat += [s.text[:2] for s in rest2[0]]
+    assert sorted(flat) == [f"t{i}" for i in range(8)]
+
+
+def test_sip_one_writes_bounded_intake_without_payloads(tmp_path):
+    jr = tmp_path / "secret-root"
+    jr.mkdir()
+    p = jr / "j.evidence.jsonl"
+    secret = "token-abc-not-for-logs"
+    events = [_event("USER", _blob(f"ok{i}"), event_id=f"e{i}") for i in range(2)]
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("not json " + secret + "\n")
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+        f.write(json.dumps({**_event("USER", "sys " + secret), "class": "SYSTEM"}) + "\n")
+    d, st = _distiller(tmp_path, jr, chunk_chars=20_000)
+    got = d.sip_one()
+    assert got is not None
+    intake = open(os.path.join(st.still, "intake.jsonl"), encoding="utf-8").read()
+    assert "malformed" in intake and "unknown_class" in intake
+    assert secret not in intake
+    assert "secret-root" not in intake
+    assert str(p) not in intake
+    assert "j.evidence.jsonl" in intake
+
+
+def test_intake_write_failure_does_not_break_sip_one(tmp_path):
+    jr = tmp_path / "jr"
+    jr.mkdir()
+    p = jr / "j.evidence.jsonl"
+    _write(p,
+           _event("USER", _blob("a"), event_id="e1"),
+           _event("USER", _blob("b"), event_id="e2"))
+    with open(p, "a", encoding="utf-8") as f:
+        f.write("not-json\n")
+    d, st = _distiller(tmp_path, jr, chunk_chars=20_000)
+    os.makedirs(os.path.join(st.still, "intake.jsonl"))
+    got = d.sip_one()
+    assert got is not None
+    assert [s.text[:1] for s in got[0]] == ["a", "b"]

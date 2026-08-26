@@ -270,6 +270,29 @@ number carried in the events for anything that gets rewritten. Then add a key un
 (`USER` / `TOOL` / `ACT` / `SELF`, and drop reasoning blocks) and everything downstream
 works unchanged.
 
+### Classified `.evidence.jsonl`
+
+One JSON object per complete line, `schema_version` 1 (an integer, not `true`), classes
+exactly `USER` / `SELF` / `ACT` / `TOOL`. Required string fields: `event_id`,
+`session_id`, `turn_id`, `text`, `timestamp`.
+
+`timestamp` is an RFC3339 date-time **with a timezone**, parsed by
+`datetime.fromisoformat` after a trailing `Z` is rewritten to `+00:00`.
+
+Accepted: `2026-08-27T00:00:00Z`, `2026-08-27T00:00:00.123Z`, `2026-08-27T09:00:00+09:00`.
+Rejected: missing or non-string values, date-only, naive datetimes, a space instead of
+`T`, leap seconds, and offsets with seconds. The clock is not consulted and the record
+is not rewritten; the timestamp is a gate, not a stored field.
+
+Identity fields are at most 256 characters; a raw line is at most 32 KiB. Oversized
+values are skipped, never truncated into a valid identity. Invalid, malformed,
+unknown-version, unknown-class, blank, missing, oversized, and partial final lines are
+skipped and counted in `_still/intake.jsonl` (basename, reason, byte offset, size — not
+payloads, not full paths). A reporting failure cannot break a sip.
+
+The byte watermark stops on a complete-record boundary. `claim` reserves the same end
+`sip` will drink, so a partial tail or a char-budget stop cannot skip unread bytes.
+
 ## Measuring rather than guessing
 
 ```bash

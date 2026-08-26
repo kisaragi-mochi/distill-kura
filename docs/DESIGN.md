@@ -120,6 +120,12 @@ number legally. Merge-forward is what makes it safe.
 **Claim before drinking.** The stretch is reserved (mark moved) *before* it is read.
 Advance-after-read leaves a window in which a parallel runner starts at the same offset.
 
+**Reservation is consumption.** `claim` writes the end `claim_bound` returns, and
+`advance` only takes `max()`. If that end is past the last byte `sip` will actually
+drink — a partial tail, or a char-budget stop mid-record — the unread stretch is
+skipped forever. Byte-slack for JSON-heavy transcripts lives inside those adapters.
+Sources that walk records reserve the same complete-record end `sip` returns.
+
 **Units are the adapter's business.** Append-only transcripts use byte offsets.
 Archives that get rewritten — a compressed session log, for instance — use the event
 sequence number, because a byte offset into a recompressed file is simply a lie. The
