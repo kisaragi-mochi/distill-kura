@@ -199,6 +199,7 @@ a store actually consumed.
 claude = "~/.claude/projects/my-project"   # Claude Code transcripts (.jsonl)
 dsh    = "~/dsh/sessions"                  # DSH sessions (.jsonl.zstd; needs `zstd`)
 text   = "~/notes"                         # .md/.txt/.log, all treated as [USER]
+evidence = "~/journals"                    # classified .evidence.jsonl (USER/SELF/ACT/TOOL)
 ```
 
 Newest journals are drunk first: today's decisions are worth the most. A batch is

@@ -10,7 +10,7 @@ Everything the distiller reads is turned into segments carrying an evidence clas
 Reasoning / thinking blocks are dropped: an inner monologue is not evidence.
 Injected content (system reminders, runtime context) is not the human speaking.
 
-Three adapters ship here; add your own by subclassing `Source` and registering it
+Four adapters ship here; add your own by subclassing `Source` and registering it
 in `SOURCES`. `watermark` semantics differ per adapter, so each one owns them:
 byte offset for append-only files, sequence number for rewritten archives.
 """
@@ -73,14 +73,15 @@ class ClaudeCodeSource(Source):
     name = "claude"
 
     def matches(self, path: str) -> bool:
-        return path.endswith(".jsonl")
+        return path.endswith(".jsonl") and not path.endswith(".evidence.jsonl")
 
     def key(self, path: str) -> str:
         return "claude:" + os.path.basename(path)
 
     def discover(self, root: str) -> list[str]:
-        return sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True),
-                      key=os.path.getmtime, reverse=True)
+        found = [f for f in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)
+                 if not f.endswith(".evidence.jsonl")]
+        return sorted(found, key=os.path.getmtime, reverse=True)
 
     @staticmethod
     def _text_of(part) -> str:
@@ -247,6 +248,79 @@ class DshSource(Source):
         return end, total
 
 
+# ── Classified evidence JSONL (append-only → byte watermark) ───────────────
+
+class EvidenceJsonlSource(Source):
+    """`*.evidence.jsonl` — one versioned, class-tagged event per line.
+
+    Writers append complete JSON objects; a crash may leave a partial final line.
+    The watermark stops before that line so the next append can finish it. Invalid
+    lines are dropped, never reclassified."""
+    name = "evidence"
+
+    def matches(self, path: str) -> bool:
+        return path.endswith(".evidence.jsonl")
+
+    def key(self, path: str) -> str:
+        return "evidence:" + os.path.abspath(path)
+
+    def discover(self, root: str) -> list[str]:
+        return sorted(glob.glob(os.path.join(root, "**", "*.evidence.jsonl"), recursive=True),
+                      key=os.path.getmtime, reverse=True)
+
+    @staticmethod
+    def _classify(d: dict) -> Segment | None:
+        if d.get("schema_version") != 1:
+            return None
+        cls = d.get("class")
+        if cls not in CLASSES:
+            return None
+        for field in ("event_id", "session_id", "turn_id"):
+            val = d.get(field)
+            if not isinstance(val, str) or not val.strip():
+                return None
+        text = d.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return None
+        text = text.strip()
+        cap = MAX_TOOL if cls == "TOOL" else MAX_SEG
+        if len(text) > cap:
+            return None
+        return Segment(cls, text)
+
+    def sip(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int]:
+        segs: list[Segment] = []
+        total = 0
+        with open(path, "rb") as h:
+            h.seek(start)
+            while True:
+                line_start = h.tell()
+                line = h.readline()
+                if not line:
+                    break
+                if not line.endswith(b"\n"):
+                    return segs, line_start
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                s = self._classify(d)
+                if not s:
+                    continue
+                segs.append(s)
+                total += len(s.text)
+                if total >= limit_chars:
+                    return segs, h.tell()
+            return segs, h.tell()
+
+    def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
+        size = os.path.getsize(path)
+        end = min(start + budget_chars, size)
+        return end, max(0, end - start)
+
+
 # ── Plain text / markdown notes (append-only → byte watermark) ──────────────
 
 class TextSource(Source):
@@ -280,11 +354,13 @@ class TextSource(Source):
         return end, max(0, end - start)
 
 
-SOURCES: dict[str, Source] = {s.name: s for s in (ClaudeCodeSource(), DshSource(), TextSource())}
+SOURCES: dict[str, Source] = {
+    s.name: s for s in (ClaudeCodeSource(), DshSource(), EvidenceJsonlSource(), TextSource())
+}
 
 
 def source_for(path: str) -> Source | None:
-    for s in (SOURCES["dsh"], SOURCES["claude"], SOURCES["text"]):
+    for s in (SOURCES["dsh"], SOURCES["evidence"], SOURCES["claude"], SOURCES["text"]):
         if s.matches(path):
             return s
     return None
