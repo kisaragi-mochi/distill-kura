@@ -6,6 +6,7 @@ an unreachable thinker degrades to word matching and says so instead of going si
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -381,9 +382,15 @@ def test_claim_reserves_before_reading(tmp_path):
     """Claiming a stretch must move the mark immediately, so a second runner starting
     in the same instant gets different water."""
     j = tmp_path / "j.jsonl"
-    j.write_text("x" * 500_000, encoding="utf-8")
+    # Complete Claude JSONL records: a 2.2× byte estimate used to split a
+    # newline-free blob, but sip drinks records, so two claims on real
+    # transcripts must reserve disjoint complete-record ends.
+    line = json.dumps({"type": "user", "message": {"content": [
+        {"type": "text", "text": "x" * 200}]}}) + "\n"
+    j.write_text(line * 2000, encoding="utf-8")
     w = Watermarks(str(tmp_path / "_still" / "watermark.json"))
     first = w.claim([str(j)], budget_chars=100_000, min_chars=1000)
     second = w.claim([str(j)], budget_chars=100_000, min_chars=1000)
     assert first is not None and second is not None
     assert second[1] > first[1]          # different starting offsets
+    assert first[3] == second[1]         # reserved end of A is B's start

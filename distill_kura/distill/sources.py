@@ -178,6 +178,10 @@ class ClaudeCodeSource(Source):
     def sip(self, path: str, start: int, limit_chars: int,
             until: int | None = None, report: IntakeReport | None = None
             ) -> tuple[list[Segment], int]:
+        return self._drink(path, start, limit_chars, until=until)
+
+    def _drink(self, path: str, start: int, limit_chars: int,
+               until: int | None = None) -> tuple[list[Segment], int]:
         segs: list[Segment] = []
         total = 0
         with open(path, "rb") as h:
@@ -230,11 +234,13 @@ class ClaudeCodeSource(Source):
             return segs, h.tell()
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
-        # Byte slack used to live in Watermarks.claim, which made record-walking
-        # sources reserve past what sip would drink; max-forward then skipped the
-        # unread stretch permanently. Slack stays here, where the unit is bytes.
-        size = os.path.getsize(path)
-        end = min(start + int(budget_chars * 2.2), size)
+        # Same walk sip uses, same budget Distiller will pass to sip. A 2.2× byte
+        # estimate reserved past the char-budget record end; max-forward then
+        # skipped the unread head of the next compact JSONL line forever.
+        # approx is bytes walked, not truncated segment text: MAX_SEG caps a
+        # long USER line at 4000 chars, and using that sum as min_chars would
+        # refuse a journal whose padding was sized to pass MIN_DRINK on bytes.
+        _, end = self._drink(path, start, budget_chars)
         return end, max(0, end - start)
 
 

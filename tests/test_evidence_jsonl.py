@@ -21,6 +21,7 @@ from distill_kura.distill.sources import (                  # noqa: E402
     discover_all,
     source_for,
 )
+from distill_kura.distill.watermark import Watermarks          # noqa: E402
 from distill_kura.registry import Registry                    # noqa: E402
 from distill_kura.store import Store                          # noqa: E402
 from distill_kura.thinker import Models                       # noqa: E402
@@ -508,3 +509,53 @@ def test_intake_write_failure_does_not_break_sip_one(tmp_path):
     got = d.sip_one()
     assert got is not None
     assert [s.text[:1] for s in got[0]] == ["a", "b"]
+
+
+def _claude_line(text: str) -> str:
+    return json.dumps(
+        {"type": "user", "message": {"content": [{"type": "text", "text": text}]}},
+        separators=(",", ":"),
+    ) + "\n"
+
+
+def test_claude_claim_then_sip_does_not_skip_unread_bytes(tmp_path):
+    """Compact Claude JSONL, budget 200: claim_bound reserved 440 (2.2× bytes)
+    while sip(... until=440) stopped at 378 after the semantic char budget.
+    advance(max) then left 440 and skipped the next record's first 62 bytes.
+
+    The real claim → sip(until=reserved) → advance path must drink KEEP-ME-NEXT.
+    """
+    p = tmp_path / "s.jsonl"
+    first = _claude_line("A" * 67)
+    second = _claude_line("B" * 179)
+    later = _claude_line("KEEP-ME-NEXT")
+    after = _claude_line("KEEP-ME-AFTER")
+    p.write_text(first + second + later + after, encoding="utf-8")
+    drunk = len(first.encode()) + len(second.encode())
+    assert drunk == 378
+    assert int(200 * 2.2) == 440
+    assert drunk < 440 < p.stat().st_size
+
+    src = ClaudeCodeSource()
+    marks = Watermarks(str(tmp_path / "watermark.json"))
+    claimed = marks.claim([str(p)], 200, min_chars=1)
+    assert claimed is not None
+    path, start, claimed_src, reserved = claimed
+    assert claimed_src.name == "claude"
+    assert start == 0
+    assert reserved == drunk
+    segs, nxt = src.sip(path, start, 200, until=reserved)
+    assert nxt == reserved == drunk
+    assert [s.text for s in segs] == ["A" * 67, "B" * 179]
+    marks.advance(src.key(str(p)), nxt)
+    assert marks.read()[src.key(str(p))] == drunk
+
+    claimed2 = marks.claim([str(p)], 200, min_chars=1)
+    assert claimed2 is not None
+    assert claimed2[1] == drunk
+    segs2, nxt2 = src.sip(claimed2[0], claimed2[1], 200, until=claimed2[3])
+    marks.advance(src.key(str(p)), nxt2)
+    texts = [s.text for s in segs2]
+    assert "KEEP-ME-NEXT" in texts
+    assert "KEEP-ME-AFTER" in texts
+    assert marks.read()[src.key(str(p))] == p.stat().st_size
