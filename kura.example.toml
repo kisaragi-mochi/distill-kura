@@ -142,6 +142,7 @@ trigger_tokens = 24         # budget for one compressed line, in tokens, not cha
 #   claude = a directory of Claude Code .jsonl transcripts
 #   dsh    = a DSH sessions directory (session.jsonl.zstd; needs the `zstd` binary)
 #   text   = a directory of .md/.txt/.log notes
+#   evidence = classified .evidence.jsonl (schema_version 1; USER/SELF/ACT/TOOL; RFC3339 timestamp)
 
 [distill]
 language = "English"        # the language memories are WRITTEN in

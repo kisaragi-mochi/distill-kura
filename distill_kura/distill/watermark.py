@@ -55,8 +55,15 @@ class Watermarks:
                 fcntl.flock(lk, fcntl.LOCK_UN)
 
     def claim(self, files: list[str], budget_chars: int,
-              min_chars: int) -> tuple[str, int, Source] | None:
-        """Reserve the next stretch worth drinking. Returns (path, start, source)."""
+              min_chars: int) -> tuple[str, int, Source, int] | None:
+        """Reserve the next stretch worth drinking.
+
+        Returns (path, start, source, reserved_end). `budget_chars` is passed to
+        `claim_bound` unchanged — it is the same budget `sip` will receive. A
+        global byte-slack here reserved past what a record-walking source would
+        drink; max-forward then skipped the unread tail forever. Adapters that
+        estimate bytes apply their own slack inside `claim_bound`.
+        """
         with open(self.path + ".lock", "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             try:
@@ -67,12 +74,12 @@ class Watermarks:
                         continue
                     k = src.key(path)
                     start = cur.get(k, 0)
-                    end, approx = src.claim_bound(path, start, int(budget_chars * 2.2))
+                    end, approx = src.claim_bound(path, start, budget_chars)
                     if approx < min_chars or end <= start:
                         continue
                     cur[k] = end
                     self._write(cur)
-                    return path, start, src
+                    return path, start, src, end
                 return None
             finally:
                 fcntl.flock(lk, fcntl.LOCK_UN)
