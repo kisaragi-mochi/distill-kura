@@ -11,6 +11,8 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from distill_kura.store import Store                       # noqa: E402
@@ -182,6 +184,32 @@ def test_fastpath_lands_the_wrong_branch_honestly_when_baited(tmp_path):
     tr = wl.run_case(s, CASES[1], "fastpath")
     assert tr["fastpath_used"] is True and tr["opened"] == ["old-abandoned-plan"]
     assert tr["wrong_branch"] is True and tr["target_reached"] is False
+
+
+def test_prose_around_the_array_is_a_format_error_not_a_hit(tmp_path):
+    """The prompt says "Output ONLY a JSON array". A model that wraps the array
+    in chatter was rescued by the embedded-array parser; format compliance is
+    part of what agent-only measures."""
+    s = build(tmp_path)
+    stub = StubModel('I think it\'s this:\n["freetoken-hybrid"]')
+    tr = wl.run_case(s, CASES[0], "agent-only", thinker=stub)
+    assert tr["format_error"] is True
+    assert tr["opened"] == [] and tr["target_reached"] is False
+
+
+def test_agent_url_cannot_hijack_the_full_routing_thinker(tmp_path):
+    """One flag quietly swapping the production path's brain would end the
+    comparability the three modes exist for: full ALWAYS runs the configured
+    thinker; --agent-url measures agent-only and nothing else."""
+    from distill_kura import bench
+    s = build(tmp_path)
+    reg = reg_of(s)
+    cfg = tmp_path / "cases.json"
+    cfg.write_text(json.dumps({"cases": CASES}), encoding="utf-8")
+    with pytest.raises(ValueError, match="agent-only"):
+        bench.worldline(reg, s, str(cfg), routing="full",
+                        agent_url="http://elsewhere:1/v1",
+                        trace_path=str(tmp_path / "t.jsonl"))
 
 
 # ── full: the production path, accounted ────────────────────────────────────

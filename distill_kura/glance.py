@@ -24,9 +24,11 @@ import re
 from .store import Store
 from .tokens import estimate
 
-# The tool descriptions promise ~150 tokens of micro-recall. A link-heavy memory can
-# carry dozens of [[links]] and a long KEEP; without a bound the glance stops being
-# the cheap confirmation it exists to be. An ESTIMATE — leave the headroom (tokens.py).
+# The tool promises micro-recall. The contract is a TARGET of ~150 tokens, not a
+# hard ceiling: the canonical recognition line and the verified KEEP are never cut
+# (trimming them would corrupt the surfaces this exists to confirm), links are
+# what fits, and tokens_est/over_target say which happened. A link-heavy memory
+# without this bound stopped being the cheap confirmation it exists to be.
 GLANCE_TOKENS = 150
 
 
@@ -89,9 +91,9 @@ def glance(store: Store, slug: str) -> dict:
     if links:
         out += ["", "LINKS:"]
         for lnk in links:
-            # Title/trigger and KEEP always come first; links join in order while the
-            # running estimate fits. The dict keeps the FULL list — only the rendered
-            # text is bounded.
+            # The canonical recognition line and the verified KEEP are NEVER cut —
+            # trimming them mid-sentence would corrupt exactly the surfaces this
+            # exists to confirm. Links are what fit; a cut is said out loud.
             if estimate("\n".join(out + [lnk])) > GLANCE_TOKENS:
                 break
             out.append(lnk)
@@ -100,7 +102,14 @@ def glance(store: Store, slug: str) -> dict:
     if omitted:
         # A silent cut reads as "that is all there is" — say the rest exist.
         out.append(f"+{omitted} more links (open the memory for them)")
+    rendered = "\n".join(out)
     return {"ok": True, "slug": s, "title": title, "trigger": trigger,
             "keep": keep, "keep_state": keep_state, "links": links,
             "relations": [],                      # typed worldline edges land in M7
-            "text": "\n".join(out)}
+            "text": rendered,
+            # The contract is a TARGET (~150), not a hard ceiling: a giant grouped
+            # line or a long KEEP can carry the glance past it, honestly. The
+            # numbers say which happened, so a caller can decide.
+            "tokens_est": estimate(rendered),
+            "over_target": estimate(rendered) > GLANCE_TOKENS,
+            "links_shown": shown, "links_omitted": omitted}

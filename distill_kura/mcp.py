@@ -110,10 +110,11 @@ TOOLS: list[dict] = [
         "name": "kura_glance",
         "description": (
             f"Confirm ONE memory from {LABEL} by its slug — the exact index line, the "
-            "verified KEEP sentence and its [[links]], about 150 tokens. Call it when you "
-            "recognise a slug on the resident map or from recall and want to be sure it is "
-            "the right memory before reading the whole thing. An unknown slug simply says "
-            "there is no memory by that name — a confirmation, not a search."),
+            "verified KEEP sentence and its [[links]], targeting ~150 tokens (the "
+            "recognition line and KEEP are never cut; links are trimmed first). Call it "
+            "when you recognise a slug on the resident map or from recall and want to be "
+            "sure it is the right memory before reading the whole thing. An unknown slug "
+            "simply says there is no memory by that name — a confirmation, not a search."),
         "inputSchema": {
             "type": "object",
             "properties": {"slug": {"type": "string", "description": "Memory slug, without .md"},

@@ -50,21 +50,26 @@ def worldline(reg: Registry, store: Store, cases_path: str, routing: str = "full
     `agent_url` names the conversation model that plays the agent in agent-only
     mode (agent-only measures the MODEL's recognition, and the recorded identity
     must always be the endpoint actually asked). Without it the configured
-    thinker plays the agent and is recorded as such.
+    thinker plays the agent and is recorded as such. It is refused for any other
+    routing: `full` always runs the CONFIGURED thinker, or the modes stop being
+    comparable — one flag would quietly swap the production path's brain.
     """
     from . import worldline as wl
     from .prefill import build, loom_for, trail_for
     from .thinker import Endpoint
     loom = loom_for(store, reg.prefill_cfg_for(store))
     pf = build(store, loom, trail=trail_for(store, reg.prefill_cfg_for(store), loom=loom))
-    if agent_url:
-        agent = Endpoint(url=agent_url, model=agent_model or "agent")
-        identity = {"url": agent.url, "model": agent.model}
-    else:
-        agent = reg.models_for(store).thinker
-        identity = {"url": agent.url, "model": agent.model}
+    thinker = reg.models_for(store).thinker
+    identity = None
+    if routing == "agent-only":
+        if agent_url:
+            thinker = Endpoint(url=agent_url, model=agent_model or "agent")
+        identity = {"url": thinker.url, "model": thinker.model}
+    elif agent_url or agent_model:
+        raise ValueError("--agent-url/--agent-model measure agent-only routing; "
+                         f"--routing {routing!r} always uses the configured thinker")
     return wl.run(store, wl.load_cases(cases_path), routing=routing,
-                  thinker=agent, resident=pf.text,
+                  thinker=thinker, resident=pf.text,
                   fastpath_cfg=reg.fastpath_cfg_for(store), hops=hops,
                   trace_path=trace_path
                   or os.path.join(store.still, "worldline-traces.jsonl"),

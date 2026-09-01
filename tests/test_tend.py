@@ -99,7 +99,8 @@ def test_the_humans_return_stops_a_running_track_unless_told_not_to(tmp_path):
 def test_work_is_counted_and_launches_are_not(tmp_path):
     reg, st, cfg, j = build(tmp_path)
     t = Tender(reg, st, cfg, idle_min=10)
-    assert set(t.done) == {"poured", "tossed", "fixed", "drafts", "woven", "paid", "tidied"}
+    assert set(t.done) == {"poured", "tossed", "fixed", "drafts", "woven",
+                           "trailed", "paid", "tidied"}
     assert not any(k.endswith("_runs") or "launch" in k for k in t.done)
 
 
@@ -114,9 +115,69 @@ def test_payforward_is_scheduled_after_a_weave_and_only_then(tmp_path):
         t.next_ok[track] = now + 9999           # only the question at hand remains
     assert t.choose(now) is None                # no weave yet → no payforward
     t._woven_this_silence = True
+    assert t.choose(now) == "trail"             # the trail follows the weave FIRST
+    t._trailed_this_silence = True
     assert t.choose(now) == "payforward"
     t._paid_this_silence = True
     assert t.choose(now) is None                # once per weave, not once per tick
+
+
+def test_a_pour_does_not_leave_the_trail_absent_forever(tmp_path):
+    """The reviewer's scenario, end to end at the choose() level: a pour retires
+    the trail (the revision moved), the watcher weaves — and the very next track
+    must be the trail, or 'the current path' goes absent until a human runs
+    `kura trail` by hand. The trail is model-free: this maintenance is cheap."""
+    import subprocess as sp
+    reg, st, cfg, j = build(tmp_path, backoff_min=20)
+    old = time.time() - 3600
+    os.utime(j, (old, old))
+    t = Tender(reg, st, cfg, idle_min=10)
+    # a real trail on disk (the store needs a fresh memory to have one), then a
+    # store mutation retires it
+    from distill_kura.prefill import loom_for, trail_for
+    st.remember_direct("todays-work", "the seed the trail will show",
+                       f"dated {time.strftime('%Y-%m-%d')}")
+    cfgp = reg.prefill_cfg_for(st)
+    assert trail_for(st, cfgp, loom=loom_for(st, cfgp)).write()["written"] is True
+    st.remember_direct("poured-while-watching", "a memory poured in the quiet", "body")
+    assert trail_for(st, cfgp, loom=loom_for(st, cfgp)).is_stale() is True
+    now = time.time()
+    for track in ("drain", "distill", "tidy"):
+        t.next_ok[track] = now + 9999
+    t._woven_this_silence = True                # the weave that follows a pour
+    assert t.choose(now) == "trail"
+    assert "trail" in t._cmd("trail")
+
+
+def test_a_trail_past_its_own_horizon_is_rebuilt_in_the_quiet(tmp_path):
+    """Time alone retires a trail — the fresh window slides with no store write.
+    The quiet cycle checks the trail's own proof and rebuilds it, cheaply."""
+    reg, st, cfg, j = build(tmp_path)
+    from distill_kura.prefill import loom_for, trail_for
+    st.remember_direct("todays-work", "the seed the trail will show",
+                       f"dated {time.strftime('%Y-%m-%d')}")
+    cfgp = reg.prefill_cfg_for(st)
+    tr = trail_for(st, cfgp, loom=loom_for(st, cfgp))
+    assert tr.write()["written"] is True
+    sv = tr._state()
+    sv["valid_until"] = time.time() - 1         # the horizon has passed
+    json.dump(sv, open(tr.state_path, "w"))
+    t = Tender(reg, st, cfg, idle_min=10)
+    now = time.time()
+    for track in ("drain", "distill", "tidy"):
+        t.next_ok[track] = now + 9999
+    assert t.choose(now) == "trail"
+
+
+def test_an_absent_trail_is_not_a_per_chore(tmp_path):
+    """No trail file + no weave = nothing to maintain: the time check only
+    rebuilds a trail that EXISTS (the after-weave path is what creates one)."""
+    reg, st, cfg, j = build(tmp_path)
+    t = Tender(reg, st, cfg, idle_min=10)
+    now = time.time()
+    for track in ("drain", "distill", "tidy"):
+        t.next_ok[track] = now + 9999
+    assert t.choose(now) is None, "an absent trail is honest absence, not a chore"
 
 
 def test_doctor_reports_a_dead_watcher(tmp_path):

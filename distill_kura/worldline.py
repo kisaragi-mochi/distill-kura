@@ -67,21 +67,21 @@ def _clean(name: str) -> str:
 
 
 def _agent_answer(raw: str, store: Store) -> dict:
-    """The conversation model's reply, read STRICTLY — no resolve(), no fuzzy
-    anything. Only a JSON array of strings counts as a well-formed answer, and
-    only a cleaned name that is EXACTLY in slug_set() is `opened`. The old
-    resolve() snap rescued thinker picks, not this mode: it turned a misspelt
-    slug into a hit, and on an unknown case it let a hallucinated
-    ["kyoto-house"] resolve to nothing, vanish, and score as a correct refusal."""
+    """The conversation model's reply, read STRICTLY. The WHOLE reply must be a
+    JSON array of strings — no prose around it, no array embedded in a sentence.
+    This is a benchmark of the model's own ability, and following the output
+    format it was given is part of that ability; a lenient parser here would
+    rescue exactly the models agent-only exists to measure honestly. Only a
+    cleaned name that is EXACTLY in slug_set() is `opened` — no resolve(), no
+    fuzzy anything: the snap was a rescue for thinker picks, and it turned a
+    misspelt slug into a hit while letting a hallucinated ["kyoto-house"]
+    vanish and score as a correct refusal."""
     def bad() -> dict:
         return {"proposed_slugs": [], "invalid_slugs": [], "opened": [],
                 "format_error": True}
 
-    m = re.search(r"\[.*?\]", raw, re.S)
-    if not m:
-        return bad()
     try:
-        got = json.loads(m.group(0))
+        got = json.loads((raw or "").strip())
     except ValueError:
         return bad()
     if not isinstance(got, list) or not all(isinstance(x, str) for x in got):

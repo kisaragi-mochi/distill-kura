@@ -7,7 +7,7 @@
     kura remember slug "desc" [-]     write one fact (body on stdin with `-`)
     kura annotate slug --tag landmine add tags / the three sentences to one memory
     kura profile show|draft|apply     the wide room's learned profile (draft → read → apply by hand)
-    kura tend [-s eq]                 the watcher: in the quiet hours, drain → distil → weave → tidy
+    kura tend [-s eq]                 the watcher: quiet hours — drain → distil → weave → trail → pay-forward → tidy
     kura doctor [-s eq]               health of a store (--all for every one)
     kura weave [-s eq] [--status]     re-weave the resident index (three-layer cloth)
     kura prefill [-s eq]            print the standing block a host should inject
@@ -245,9 +245,12 @@ def main(argv: list[str] | None = None) -> int:
             # A retention run that scores badly should not look like a passing command.
             return 0 if r["score"] >= 0.9 else 1
         if a.bcmd == "worldline":
-            r = bench.worldline(reg, store, a.cases, routing=a.routing,
-                                hops=a.hops, trace_path=a.trace,
-                                agent_url=a.agent_url, agent_model=a.agent_model)
+            try:
+                r = bench.worldline(reg, store, a.cases, routing=a.routing,
+                                    hops=a.hops, trace_path=a.trace,
+                                    agent_url=a.agent_url, agent_model=a.agent_model)
+            except ValueError as e:
+                sys.exit(str(e))            # a mode conflict, named, not a traceback
             print(json.dumps(r, ensure_ascii=False, indent=1))
             # A wrong branch (an abandoned plan anchoring a case) is the one result
             # that must never read as a passing run; nothing runnable is the other.

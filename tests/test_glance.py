@@ -151,4 +151,19 @@ def test_a_link_heavy_glance_is_bounded_to_the_token_budget(tmp_path):
     assert g["ok"]
     assert g["links"] == siblings, "the dict keeps the FULL links list"
     assert "more links (open the memory for them)" in g["text"]
-    assert estimate(g["text"]) <= 200
+    assert estimate(g["text"]) <= 200          # target ~150 plus the honest tail
+    assert g["links_shown"] < len(siblings) and g["links_omitted"] > 0
+    assert g["tokens_est"] == estimate(g["text"])
+
+
+def test_the_budget_is_a_target_not_a_ceiling_for_canonical_surfaces(tmp_path):
+    """A giant KEEP is never cut mid-sentence — the contract is 'targets ~150',
+    and when the canonical surfaces carry it past that, the numbers say so."""
+    s = build(tmp_path)
+    s.annotate_verified("freetoken-hybrid",
+                        annotations={"keep": "keep this " + "meaning " * 80})
+    g = glance(s, "freetoken-hybrid")
+    assert g["keep_state"] == "verified"
+    assert g["keep"] in g["text"]                     # whole, never truncated
+    assert g["over_target"] is True and g["tokens_est"] > 150
+    assert g["links_shown"] >= 0 and g["links_omitted"] >= 0  # stats always present

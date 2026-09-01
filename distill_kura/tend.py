@@ -5,6 +5,10 @@ What it does, in order, every time the house has been quiet for `idle_min`:
     drain      drafts waiting → the editor reads each one cold and pours / fixes / tosses
     distill    no drafts     → one pass over the journal: sip → spot → gate → stage
     weave      something poured this silence → re-weave the resident map, once
+    trail      after each weave → rebuild the Hot Trail (model-free, cheap); also
+               whenever the trail on disk has passed its own time horizon — the
+               fresh window slides with no store write, and a watcher that never
+               rebuilt the trail would leave "the current path" empty forever
     payforward after each weave → pay the map's cold prefill into the registered
                mouths (`kura pay-forward`); an unchanged map is a cheap check, exit 2
     tidy       once per silence, only if the index has mechanically ragged lines
@@ -51,7 +55,7 @@ from .distill.sources import discover_all
 from .registry import Registry
 from .store import Store
 
-TRACKS = ("drain", "distill", "weave", "payforward", "tidy")
+TRACKS = ("drain", "distill", "weave", "trail", "payforward", "tidy")
 
 
 def _log(path: str, s: str) -> None:
@@ -89,8 +93,9 @@ class Tender:
         self.proc: subprocess.Popen | None = None
         self.proc_track = ""
         self.done = {"poured": 0, "tossed": 0, "fixed": 0, "drafts": 0, "woven": 0,
-                     "paid": 0, "tidied": 0}
+                     "trailed": 0, "paid": 0, "tidied": 0}
         self._woven_this_silence = False
+        self._trailed_this_silence = False
         self._paid_this_silence = False
         self._tidied_this_silence = False
 
@@ -112,7 +117,7 @@ class Tender:
             base += ["-c", self.config_path]
         base += ["-s", self.store.name]
         return base + {"drain": ["distill", "drain"], "distill": ["distill", "run", "--chunks", "1"],
-                       "weave": ["weave"], "payforward": ["pay-forward"],
+                       "weave": ["weave"], "trail": ["trail"], "payforward": ["pay-forward"],
                        "tidy": ["distill", "tidy"]}[track]
 
     def start(self, track: str) -> None:
@@ -161,7 +166,10 @@ class Tender:
         elif track == "weave":
             self.done["woven"] += 1
             self._woven_this_silence = True
+            self._trailed_this_silence = False   # the map moved: the trail must follow
             self._paid_this_silence = False    # a fresh weave may have changed the map
+        elif track == "trail":
+            self.done["trailed"] += 1 if r.get("written") else 0
         elif track == "payforward":
             # `worked` = bakes + restores. A run of skipped-fresh mouths exits 2 and
             # never reaches here — work is counted, launches are not.
@@ -182,12 +190,31 @@ class Tender:
             self.proc_track = ""
 
     # ── choosing the next track ───────────────────────────────────────────
+    def _trail_time_stale(self) -> bool:
+        """Does a trail that EXISTS need rebuilding for time alone? Cheap and
+        model-free: read the sidecar, hash the index — the trail's own proof."""
+        from .prefill import loom_for, trail_for
+        cfg = self.reg.prefill_cfg_for(self.store)
+        t = trail_for(self.store, cfg, loom=loom_for(self.store, cfg))
+        return t.text_on_disk() is not None and t.is_stale()
+
     def choose(self, now: float) -> str | None:
         drafts = os.path.join(self.store.still, "drafts")
         have_drafts = any(f.endswith(".md") for f in os.listdir(drafts)) if os.path.isdir(drafts) else False
         order = (["drain"] if have_drafts else ["distill"])
         if not self._woven_this_silence and self.done["poured"]:
             order.append("weave")
+        if self._woven_this_silence and not self._trailed_this_silence:
+            # Right after the weave, before pay-forward: the trail is model-free and
+            # takes milliseconds, and a pour has retired the old one (the revision
+            # moved). Without this track the "current path" would go absent the first
+            # time the watcher poured something and never come back.
+            order.append("trail")
+        elif self._trail_time_stale():
+            # The pure-time hazard: no store write at all, the fresh window simply
+            # slid past the trail's own horizon. Absent trails are not maintained
+            # here — the after-weave path is what creates one.
+            order.append("trail")
         if self._woven_this_silence and not self._paid_this_silence:
             # Only after a weave: a map that was not re-woven cannot have changed, and
             # a mouth restart is the systemd hook's job (docs/OPERATING.md), not the
@@ -227,6 +254,7 @@ class Tender:
                 _log(self.log_path, "the human is back: " + ", ".join(f"{k} {v}" for k, v in self.done.items() if v))
             self.done = {k: 0 for k in self.done}
             self._woven_this_silence = False
+            self._trailed_this_silence = False
             self._paid_this_silence = False
             self._tidied_this_silence = False
         idle = now - stamp if stamp else 0.0
@@ -235,6 +263,8 @@ class Tender:
             if t:
                 if t == "tidy":
                     self._tidied_this_silence = True
+                if t == "trail":
+                    self._trailed_this_silence = True
                 if t == "payforward":
                     self._paid_this_silence = True
                 self.start(t)
