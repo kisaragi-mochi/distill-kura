@@ -19,9 +19,15 @@ changed etag tries a restore before it bakes — a file left by a lost state fil
 parallel runner is still the right bytes — and a fresh etag is proven, never assumed:
 a restore shows the file still exists, a one-token probe with `cache_prompt: true`
 reads `timings.prompt_n`, and small means warm. A restore whose 200 was a lie is
-caught by the same probe, and the probe's own prefill is saved rather than paid twice.
-An unreachable mouth is a loud, labeled skip that never advances the per-store state
-(`_still/payforward.json`, written only after a confirmed success). Old slot files are
+caught by the same probe, and the probe's own prefill is saved rather than paid twice;
+a reply with no timings at all proves nothing and is refused — fail closed — because
+llama.cpp always sends them. An unreachable mouth is a loud, labeled skip that never
+advances the per-store state (`_still/payforward.json`, written only after a confirmed
+success, read-modify-written under the slot's lock). One runner per physical slot: the
+whole sequence holds a machine-local flock keyed on (normalized base url, slot) — the
+runners that can collide, `kura tend` and the systemd restart hook, are machine-local —
+and a second runner skips cleanly instead of racing. Two config entries naming one
+physical slot are refused at load. Old slot files are
 not pruned, because the slots API can save and restore a filename but cannot list the
 directory. Exit 2 when every mouth is fresh, so a scheduler can tell "nothing to do"
 from work; a failed mouth is exit 1, because a failure is neither. `kura tend` runs it
@@ -37,6 +43,15 @@ deterministic substring floor as the quotes themselves. One retry with the viola
 named, then the draft is dropped. A derived number — a ratio the scribe computed — is
 refused on purpose: arithmetic the evidence never did is a claim the evidence never
 made. (Found in an outside review; confirmed against the code before fixing.)
+
+The second review then bent the floor, and it hardened: numbers are matched token
+by token, canonicalised (commas forgiven, nothing else) — never against the
+evidence's concatenated digits, which had let "899 ms … 2.3 ms" vouch for an
+invented "923". A sign is meaning ("-12.5" is not "+12.5"); a range is one claim
+("12-16" is not licensed by "12" and "16"); the evidence's date is no longer
+auto-allowed in the body — an extension heading gets its date from code, after
+verification. The gate's test-file contract now states exactly which classes the
+deterministic floor covers, no more.
 
 ### An explicit nothing is an answer
 

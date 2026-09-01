@@ -94,6 +94,17 @@ _MOUTH_TYPES = {"name": str, "url": str, "store": str, "slot": int, "model": str
 _MOUTH_REQUIRED = ("name", "url", "store")
 
 
+def mouth_base(url: str) -> str:
+    """A mouth's normalized server base — together with the slot id, its PHYSICAL
+    identity. Every other url in kura.toml carries `/v1`, so that slip is certain to
+    happen here; the slots API lives BESIDE /v1, not under it, so the suffix is
+    stripped rather than punished."""
+    u = str(url).rstrip("/")
+    if u.endswith("/v1"):
+        u = u[: -len("/v1")].rstrip("/")
+    return u
+
+
 def _check_table(where: str, table: dict, types: dict) -> None:
     for k, v in (table or {}).items():
         want = types.get(k)
@@ -193,6 +204,7 @@ def _check_mouths(raw: dict, stores: dict[str, Store]) -> None:
         raise ValueError(f"[payforward] mouths must be an array of tables "
                          f"([[payforward.mouths]]), got {type(mouths).__name__}")
     seen: set[str] = set()
+    phys: dict[tuple[str, int], str] = {}
     for i, m in enumerate(mouths):
         where = f"payforward.mouths[{i}]"
         if not isinstance(m, dict):
@@ -214,6 +226,16 @@ def _check_mouths(raw: dict, stores: dict[str, Store]) -> None:
                              f"is keyed on the name, so the second would wear the "
                              f"first one's record of what was baked.")
         seen.add(name)
+        # The NAME is the state key, but the PHYSICAL identity is (base url, slot):
+        # two names pointed at one slot would race on its KV, each runner saving over
+        # the other's map — and the state files would both claim success.
+        ident = (mouth_base(m["url"]), int(m.get("slot", 0)))
+        if ident in phys:
+            raise ValueError(f"[{where}] and mouth {phys[ident]!r} are the same "
+                             f"physical slot ({ident[0]}, slot {ident[1]}). Two names "
+                             f"for one slot race on its KV; give each mouth its own "
+                             f"slot, or keep one entry.")
+        phys[ident] = name
         if m["store"] not in stores:
             # A mode name is refused too, deliberately: a mouth is standing hardware
             # wearing ONE store's map, not a session-level selector.

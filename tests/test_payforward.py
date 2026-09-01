@@ -37,6 +37,7 @@ class FakeMouth:
         self.files: dict[str, str] = {}
         self.warm: str | None = None            # what the slot holds right now
         self.has_slot_save_path = True          # False = started without --slot-save-path
+        self.send_timings = True                # False = a mouth that is not llama.cpp
         self.log: list[str] = []
 
 
@@ -83,9 +84,11 @@ def make_handler(m: FakeMouth):
                 m.log.append(f"chat:{state}{cached}")
                 prompt_n = WARM_N if system == m.warm else COLD_N
                 m.warm = system                 # the probe leaves the slot holding its prompt
-                return self._json(200, {"choices": [{"message": {"content": "."}}],
-                                        "timings": {"prompt_n": prompt_n,
-                                                    "prompt_ms": 1.0}})
+                reply = {"choices": [{"message": {"content": "."}}],
+                         "timings": {"prompt_n": prompt_n, "prompt_ms": 1.0}}
+                if not m.send_timings:
+                    del reply["timings"]
+                return self._json(200, reply)
             self._json(404, {"error": "unknown route"})
     return H
 
@@ -253,6 +256,50 @@ def test_force_rebakes_without_asking_the_etag(tmp_path):
         srv.shutdown()
 
 
+def test_a_second_runner_on_the_same_slot_skips_cleanly(tmp_path):
+    """`kura tend` and the systemd restart hook can fire together. flock conflicts
+    across open file descriptions, so a second handle in this very process stands in
+    for the second process."""
+    import fcntl
+    srv, m, url = start_mouth()
+    try:
+        reg, st, cfg = build(tmp_path, url)
+        holder = open(payforward._lock_path(payforward._base(url), 0), "w")
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        r = payforward.run(reg)
+        x = r["results"][0]
+        assert x["did"] == "skipped-locked" and r["locked"] == 1
+        assert r["worked"] == 0 and r["failed"] == 0           # not work, not a failure
+        assert m.log == []                                     # the mouth was never touched
+        assert not os.path.exists(payforward.state_path(st))   # and the state never moved
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
+        assert payforward.run(reg)["results"][0]["did"] == "baked"   # released → work proceeds
+        assert state_of(st)["mouths"]["slow"]["etag"]          # one consistent record
+    finally:
+        srv.shutdown()
+
+
+def test_a_probe_without_timings_is_unverifiable_and_moves_nothing(tmp_path):
+    """Warmth is proven, never assumed: a reply with no timings.prompt_n proves
+    nothing, so the mouth is refused loudly instead of trusted on the restore's 200.
+    llama.cpp always sends timings — nothing real regresses."""
+    srv, m, url = start_mouth()
+    try:
+        reg, st, cfg = build(tmp_path, url)
+        payforward.run(reg)                                    # bake; state recorded
+        before = state_of(st)
+        m.send_timings = False
+        r = payforward.run(reg)
+        x = r["results"][0]
+        assert x["did"] == "unverified" and r["failed"] == 1 and r["worked"] == 0
+        assert "timings" in x["error"]                         # loud, and names the gap
+        assert state_of(st) == before                          # no state advance
+        assert cli.main(["-c", cfg, "pay-forward"]) == 1       # unverifiable is a failure
+    finally:
+        srv.shutdown()
+
+
 # ── failure is loud and moves nothing ───────────────────────────────────────
 
 def test_an_unreachable_mouth_is_a_loud_skip_that_never_advances_state(tmp_path):
@@ -328,6 +375,22 @@ def test_a_bad_mouth_is_a_load_error_with_the_offender_named(tmp_path):
             assert expect in str(e), f"{expect!r} not in {e}"
         else:
             raise AssertionError(f"loaded silently: {toml!r}")
+
+
+def test_two_names_for_one_physical_slot_are_refused_at_load(tmp_path):
+    """The name keys the state, but (normalized base url, slot) is the physical
+    identity: two entries on one slot would race on its KV."""
+    same = ('[[payforward.mouths]]\nname = "a"\nurl = "http://127.0.0.1:8014"\nstore = "m"\n'
+            '[[payforward.mouths]]\nname = "b"\nurl = "http://127.0.0.1:8014/v1/"\nstore = "m"\n')
+    try:
+        _load_with_mouths(tmp_path, same)                      # /v1/ variant: same base
+    except ValueError as e:
+        assert "same physical slot" in str(e) and "'a'" in str(e)
+    else:
+        raise AssertionError("two names for one url+slot must be refused")
+    ok = ('[[payforward.mouths]]\nname = "a"\nurl = "http://127.0.0.1:8014"\nstore = "m"\n'
+          '[[payforward.mouths]]\nname = "b"\nurl = "http://127.0.0.1:8014"\nstore = "m"\nslot = 1\n')
+    assert len(_load_with_mouths(tmp_path, ok).payforward_mouths) == 2   # another slot is fine
 
 
 def test_valid_mouths_get_defaults_and_show_in_describe(tmp_path):

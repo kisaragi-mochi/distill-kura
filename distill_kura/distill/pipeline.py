@@ -368,7 +368,7 @@ class Distiller:
             if not (slug and desc and body):
                 return None
             text = desc.group(1) + "\n" + body.group(1)
-            invented = composed_number_violations(text, c["evidence"], self._evidence_date())
+            invented = composed_number_violations(text, c["evidence"])
             if not invented:
                 break
             if attempt == 2:
@@ -437,7 +437,7 @@ class Distiller:
         if not body:
             return None
         _, plain = _split_draft(body.group(1))
-        invented = composed_number_violations(plain, c["evidence"], date)
+        invented = composed_number_violations(plain, c["evidence"])
         if invented:
             _log(f"      ✗ extension invents numbers the evidence lacks: {invented}")
             return None

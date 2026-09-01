@@ -688,9 +688,11 @@ class Store:
         # shell, and silently rewriting a body corrupts exactly the memories that carry
         # the most detail. Escaping belongs to whoever renders a template, at render time.
         os.makedirs(self.path, exist_ok=True)
-        # Memory file and index line are one change. Serialise it, and replace the index
-        # atomically, so a crash or a concurrent writer cannot leave a memory that
-        # nothing points at (invisible to recall) or a half-written index line.
+        # Memory file and index line are one change. Serialise it, and replace each
+        # file atomically: a concurrent writer cannot drop the other's line, and no
+        # reader ever sees a half-written index. What this is NOT: a two-file
+        # transaction — a crash between the two replaces can still leave a memory
+        # that nothing points at, which `doctor()` reports as `not_in_index`.
         with self._locked():
             path = self.file_of(slug)
             existed = os.path.exists(path)

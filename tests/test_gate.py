@@ -1,6 +1,8 @@
 """The gate — the floor under every model in the system.
 
-If these tests pass, a model cannot get an invented fact into the store no matter how
+If these tests pass, a model cannot get the covered classes of unsupported claims —
+fabricated quotes, unbacked numbers, unearned attribution to the human — into the
+store, no matter how
 confidently it words it. That is the whole claim of this project, so it is tested
 adversarially: each case is a way a real model actually tried to get something through.
 """
@@ -187,3 +189,30 @@ def test_composed_date_and_small_numbers_are_not_claims():
     out = composed_number_violations("## 2026-09-01 decided; 3 things to check",
                                      ev, allowed="2026-09-01")
     assert out == []
+
+
+# Three exploits from the second outside review — each passed the first gate v3 draft.
+
+def test_composed_numbers_never_borrow_neighbouring_digits():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "before 899 ms; after 2.3 ms"}]
+    assert composed_number_violations("it took 923 ms", ev) == ["923"]
+
+
+def test_composed_sign_is_meaning():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "profit was +12.5%"}]
+    assert composed_number_violations("loss was -12.5%", ev) == ["-12.5"]
+    assert composed_number_violations("the figure 12.5% moved", ev) == []
+
+
+def test_composed_range_is_one_claim():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "12 GPUs and 16 GB"}]
+    assert composed_number_violations("needs 12-16 GPUs", ev) == ["12-16"]
+
+
+def test_composed_markdown_bullet_is_not_a_sign():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "counted 12 entries"}]
+    assert composed_number_violations("- 12 entries were counted", ev) == []

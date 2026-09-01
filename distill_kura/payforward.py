@@ -29,11 +29,19 @@ who wrote it or when. That buys the whole algorithm, per mouth:
                            slot is warm; the whole map means the restore's 200 was no
                            good — and in THAT case the probe itself just paid the
                            prefill, so the run saves the probe's work instead of
-                           paying a second time.
+                           paying a second time. A reply with no timings at all
+                           proves nothing and is refused — fail closed; llama.cpp
+                           always sends them.
     bake                 — the same probe call, knowingly cold, with a very long
                            timeout (the long wait is the whole point), then save,
                            then record.
     unreachable          — a loud, labeled skip. Never a crash, never a state advance.
+    one runner per slot  — the whole sequence holds an flock keyed on the slot's
+                           physical identity (normalized base url + slot id), in the
+                           system temp directory: machine-local, because the runners
+                           that can collide — `kura tend` and the systemd restart
+                           hook — are machine-local too. A second runner skips
+                           cleanly (`skipped-locked`) instead of racing the first.
 
 State lives per store in `_still/payforward.json`, keyed by mouth name — workshop
 bookkeeping like the tend heartbeat, written atomically and only ever after a confirmed
@@ -47,15 +55,18 @@ map on the 320B mouth), so it will.
 """
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime
 
 from . import prefill as prefill_mod
-from .registry import Registry
+from .registry import Registry, mouth_base as _base
 from .store import Store
 
 # 12 of the etag's 16 hex chars: enough to keep two maps' files apart, short enough
@@ -89,17 +100,16 @@ def state_path(store: Store) -> str:
     return os.path.join(store.still, "payforward.json")
 
 
+def _lock_path(base: str, slot: int) -> str:
+    """One lock per PHYSICAL slot (normalized base url + slot id), in the system temp
+    directory. Machine-local on purpose: the runners that can collide — `kura tend`
+    and a systemd hook firing on the mouth's restart — live on this machine, and a
+    slot is one server's resource, so a wider lock would guard nothing real."""
+    key = hashlib.sha1(f"{base}|{slot}".encode()).hexdigest()[:16]
+    return os.path.join(tempfile.gettempdir(), f"kura-payforward-{key}.lock")
+
+
 # ── plumbing ─────────────────────────────────────────────────────────────
-
-def _base(url: str) -> str:
-    """The mouth's server base. Every other url in kura.toml carries `/v1`, so that
-    slip is certain to happen here — and the slots API lives BESIDE /v1, not under it,
-    so the suffix is stripped rather than punished."""
-    u = url.rstrip("/")
-    if u.endswith("/v1"):
-        u = u[: -len("/v1")].rstrip("/")
-    return u
-
 
 def _post(url: str, body: dict, timeout: float, api_key_env: str | None) -> tuple[int, dict]:
     """POST json → (status, parsed reply). An HTTP error status is an ANSWER — a 400
@@ -209,7 +219,8 @@ def pay_one(reg: Registry, mouth: dict, force: bool = False) -> dict:
     """One mouth: restore-first, verify, bake only what restore could not cover.
 
     → {"mouth", "store", "slot", "etag", "file",
-       "did": "baked"|"restored"|"skipped-fresh"|"unreachable"|"save-failed",
+       "did": "baked" | "restored" | "skipped-fresh" | "skipped-locked"
+              | "unreachable" | "save-failed" | "unverified",
        wall times, "prompt_n", "bytes", and "error"/"note" where they apply}.
     """
     store = reg.stores[mouth["store"]]
@@ -219,9 +230,31 @@ def pay_one(reg: Registry, mouth: dict, force: bool = False) -> dict:
                "etag": pf.etag, "file": fname, "map_tokens_est": pf.tokens}
     base = _base(mouth["url"])
     key = mouth.get("api_key_env")
+    warm_bar = min(WARM_PROMPT_N, max(8, pf.tokens // 2))
+
+    # One runner per physical slot. Without this, `kura tend` and the systemd
+    # restart hook can interleave restore/bake/save on one slot — and the state
+    # read-modify-write below must see the winner's record, not race it.
+    lock = open(_lock_path(base, mouth["slot"]), "w")
+    try:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            r["did"] = "skipped-locked"
+            r["note"] = ("another pay-forward holds this slot right now; its run "
+                         "covers this mouth")
+            return r
+        return _pay_locked(reg, mouth, force, store, pf, fname, r, base, key, warm_bar)
+    finally:
+        lock.close()                        # closing the fd releases the flock
+
+
+def _pay_locked(reg: Registry, mouth: dict, force: bool, store: Store, pf, fname: str,
+                r: dict, base: str, key: str | None, warm_bar: int) -> dict:
+    # The state is read INSIDE the lock: a concurrent runner may have just advanced
+    # it, and acting on a pre-lock snapshot would re-bake what it already baked.
     mstate = (_read_state(store).get("mouths") or {}).get(mouth["name"]) or {}
     fresh = (not force) and mstate.get("etag") == pf.etag
-    warm_bar = min(WARM_PROMPT_N, max(8, pf.tokens // 2))
 
     t0 = time.perf_counter()
     try:
@@ -234,14 +267,22 @@ def pay_one(reg: Registry, mouth: dict, force: bool = False) -> dict:
                 r["restore_s"] = round(time.perf_counter() - rt0, 2)
                 pn, r["probe_s"] = _probe(base, mouth, pf.text, BAKE_TIMEOUT_S)
                 r["prompt_n"] = pn
-                if pn is None or pn <= warm_bar:
+                if pn is None:
+                    # Fail closed: warmth is PROVEN, never assumed, and a reply
+                    # without timings.prompt_n proves nothing. llama.cpp always
+                    # sends timings, so a mouth that omits them is not one this
+                    # feature can vouch for — loud skip, no state advance.
+                    r["did"] = "unverified"
+                    r["error"] = ("the probe's reply carried no timings.prompt_n, so "
+                                  "warmth cannot be verified. llama.cpp always sends "
+                                  "timings — is this mouth something else?")
+                    r["wall_s"] = round(time.perf_counter() - t0, 2)
+                    return r
+                if pn <= warm_bar:
                     # Warm. "skipped-fresh" when the state already knew this etag —
                     # the everyday nothing-to-do — and "restored" when the file alone
                     # carried it back (a lost state, a parallel runner's bake).
                     r["did"] = "skipped-fresh" if fresh else "restored"
-                    if pn is None:
-                        r["note"] = ("the reply carried no timings — warmth rests on "
-                                     "the restore alone")
                     r["wall_s"] = round(time.perf_counter() - t0, 2)
                     _advance(store, mouth["name"], r)
                     return r
@@ -303,9 +344,10 @@ def run(reg: Registry, store: str | None = None, mouth: str | None = None,
                            f"{[m['name'] for m in mouths] or 'none configured'}")
         mouths = picked
     results = [pay_one(reg, m, force=force) for m in mouths]
-    tally = {"baked": 0, "restored": 0, "fresh": 0, "failed": 0}
+    tally = {"baked": 0, "restored": 0, "fresh": 0, "locked": 0, "failed": 0}
     label = {"baked": "baked", "restored": "restored", "skipped-fresh": "fresh",
-             "unreachable": "failed", "save-failed": "failed"}
+             "skipped-locked": "locked",
+             "unreachable": "failed", "save-failed": "failed", "unverified": "failed"}
     for x in results:
         tally[label[x["did"]]] += 1
     out = {"results": results, **tally, "worked": tally["baked"] + tally["restored"]}
