@@ -67,7 +67,7 @@ DEFAULT_TRIGGER_TOKENS = 24
 # code that wrote it", so without a version the trimmer can be improved and nothing
 # happens. Observed exactly that: a fix for dropped ★ markers changed nothing until the
 # ledger was invalidated.
-LEDGER_VERSION = 5
+LEDGER_VERSION = 6   # 6: triggers pass the numeric floor; older hooks must re-earn their place
 
 # Markers that carry the point of a line. A trimmer that drops them keeps the words and
 # loses the meaning: ⚠️ says "this will bite you again", ★ says "this is the important
@@ -388,6 +388,14 @@ class Loom:
             return False
         if t.strip("*`★⚠️ 　").lower() == title.strip().lower():
             return False        # saying the title twice wastes the only line we get
+        # The trigger is worn on every turn and baked into KV by pay-forward: a
+        # one-digit swap ("12 GPUs"→"99 GPUs") keeps most of its 2-grams and walks
+        # over the overlap floor, so numbers get the same deterministic floor as
+        # every other model-written surface. Canonical memory right, worn memory
+        # wrong is a failure mode of its own.
+        from .distill.gate import composed_number_violations
+        if composed_number_violations(t, [{"text": f"{title} {desc}"}]):
+            return False
         if desc:
             return self._grounded(t, desc)
         # No source to compare against: fall back to the old specificity heuristic, now

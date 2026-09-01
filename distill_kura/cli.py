@@ -199,13 +199,14 @@ def main(argv: list[str] | None = None) -> int:
             if x.get("error"):
                 print(f"⚠ mouth '{x['mouth']}': {x['did']} — {x['error']}", file=sys.stderr)
         print(json.dumps(r, ensure_ascii=False))
-        if r["worked"]:
-            return 0
         if r["failed"] or r["locked"]:
-            # failed is broken and locked is busy (another runner held the slot — it
-            # may be finishing an OLDER map). Both mean "not done": a scheduler must
-            # retry, never rest as if the fleet were verified warm.
+            # Checked FIRST: {A: baked, B: locked} must exit 1, or a scheduler that
+            # saw "worked" would never come back for B. failed is broken, locked is
+            # busy (another runner held the slot — maybe finishing an OLDER map);
+            # either way part of the fleet is not covered, and retry outranks done.
             return 1
+        if r["worked"]:
+            return 0                            # the whole fleet is covered
         return 2                                # every mouth VERIFIED fresh — the scheduler may rest
 
     store = _store(reg, a.store)

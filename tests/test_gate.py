@@ -247,3 +247,10 @@ def test_final_surface_covers_attribution_too():
     out = final_surface_violations("the user decided on the slow disk", ev, ["SELF"])
     assert out == ["credits the human with no [USER] quote"]
     assert final_surface_violations("the slow disk seems right", ev, ["SELF"]) == []
+
+
+def test_composed_signed_scientific_is_one_token():
+    # Round four: "-1e9" must not decompose into an evidenced "-1" and "9".
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "temperature -1 C; repeated 9 times"}]
+    assert composed_number_violations("-1e9 parameters", ev) == ["-1e9"]

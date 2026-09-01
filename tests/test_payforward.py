@@ -349,6 +349,48 @@ def test_the_ledger_lock_stalls_the_record_not_the_bake(tmp_path):
         srv.shutdown()
 
 
+def test_a_mixed_run_exits_one_so_the_uncovered_mouth_is_retried(tmp_path):
+    """{A: baked, B: skipped-locked} must exit 1 — "worked" must not outrank "not
+    covered", or the scheduler that saw 0 never comes back for B. Worked mixed with
+    verified-fresh IS the fleet covered: 0. Only all-fresh is 2."""
+    import fcntl
+    srv1, m1, url1 = start_mouth()
+    srv2, m2, url2 = start_mouth()
+    try:
+        st = Store(name="m", path=str(tmp_path / "m"), label="m")
+        st.init_files()
+        st.remember("ssd-tier", "running a huge model off an SSD tier", "body")
+        cfg = tmp_path / "kura.toml"
+        cfg.write_text(f"""
+[stores.m]
+path = "{tmp_path / 'm'}"
+[models.thinker]
+url = "http://127.0.0.1:9/v1"
+model = "none"
+[[payforward.mouths]]
+name = "a"
+url = "{url1}"
+store = "m"
+[[payforward.mouths]]
+name = "b"
+url = "{url2}"
+store = "m"
+""", encoding="utf-8")
+        holder = open(payforward._lock_path(payforward._base(url2), 0), "w")
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        assert cli.main(["-c", str(cfg), "pay-forward"]) == 1      # A baked, B locked → retry
+        reg = Registry.load(str(cfg))
+        assert set(state_of(reg.store("m"))["mouths"]) == {"a"}    # B really is uncovered
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
+        assert cli.main(["-c", str(cfg), "pay-forward"]) == 0      # A fresh, B baked → covered
+        assert set(state_of(reg.store("m"))["mouths"]) == {"a", "b"}
+        assert cli.main(["-c", str(cfg), "pay-forward"]) == 2      # all VERIFIED fresh → rest
+    finally:
+        srv1.shutdown()
+        srv2.shutdown()
+
+
 def test_a_probe_without_timings_is_unverifiable_and_moves_nothing(tmp_path):
     """Warmth is proven, never assumed: a reply with no timings.prompt_n proves
     nothing, so the mouth is refused loudly instead of trusted on the restore's 200.

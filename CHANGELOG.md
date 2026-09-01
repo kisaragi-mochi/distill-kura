@@ -33,7 +33,9 @@ one `payforward.json`, so `--mouth A` / `--mouth B` running together was a lost 
 The read-modify-write now holds a millisecond flock beside the file. And busy is no
 longer fresh: a held slot lock proves another runner exists, not that it is warming
 your etag, so `skipped-locked` exits 1 (transient — retry) and only a verified
-all-fresh run exits 2. Old slot files are
+all-fresh run exits 2. Exit precedence puts not-covered first: {A baked, B busy}
+exits 1 so the scheduler comes back for B — 0 means the whole fleet is covered, never
+"something, at least, worked". Old slot files are
 not pruned, because the slots API can save and restore a filename but cannot list the
 directory. Exit 2 when every mouth is fresh, so a scheduler can tell "nothing to do"
 from work; a failed mouth is exit 1, because a failure is neither. `kura tend` runs it
@@ -73,6 +75,20 @@ digits are verified too — "8 GPUs", "4-bit" and "2x" are exactly the claims a
 local-model house invents — with ordered-list markers mechanically excluded.
 Manifests written from here on say `gate_version: 4`, so provenance can tell
 which floor a memory passed.
+
+The fourth review followed the truth downstream: the memory can be right while
+the memory the agent WEARS is wrong. Two more writers of resident truth now
+stand behind the same floor — `tidy`, the only path that puts model prose into
+the canonical index (an invented "99-GPU" title used to walk straight into
+recall and the resident map; now the memory itself is the evidence and the
+rewrite is refused), and the weave's trigger scribe, whose one-digit swap kept
+enough 2-grams to clear the grounding overlap (numbers now need the title or
+description to contain them; LEDGER_VERSION 6, so every cached hook re-earns
+its place under the new floor). The numeric tokenizer closes its last known
+seam — a signed mantissa ("-1e9" no longer decomposes into an evidenced "-1"
+and "9") — and content-addressed provenance now means it: manifests are
+re-hashed on every read (a FIX over a tampered manifest fails closed) and
+`doctor` reports `tampered_manifest` alongside `missing_manifest`.
 
 ### An explicit nothing is an answer
 

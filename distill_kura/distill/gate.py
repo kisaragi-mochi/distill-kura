@@ -115,7 +115,7 @@ def gate(cands: list[dict], segs: list[Segment], store_text: str = "") -> tuple[
 # too — "8 GPUs" and "4-bit" are exactly the claims a house full of local
 # models invents — with one mechanical exception: ordered-list markers.
 
-_SCI_OR_NUM = re.compile(r"\d+(?:\.\d+)?[eE][+-]?\d+|[+-]?\d[\d,.:/-]*\d|[+-]?\d")
+_SCI_OR_NUM = re.compile(r"[+-]?\d+(?:\.\d+)?[eE][+-]?\d+|[+-]?\d[\d,.:/-]*\d|[+-]?\d")
 _LIST_MARKER = re.compile(r"(?m)^\s*\d+[.)]\s+")
 
 

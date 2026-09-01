@@ -342,3 +342,14 @@ def test_estimator_is_close_on_mixed_text():
     assert estimate(jp) > len(jp) * 0.7          # Japanese is ~1 token per character
     assert estimate(en) < len(en) * 0.45         # English is ~1 per four
     assert etag_of("a") != etag_of("b")
+
+
+def test_a_trigger_that_swaps_a_digit_is_not_grounded(tmp_path):
+    # A one-digit swap keeps most of its 2-grams and walks over the overlap floor —
+    # and a false trigger is worn on every turn, then baked into KV by pay-forward.
+    s = Store(name="w", path=str(tmp_path / "w")); s.init_files()
+    loom = Loom(s, scribe=None)
+    title = "SAZANAMI GPUs"
+    desc = "SAZANAMI runs 12 GPUs with NVFP4 and local inference"
+    assert not loom._acceptable("SAZANAMI runs 99 GPUs with NVFP4 and local inference", title, desc)
+    assert loom._acceptable("SAZANAMI runs 12 GPUs with NVFP4 and local inference", title, desc)

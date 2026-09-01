@@ -33,8 +33,8 @@ from ..tokens import estimate
 from ..registry import Registry
 from ..store import ANNOTATION_KEYS, FROZEN, Store, normalize_tags
 from . import prompts
-from .gate import (attributes_to_human, final_surface_violations, gate, norm,
-                   salvage, verify_tags)
+from .gate import (attributes_to_human, composed_number_violations,
+                   final_surface_violations, gate, norm, salvage, verify_tags)
 from .seeds import Seeds
 from .sources import Segment, as_evidence, discover_all, source_for
 from .watermark import Watermarks
@@ -678,13 +678,10 @@ class Distiller:
         m = re.search(r"evidence_manifest:\s*sha256:([0-9a-f]{64})", draft_raw)
         if not m:
             return None, []
-        try:
-            with open(os.path.join(self._evidence_dir(), m.group(1) + ".json"),
-                      encoding="utf-8") as f:
-                man = json.load(f)
-            return list(man.get("quotes") or []), list(man.get("evidence_classes") or [])
-        except (OSError, ValueError):
+        man = self.store.load_manifest_verified(m.group(1))
+        if man is None:
             return None, []
+        return list(man.get("quotes") or []), list(man.get("evidence_classes") or [])
 
     def drain(self, limit: int = 0) -> dict:
         ds = sorted(glob.glob(os.path.join(self.drafts_dir, "*.md")))
@@ -788,6 +785,15 @@ class Distiller:
             mt = re.search(r"^TITLE:\s*(.+)$", out, re.M)
             md = re.search(r"^DESC:\s*(.+)$", out, re.M)
             if not (mt and md):
+                continue
+            # This is the only path that puts model prose into the canonical index,
+            # and the index feeds recall AND the resident map — so it wears the same
+            # numeric floor as every other model-written surface. The memory itself
+            # (plus the line being replaced) is the evidence.
+            bad = composed_number_violations(mt.group(1) + "\n" + md.group(1),
+                                             [{"text": body}, {"text": lines[i]}])
+            if bad:
+                _log(f"  ⚠ tidy refused {slug} — invented numbers: {bad}")
                 continue
             lines[i] = f"- [{mt.group(1).strip()[:40]}]({slug}.md) — {md.group(1).strip()[:200]}"
             fixed += 1

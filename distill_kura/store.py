@@ -850,6 +850,24 @@ class Store:
         return out
 
     # ── health ───────────────────────────────────────────────────────────
+    def load_manifest_verified(self, hexdigest: str) -> dict | None:
+        """Content-addressed means the NAME is the hash of the bytes — prove it on
+        every read. A manifest that fails the re-hash is corruption (or worse) and
+        is treated as absent: fail closed, never trust a valid-looking JSON on the
+        strength of its filename alone."""
+        path = os.path.join(self.path, "_evidence", hexdigest + ".json")
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return None
+        if hashlib.sha256(raw).hexdigest() != hexdigest:
+            return None
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+
     def doctor(self) -> dict:
         from . import fastpath          # local: fastpath is a layer ON TOP of this API
         files = {s: self.read(s) for s in self.slugs()}
@@ -871,12 +889,16 @@ class Store:
         # operator — so the reason is surfaced here, where someone is looking for it.
         invalid_tags = {n: why for n in files if (why := self.tag_problems(n))}
         missing_manifest = []
+        tampered_manifest = []
         for n in files:
             fm = self.frontmatter(n)
             ref = fm.get("evidence_manifest", "")
-            if ref.startswith("sha256:") and not os.path.exists(
-                    os.path.join(self.path, "_evidence", ref[7:] + ".json")):
+            if not ref.startswith("sha256:"):
+                continue
+            if not os.path.exists(os.path.join(self.path, "_evidence", ref[7:] + ".json")):
                 missing_manifest.append(n)
+            elif self.load_manifest_verified(ref[7:]) is None:
+                tampered_manifest.append(n)   # exists, but the bytes no longer hash to the name
         body_tokens = sum(estimate(self._split(t)[1]) for t in files.values())
         cur = {n: self.curation_state(n) for n in files}
         unsigned = sorted(n for n, c in cur.items() if c == "unsigned")
@@ -901,6 +923,7 @@ class Store:
             # tokenizers, and low is the direction that silently overflows a window.
             "index_tokens_est": estimate(idx),
             "invalid_tags": invalid_tags,
+            "tampered_manifest": tampered_manifest,
             "missing_manifest": sorted(missing_manifest),
             "tagged": sum(1 for n in files if self.tags(n)),
             # Who wrote the curation. `tampered` is always named. `unsigned` is named

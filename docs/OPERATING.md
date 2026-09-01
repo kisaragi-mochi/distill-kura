@@ -136,11 +136,13 @@ same as the weave's:
 kura distill drain && kura weave && kura pay-forward
 ```
 
-Exit codes follow the house convention: 0 = baked or restored something, 2 = every
-mouth fresh — VERIFIED fresh, with a restore and a one-token probe, never assumed —
-and 1 = a mouth failed or was busy. Busy (`skipped-locked`) is deliberately not 2:
-a held slot lock proves another runner exists, not that it is warming your etag (it
-may be finishing an older map), so it is transient and a scheduler should retry.
+Exit codes follow the house convention, with failure checked first: 1 = ANY mouth
+failed or was busy — even when others worked, because a run that baked A but found B
+locked must be retried for B, not rested on; 0 = something was baked or restored and
+the whole fleet is covered; 2 = every mouth fresh — VERIFIED fresh, with a restore
+and a one-token probe, never assumed. Busy (`skipped-locked`) is deliberately not
+fresh: a held slot lock proves another runner exists, not that it is warming your
+etag (it may be finishing an older map), so it is transient and a scheduler retries.
 A failure is loud, labeled, and never advances `_still/payforward.json`; the ledger
 itself takes a second, millisecond-held lock for its read-modify-write, because two
 mouths of one store hold two different slot locks and share one ledger file.
@@ -179,8 +181,8 @@ kura distill run    # 0 = did work, 2 = nothing worth drinking
 kura distill drain  # 0 = poured or tossed something, 2 = no drafts
 kura distill tidy   # 0 = repaired a line, 2 = index is clean
 kura prefill        # 0 = a current cloth was served, 2 = no cloth or it is stale
-kura pay-forward    # 0 = baked or restored a mouth, 2 = every mouth VERIFIED fresh,
-                    # 1 = a mouth failed or was busy (another runner held its slot: transient, retry)
+kura pay-forward    # 1 = ANY mouth failed or was busy — retry, even if others worked;
+                    # 0 = worked, whole fleet covered; 2 = every mouth VERIFIED fresh
 ```
 
 **Exit 2 means "there was nothing to do".** A scheduler must distinguish it from

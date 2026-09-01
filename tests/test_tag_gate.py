@@ -406,3 +406,45 @@ def test_a_fix_that_stays_inside_the_evidence_pours(tmp_path):
     out = d.drain()
     assert out["fixed"] == 1 and out["poured"] == 1
     assert "slow disk" in store.read_exact("archive-on-slow-disk")
+
+
+def _corrupt_manifest(store, slug):
+    import glob as _g
+    fm = store.frontmatter(slug) if store.read(slug) else {}
+    ref = fm.get("evidence_manifest", "")
+    if ref.startswith("sha256:"):
+        p = os.path.join(store.path, "_evidence", ref[7:] + ".json")
+    else:
+        p = sorted(_g.glob(os.path.join(store.path, "_evidence", "*.json")))[0]
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(" ")          # still valid JSON; the bytes no longer hash to the name
+    return p
+
+
+def test_a_fix_over_a_tampered_manifest_fails_closed(tmp_path):
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE,
+               "draw the last line": "FIX\nreason: tighten\nBODY:\nthe archive lives on the slow disk"})
+    r = d.run(chunks=1)
+    assert r["drafts"] == ["archive-on-slow-disk"]
+    import glob as _g
+    with open(sorted(_g.glob(os.path.join(store.path, "_evidence", "*.json")))[0], "a") as f:
+        f.write(" ")
+    out = d.drain()
+    assert out["fixed"] == 0 and out["poured"] == 0 and out["left"] == 1
+
+
+def test_doctor_reports_a_tampered_manifest(tmp_path):
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE, "draw the last line": "POUR\nreason: fine"})
+    d.run(chunks=1)
+    assert d.drain()["poured"] == 1
+    assert store.doctor()["tampered_manifest"] == []
+    _corrupt_manifest(store, "archive-on-slow-disk")
+    assert store.doctor()["tampered_manifest"] == ["archive-on-slow-disk"]

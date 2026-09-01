@@ -260,3 +260,29 @@ def test_extension_heading_date_is_the_journals_not_the_models(tmp_path):
     # a heading with no date at all gets the date put in front
     d.scribe = lambda task, u, max_tokens=0: "SECTION: ## the verdict log\nBODY:\nnew fact\n"   # type: ignore
     assert d._compose_extension(c)["body"].startswith("## 2026-08-20 the verdict log")
+
+
+# ── round four: the index-line rewriter wears the floor ──────────────────────
+
+def test_tidy_cannot_invent_a_number_into_the_index(tmp_path):
+    store = Store(name="m", path=str(tmp_path / "m")); store.init_files()
+    store.remember_direct("gpu-notes", "tiny", "the machine ran with its usual boards")
+    models = Models.from_config({"thinker": {"url": "http://127.0.0.1:9/v1", "model": "none"}})
+    reg = Registry(stores={"m": store}, modes={}, models=models, default="m", raw={})
+    d = Distiller(reg, store)
+    d.scribe = lambda task, u, max_tokens=0: "TITLE: 99-GPU rig\nDESC: a proper trigger about the boards"  # type: ignore
+    r = d.tidy()
+    assert r["fixed"] == 0
+    assert "99-GPU" not in store.index_text()
+
+
+def test_tidy_may_cite_the_memorys_own_numbers(tmp_path):
+    store = Store(name="m", path=str(tmp_path / "m")); store.init_files()
+    store.remember_direct("gpu-notes", "tiny", "the machine ran with 12 boards")
+    models = Models.from_config({"thinker": {"url": "http://127.0.0.1:9/v1", "model": "none"}})
+    reg = Registry(stores={"m": store}, modes={}, models=models, default="m", raw={})
+    d = Distiller(reg, store)
+    d.scribe = lambda task, u, max_tokens=0: "TITLE: 12-board rig\nDESC: a proper trigger about the boards"  # type: ignore
+    r = d.tidy()
+    assert r["fixed"] == 1
+    assert "12-board rig" in store.index_text()
