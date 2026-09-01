@@ -241,6 +241,36 @@ better map, and tells you where the weight is.
 The MCP `instructions` field is a `MAY` in the spec, and a 9,000-token index cannot
 travel through a 2KB cap regardless, so this project does not pretend otherwise.
 
+### Pay it forward
+
+Byte-stability makes a prefix cache *hold*; it does not make the first turn cheap.
+After a re-weave changes the map, the next turn pays the whole cold prefill — and on a
+slow mouth that is minutes, not milliseconds. A llama.cpp server started with
+`--slot-save-path` can save a slot's KV to disk and load it back, so the cold turn can
+be paid once, in the quiet hours, and kept across restarts:
+
+```bash
+kura pay-forward      # every [[payforward.mouths]] entry; -s / --mouth narrow, --force re-bakes
+```
+
+Measured on one machine (a 320B pure-CPU llama.cpp mouth, 16,444-token map): the bake
+796 s; the save 283 ms (1.5 GB on NVMe); the server killed, rebooted, and the restore
+655 ms — after which the first turn reprocessed 18 prompt tokens. A 13-minute cold
+turn became a 0.7-second restore. The name is the film's: the cold turn is paid
+forward, so the next turn — whoever's it is — receives it warm.
+
+The slot filename carries the map's etag (`kura-<store>-<etag…>.bin`), so the files are
+content-addressed: a fresh etag is *proven*, not assumed — a restore shows the file
+still exists, a one-token probe reads `timings.prompt_n`, small means warm — and exits
+2, nothing to do; a changed etag tries the restore first anyway (a file left by a lost
+state or a parallel runner is still the right bytes) and only then bakes, saves, and
+records `_still/payforward.json`. A mouth that cannot be reached is a loud, labeled
+skip, never a crash and never a state advance. Old slot files are not pruned — the
+slots API can save and restore a filename but cannot list the directory — and they are
+not small (KV width × map length: that 16k-token map was 1.5 GB), so sweep the
+directory by hand. `kura tend` runs this as a track after each weave; the recipe,
+including the systemd shape for mouth restarts, is in `docs/OPERATING.md`.
+
 ---
 
 ## Modes: more than one kura
@@ -431,7 +461,9 @@ moves the marks forward, so it can never lose progress.
 "Quiet" is the newest journal file's mtime. After `idle_min` (10) of silence it drains
 waiting drafts (the editor reads each one cold: pour / fix / toss), or runs one
 distilling pass when there are none; when something was poured it re-weaves the
-resident map once; and it tidies the index once per silence. A track that had nothing
+resident map once, then pays the fresh map forward into the registered mouths (a cheap
+verified skip when the weave changed nothing); and it tidies the index once per
+silence. A track that had nothing
 to do exits 2 and rests for `backoff_min` (20), so an empty journal does not spin. It
 counts work — poured, tossed, fixed, drafted — never launches. Every track's output is
 kept in `_still/tend.log`. And it writes a heartbeat that `kura doctor` reads

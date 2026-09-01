@@ -1,6 +1,33 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.3.0 — unreleased
+
+### Pay it forward (new)
+
+The resident map is byte-stable so a prefix cache can hold it — but the first turn
+after a re-weave still pays the whole cold prefill, and on a slow mouth that is
+minutes. `kura pay-forward` pays it once, in the quiet hours: right after a weave
+changes the map, it pushes the new map through each `[[payforward.mouths]]` entry (a
+llama.cpp server started with `--slot-save-path`) and saves the slot's KV to disk, so
+even a mouth restart wakes up warm. Measured on one machine — 320B pure-CPU llama.cpp,
+16,444-token map: bake 796 s, save 283 ms (1.5 GB on NVMe), restore after killing and
+rebooting the server 655 ms, first turn after it reprocessed 18 prompt tokens. Named
+after the film: the cold turn is paid forward so the next one receives it warm.
+
+Slot files are content-addressed on the map's etag (`kura-<store>-<etag…>.bin`), so a
+changed etag tries a restore before it bakes — a file left by a lost state file or a
+parallel runner is still the right bytes — and a fresh etag is proven, never assumed:
+a restore shows the file still exists, a one-token probe with `cache_prompt: true`
+reads `timings.prompt_n`, and small means warm. A restore whose 200 was a lie is
+caught by the same probe, and the probe's own prefill is saved rather than paid twice.
+An unreachable mouth is a loud, labeled skip that never advances the per-store state
+(`_still/payforward.json`, written only after a confirmed success). Old slot files are
+not pruned, because the slots API can save and restore a filename but cannot list the
+directory. Exit 2 when every mouth is fresh, so a scheduler can tell "nothing to do"
+from work; a failed mouth is exit 1, because a failure is neither. `kura tend` runs it
+as a track after each weave, counting bakes and restores — work, never launches.
+
+## 0.2.0
 
 The first release shaped by outside review: a security/isolation review, an adversarial
 pass over the fixes it produced, and a third-party reproducibility review.

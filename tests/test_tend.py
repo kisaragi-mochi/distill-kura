@@ -99,8 +99,24 @@ def test_the_humans_return_stops_a_running_track_unless_told_not_to(tmp_path):
 def test_work_is_counted_and_launches_are_not(tmp_path):
     reg, st, cfg, j = build(tmp_path)
     t = Tender(reg, st, cfg, idle_min=10)
-    assert set(t.done) == {"poured", "tossed", "fixed", "drafts", "woven", "tidied"}
+    assert set(t.done) == {"poured", "tossed", "fixed", "drafts", "woven", "paid", "tidied"}
     assert not any(k.endswith("_runs") or "launch" in k for k in t.done)
+
+
+def test_payforward_is_scheduled_after_a_weave_and_only_then(tmp_path):
+    """The map cannot have changed without a weave, so the payforward track waits for
+    one — and runs once per weave, not once per tick (a mouth restart is the systemd
+    hook's job, not the watcher's)."""
+    reg, st, cfg, j = build(tmp_path)
+    t = Tender(reg, st, cfg, idle_min=10)
+    now = time.time()
+    for track in ("drain", "distill", "tidy"):
+        t.next_ok[track] = now + 9999           # only the question at hand remains
+    assert t.choose(now) is None                # no weave yet → no payforward
+    t._woven_this_silence = True
+    assert t.choose(now) == "payforward"
+    t._paid_this_silence = True
+    assert t.choose(now) is None                # once per weave, not once per tick
 
 
 def test_doctor_reports_a_dead_watcher(tmp_path):

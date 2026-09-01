@@ -103,6 +103,70 @@ the canonical `MEMORY.md`, or the memory itself, and re-weave.
 Write the memory with `kura remember` on a `direct-allowed` store, or let the distiller
 produce it.
 
+## Paying the map forward
+
+A fresh map is minutes of cold prefill on a slow mouth — measured on one machine (320B
+pure-CPU llama.cpp, 16,444-token map): 796 s to bake, 283 ms to save the slot (1.5 GB
+on NVMe), 655 ms to restore it after killing and rebooting the server, and the first
+turn after the restore reprocessed 18 prompt tokens. `kura pay-forward` pays that bake
+once, in the quiet hours, and keeps it on disk.
+
+The mouth must be a llama.cpp server started with `--slot-save-path` — without it the
+save fails (loudly, with this flag named in the error) and every run pays the bake
+again:
+
+```bash
+llama-server -m model.gguf --slot-save-path /var/lib/llama/slots ...
+```
+
+```toml
+[[payforward.mouths]]
+name = "cpu-mouth"
+url = "http://127.0.0.1:8014"   # server BASE — the slots API lives beside /v1, not under it
+store = "main"                  # whose map this mouth wears
+# slot = 0                      # the llama.cpp slot saved from / restored into
+# model = "local"               # alias for the one-token probe call
+# api_key_env = "MOUTH_KEY"     # read from the environment, never stored here
+```
+
+`kura tend` already runs it as a track after each weave. By hand, the shape is the
+same as the weave's:
+
+```bash
+kura distill drain && kura weave && kura pay-forward
+```
+
+Exit codes follow the house convention: 0 = baked or restored something, 2 = every
+mouth fresh (verified with a restore and a one-token probe, not assumed), 1 = a mouth
+failed — and a failure is loud, labeled, and never advances `_still/payforward.json`.
+
+A mouth restart wakes up cold; the slot file makes warming it a sub-second restore, so
+hang a oneshot off the mouth's unit rather than waiting for the next weave:
+
+```ini
+# ~/.config/systemd/user/kura-payforward.service
+[Unit]
+Description=distill-kura pay-forward
+After=llama-mouth.service
+BindsTo=llama-mouth.service
+
+[Service]
+Type=oneshot
+Environment=KURA_CONFIG=%h/kura/kura.toml
+ExecStart=/usr/bin/python3 -m distill_kura.cli pay-forward
+SuccessExitStatus=2
+
+[Install]
+WantedBy=llama-mouth.service
+```
+
+`SuccessExitStatus=2` because "every mouth fresh" is the good outcome, not a failure.
+
+Old slot files are not pruned: the slots API can save and restore a filename but
+cannot list the directory, so pruning from here would be a guess about files it cannot
+see. They scale with map length times the model's KV width (that 16k-token map was
+1.5 GB), so sweep `--slot-save-path` by hand when it grows.
+
 ## Scheduling by hand, and exit codes
 
 ```bash
@@ -110,6 +174,7 @@ kura distill run    # 0 = did work, 2 = nothing worth drinking
 kura distill drain  # 0 = poured or tossed something, 2 = no drafts
 kura distill tidy   # 0 = repaired a line, 2 = index is clean
 kura prefill        # 0 = a current cloth was served, 2 = no cloth or it is stale
+kura pay-forward    # 0 = baked or restored a mouth, 2 = every mouth fresh, 1 = a mouth failed
 ```
 
 **Exit 2 means "there was nothing to do".** A scheduler must distinguish it from

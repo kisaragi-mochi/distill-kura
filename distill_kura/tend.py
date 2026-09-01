@@ -2,10 +2,12 @@
 
 What it does, in order, every time the house has been quiet for `idle_min`:
 
-    drain   drafts waiting → the editor reads each one cold and pours / fixes / tosses
-    distill no drafts     → one pass over the journal: sip → spot → gate → stage
-    weave   something poured this silence → re-weave the resident map, once
-    tidy    once per silence, only if the index has mechanically ragged lines
+    drain      drafts waiting → the editor reads each one cold and pours / fixes / tosses
+    distill    no drafts     → one pass over the journal: sip → spot → gate → stage
+    weave      something poured this silence → re-weave the resident map, once
+    payforward after each weave → pay the map's cold prefill into the registered
+               mouths (`kura pay-forward`); an unchanged map is a cheap check, exit 2
+    tidy       once per silence, only if the index has mechanically ragged lines
 
 "Quiet" is the simplest signal there is: the newest journal file's mtime. No model is
 asked whether the human is busy; a conversation file that has not changed in ten
@@ -49,7 +51,7 @@ from .distill.sources import discover_all
 from .registry import Registry
 from .store import Store
 
-TRACKS = ("drain", "distill", "weave", "tidy")
+TRACKS = ("drain", "distill", "weave", "payforward", "tidy")
 
 
 def _log(path: str, s: str) -> None:
@@ -86,8 +88,10 @@ class Tender:
         self.next_ok: dict[str, float] = {t: 0.0 for t in TRACKS}
         self.proc: subprocess.Popen | None = None
         self.proc_track = ""
-        self.done = {"poured": 0, "tossed": 0, "fixed": 0, "drafts": 0, "woven": 0, "tidied": 0}
+        self.done = {"poured": 0, "tossed": 0, "fixed": 0, "drafts": 0, "woven": 0,
+                     "paid": 0, "tidied": 0}
         self._woven_this_silence = False
+        self._paid_this_silence = False
         self._tidied_this_silence = False
 
     # ── the signal ────────────────────────────────────────────────────────
@@ -108,7 +112,8 @@ class Tender:
             base += ["-c", self.config_path]
         base += ["-s", self.store.name]
         return base + {"drain": ["distill", "drain"], "distill": ["distill", "run", "--chunks", "1"],
-                       "weave": ["weave"], "tidy": ["distill", "tidy"]}[track]
+                       "weave": ["weave"], "payforward": ["pay-forward"],
+                       "tidy": ["distill", "tidy"]}[track]
 
     def start(self, track: str) -> None:
         _log(self.log_path, f"→ {track}")
@@ -156,6 +161,11 @@ class Tender:
         elif track == "weave":
             self.done["woven"] += 1
             self._woven_this_silence = True
+            self._paid_this_silence = False    # a fresh weave may have changed the map
+        elif track == "payforward":
+            # `worked` = bakes + restores. A run of skipped-fresh mouths exits 2 and
+            # never reaches here — work is counted, launches are not.
+            self.done["paid"] += int(r.get("worked") or 0)
         elif track == "tidy":
             self.done["tidied"] += int(r.get("fixed") or 0)
         return True
@@ -178,6 +188,11 @@ class Tender:
         order = (["drain"] if have_drafts else ["distill"])
         if not self._woven_this_silence and self.done["poured"]:
             order.append("weave")
+        if self._woven_this_silence and not self._paid_this_silence:
+            # Only after a weave: a map that was not re-woven cannot have changed, and
+            # a mouth restart is the systemd hook's job (docs/OPERATING.md), not the
+            # watcher's. When the weave changed nothing this is a cheap check → exit 2.
+            order.append("payforward")
         if not self._tidied_this_silence:
             order.append("tidy")
         for t in order:
@@ -212,6 +227,7 @@ class Tender:
                 _log(self.log_path, "the human is back: " + ", ".join(f"{k} {v}" for k, v in self.done.items() if v))
             self.done = {k: 0 for k in self.done}
             self._woven_this_silence = False
+            self._paid_this_silence = False
             self._tidied_this_silence = False
         idle = now - stamp if stamp else 0.0
         if stamp and idle >= self.idle_s and not self.proc:
@@ -219,6 +235,8 @@ class Tender:
             if t:
                 if t == "tidy":
                     self._tidied_this_silence = True
+                if t == "payforward":
+                    self._paid_this_silence = True
                 self.start(t)
         self.beat(idle, stamp)
         return stamp

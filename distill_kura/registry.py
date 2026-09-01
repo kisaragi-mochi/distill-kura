@@ -48,6 +48,11 @@ With no config at all, `$KURA_DIR` (or `./memory`) becomes a single store named
     fresh_days = 14                      # memories touched this recently keep full lines
     pinned_types = ["feedback", "user"]  # these types always keep full lines
     trigger_tokens = 24                  # budget for one trimmed line
+
+    [[payforward.mouths]]                # a mouth `kura pay-forward` bakes the map into
+    name = "cpu-mouth"
+    url = "http://127.0.0.1:8014"        # llama.cpp server BASE (slots API lives beside /v1)
+    store = "main"                       # whose map this mouth wears
 """
 from __future__ import annotations
 
@@ -81,6 +86,12 @@ _PREFILL_TYPES = {"window_tokens": int, "budget_fraction": float, "hard_fraction
 # Tier zero of recall (`fastpath.py`). `gate` is the honesty bar: a hit below it is
 # silence, and silence goes to the thinker.
 _FASTPATH_TYPES = {"enabled": bool, "gate": (int, float)}
+# One mouth `kura pay-forward` bakes the resident map into (`payforward.py`). `url` is
+# the llama.cpp-compatible server's BASE — the slots API lives beside /v1, not under it
+# — and `store` names whose map the mouth wears.
+_MOUTH_TYPES = {"name": str, "url": str, "store": str, "slot": int, "model": str,
+                "api_key_env": str}
+_MOUTH_REQUIRED = ("name", "url", "store")
 
 
 def _check_table(where: str, table: dict, types: dict) -> None:
@@ -167,6 +178,49 @@ def _check_paths(stores: dict[str, Store], raw: dict) -> None:
                     f"text as the human's words. Move the journal root outside the store.")
 
 
+def _check_mouths(raw: dict, stores: dict[str, Store]) -> None:
+    """Validate `[[payforward.mouths]]` at load, the way [fastpath] and the store
+    tables are: a bad mouth throws with the offending value named, because a silently
+    skipped mouth looks exactly like a fleet that is warm."""
+    pf = raw.get("payforward") or {}
+    unknown = {k for k in pf if k != "mouths" and not k.startswith("x_")}
+    if unknown:
+        raise ValueError(f"[payforward] has unknown key(s) {sorted(unknown)}. "
+                         f"Known: ['mouths']. Use an `x_`-prefixed name for your own "
+                         f"extensions.")
+    mouths = pf.get("mouths") or []
+    if not isinstance(mouths, list):
+        raise ValueError(f"[payforward] mouths must be an array of tables "
+                         f"([[payforward.mouths]]), got {type(mouths).__name__}")
+    seen: set[str] = set()
+    for i, m in enumerate(mouths):
+        where = f"payforward.mouths[{i}]"
+        if not isinstance(m, dict):
+            raise ValueError(f"[{where}] must be a table ([[payforward.mouths]])")
+        for k in _MOUTH_REQUIRED:
+            if not m.get(k):
+                raise ValueError(f"[{where}] needs `{k}`")         # fail loudly at load
+        unknown = {k for k in m if k not in _MOUTH_TYPES and not k.startswith("x_")}
+        if unknown:
+            raise ValueError(f"[{where}] has unknown key(s) {sorted(unknown)}. "
+                             f"Known: {sorted(_MOUTH_TYPES)}. "
+                             f"Use an `x_`-prefixed name for your own extensions.")
+        _check_table(where, m, _MOUTH_TYPES)
+        if isinstance(m.get("slot"), int) and m["slot"] < 0:
+            raise ValueError(f"[{where}] slot must be >= 0, got {m['slot']}")
+        name = str(m["name"])
+        if name in seen:
+            raise ValueError(f"[payforward] two mouths named {name!r}: the state file "
+                             f"is keyed on the name, so the second would wear the "
+                             f"first one's record of what was baked.")
+        seen.add(name)
+        if m["store"] not in stores:
+            # A mode name is refused too, deliberately: a mouth is standing hardware
+            # wearing ONE store's map, not a session-level selector.
+            raise ValueError(f"[{where}] store = {m['store']!r} is not a configured "
+                             f"store. Known: {sorted(stores)}")
+
+
 @dataclass
 class Registry:
     stores: dict[str, Store]
@@ -240,6 +294,7 @@ class Registry:
                     f"selector {m!r} would resolve to the store, not this mode. "
                     f"Rename one of them.")
         _check_paths(stores, raw)
+        _check_mouths(raw, stores)
         models_cfg = raw.get("models")
         if not models_cfg and os.environ.get("KURA_THINKER_URL"):      # legacy env
             models_cfg = {"thinker": {"url": os.environ["KURA_THINKER_URL"],
@@ -320,6 +375,15 @@ class Registry:
         return {**cfg, **own} if isinstance(own, dict) else cfg
 
     @property
+    def payforward_mouths(self) -> list[dict]:
+        """The mouths `kura pay-forward` serves, defaults applied. Validated at load,
+        so a mouth returned here is complete and names a real store."""
+        return [{"name": str(m["name"]), "url": str(m["url"]), "store": str(m["store"]),
+                 "slot": int(m.get("slot", 0)), "model": str(m.get("model", "default")),
+                 "api_key_env": m.get("api_key_env")}
+                for m in (self.raw.get("payforward") or {}).get("mouths") or []]
+
+    @property
     def fastpath_cfg(self) -> dict:
         return dict(self.raw.get("fastpath") or {})
 
@@ -341,5 +405,6 @@ class Registry:
             "model_profiles": sorted(self.profiles),
             "prefill": self.prefill_cfg,
             "fastpath": self.fastpath_cfg,
+            "payforward": {"mouths": self.payforward_mouths},
             "config": self.config_path,
         }

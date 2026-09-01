@@ -153,6 +153,21 @@ gate = 1.0            # honesty bar for the top hit; raise it to make tier zero 
 # [stores.eq.fastpath]
 # enabled = false
 
+# ── pay it forward ──────────────────────────────────────────────────────────
+# Bake the resident map into a slow mouth's KV cache in the quiet hours, so the first
+# turn after a re-weave — or a mouth restart — is warm. The mouth is a llama.cpp
+# server started with --slot-save-path. Measured on one machine (320B pure-CPU,
+# 16,444-token map): bake 796 s, save 283 ms (1.5 GB slot file), restore after a
+# reboot 655 ms. `kura pay-forward` runs it; `kura tend` runs it after each weave.
+#
+# [[payforward.mouths]]
+# name = "cpu-mouth"
+# url = "http://127.0.0.1:8014"   # server BASE: the slots API lives beside /v1, not under it
+# store = "main"                  # whose map this mouth wears
+# slot = 0                        # the llama.cpp slot saved from / restored into
+# model = "local"                 # alias for the one-token probe call
+# api_key_env = "MOUTH_KEY"       # read from the environment, never stored here
+
 # ── the distiller ───────────────────────────────────────────────────────────
 # Where the raw material comes from. Keys are source adapters:
 #   claude = a directory of Claude Code .jsonl transcripts

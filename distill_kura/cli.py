@@ -10,6 +10,7 @@
     kura doctor [-s eq]               health of a store (--all for every one)
     kura weave [-s eq] [--status]     re-weave the resident index (three-layer cloth)
     kura prefill [-s eq]              print the standing block a host should inject
+    kura pay-forward [-s eq]          bake the map into each mouth's KV slot, save it to disk
     kura bench compress [-s eq]       what the store cost against the journal it came from
     kura init <name> --path DIR       create a store and print the TOML to paste
     kura distill catchup [-s eq]      start from today: mark every journal drunk up to now
@@ -119,6 +120,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("prefill", help="print the standing index block")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("pay-forward", help="pay the map's cold prefill forward: bake it "
+                                           "into each mouth's KV slot and save the slot to disk")
+    p.add_argument("--mouth", help="only this mouth (by [[payforward.mouths]] name)")
+    p.add_argument("--force", action="store_true", help="re-bake even when the etag says fresh")
+
     p = sub.add_parser("bench", help="measure, rather than claim")
     bsub = p.add_subparsers(dest="bcmd")
     b = bsub.add_parser("compress", help="store_ratio and map_ratio for a store")
@@ -178,6 +184,26 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(_store(reg, a.store).doctor(), ensure_ascii=False, indent=1))
         return 0
+
+    if a.cmd == "pay-forward":
+        # Handled before the store default resolves: no `-s` means EVERY mouth, not
+        # the default store's.
+        from . import payforward
+        if a.store:
+            _store(reg, a.store)                # the shared loud unknown-store error
+        try:
+            r = payforward.run(reg, store=a.store, mouth=a.mouth, force=a.force)
+        except KeyError as e:
+            sys.exit(e.args[0])                 # a typo'd --mouth must not read as "all warm"
+        for x in r["results"]:
+            if x.get("error"):
+                print(f"⚠ mouth '{x['mouth']}': {x['did']} — {x['error']}", file=sys.stderr)
+        print(json.dumps(r, ensure_ascii=False))
+        if r["worked"]:
+            return 0
+        if r["failed"]:
+            return 1                            # a failure is not "nothing to do"
+        return 2                                # every mouth fresh — the scheduler may rest
 
     store = _store(reg, a.store)
 
