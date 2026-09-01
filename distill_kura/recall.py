@@ -136,7 +136,10 @@ def recall(store: Store, thinker: Endpoint | None, question: str, hops: int = 1,
         if picked is None:
             picked, how = pick_by_words(store, question, top), "words(thinker unreachable)"
         elif not picked:
-            picked, how = pick_by_words(store, question, top), "meaning→none→words"
+            # The thinker read the whole index and named nothing. That is an answer —
+            # overriding it with word overlap would hand back look-alikes for a
+            # question this store knows nothing about. Refusal is a feature.
+            how = "meaning→none"
         else:
             how = "meaning"
     order = store.walk(picked, hops)

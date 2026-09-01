@@ -97,6 +97,46 @@ def gate(cands: list[dict], segs: list[Segment], store_text: str = "") -> tuple[
     return kept, dropped, ideas
 
 
+# ── the composed text, re-checked ────────────────────────────────────────
+#
+# The gate above verifies what the CANDIDATE brought. The scribe then writes the
+# final text — and the scribe is a model too: told "write no numbers", it can still
+# write "the GPU count was 12" with nothing behind it. The mark (HMAC) proves who
+# staged a draft, not that its claims are grounded. So the numbers get their own
+# deterministic floor: every numeric token of two or more digits in the final text
+# must already exist in a verified quote, or in the evidence's own date. Substring
+# match, like the quote check: permissive about form, closed against invention —
+# which also means a DERIVED number (a ratio the scribe computed) is refused, on
+# purpose: arithmetic the evidence never did is a claim the evidence never made.
+
+_NUM_TOKEN = re.compile(r"\d[\d,.:/-]*\d|\d")
+
+
+def _digits(s: str) -> str:
+    return re.sub(r"\D", "", s)
+
+
+def composed_number_violations(text: str, evidence: list[dict], allowed: str = "") -> list[str]:
+    """→ numeric tokens the final text claims that its evidence never contained.
+
+    `allowed` is extra text whose numbers are legitimate (the evidence's date, which
+    the pipeline itself stamps). Tokens with fewer than two digits are ignored —
+    "three things, 2 of them hard" is prose, not a measurement.
+    """
+    hay = norm(" ".join(str(e.get("text", "")) for e in evidence)) + " " + allowed
+    hay_digits = _digits(hay)
+    bad = []
+    for m in _NUM_TOKEN.finditer(text):
+        t = m.group(0).strip(",.:/-")
+        if len(_digits(t)) < 2:
+            continue
+        if t in hay or _digits(t) in hay_digits:
+            continue
+        if t not in bad:
+            bad.append(t)
+    return bad
+
+
 # ── tags: a model proposes, the evidence decides ─────────────────────────
 #
 # A tag is a word, but some words are claims. `entrusted` says the human asked for this

@@ -150,3 +150,40 @@ def test_attribution_check_is_mechanical():
     assert attributes_to_human("ケンが決めた", [])
     assert not attributes_to_human("the user decided to drop it", ["USER"])
     assert not attributes_to_human("the index was moved", [])
+
+
+# ── the composed text's numbers (gate_version 3) ────────────────────────────
+#
+# Every case is a way a scribe actually invents: a measurement from nowhere, a
+# ratio it computed itself, a rounded "improvement" of a real figure.
+
+def test_composed_invented_number_is_caught():
+    ev = [{"class": "TOOL", "text": "decode 51.43 t/s held while streaming"}]
+    from distill_kura.distill.gate import composed_number_violations
+    assert composed_number_violations("the run reached 49 TPS on 12 GPUs", ev) == ["49", "12"]
+
+
+def test_composed_number_from_evidence_passes():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "decode 51.43 t/s held; port :8085 answered"}]
+    assert composed_number_violations("held 51.43 t/s, served on :8085", ev) == []
+
+
+def test_composed_number_survives_formatting_drift():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "table is 51,200,245,760 params"}]
+    assert composed_number_violations("a 51200245760-param table", ev) == []
+
+
+def test_composed_derived_ratio_is_refused_on_purpose():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "before 899 ms, after 2.3 ms"}]
+    assert composed_number_violations("that is roughly 390x faster", ev) == ["390"]
+
+
+def test_composed_date_and_small_numbers_are_not_claims():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "USER", "text": "please keep the archive on the slow disk"}]
+    out = composed_number_violations("## 2026-09-01 decided; 3 things to check",
+                                     ev, allowed="2026-09-01")
+    assert out == []

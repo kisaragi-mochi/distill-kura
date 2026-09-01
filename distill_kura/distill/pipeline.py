@@ -33,7 +33,8 @@ from ..tokens import estimate
 from ..registry import Registry
 from ..store import ANNOTATION_KEYS, FROZEN, Store, normalize_tags
 from . import prompts
-from .gate import attributes_to_human, gate, norm, salvage, verify_tags
+from .gate import (attributes_to_human, composed_number_violations, gate, norm,
+                   salvage, verify_tags)
 from .seeds import Seeds
 from .sources import Segment, as_evidence, discover_all, source_for
 from .watermark import Watermarks
@@ -348,22 +349,34 @@ class Distiller:
         if "USER" not in c["classes"]:
             warn += ("⚠️ There is NOT ONE word of the human's in this candidate. Do not write "
                      "that they decided, chose, or instructed anything.\n")
-        out = self.scribe(prompts.SCRIBE_SYS,
-                          f"CANDIDATE: {c.get('topic')}\nKIND: {c.get('kind')}\n"
-                          f"The distiller's reading (**not evidence — never cite it**): "
-                          f"{c.get('why')}\n{warn}\n"
-                          f"=== EVIDENCE (this is everything) ===\n{ev}\n\n"
-                          f"=== NEARBY MEMORIES (candidates for [[links]]) ===\n"
-                          f"{hints or '(nothing close)'}\n")
-        if not out:
-            return None
-        slug = re.search(r"^SLUG:\s*(.+)$", out, re.M)
-        title = re.search(r"^TITLE:\s*(.+)$", out, re.M)
-        desc = re.search(r"^DESC:\s*(.+)$", out, re.M)
-        body = re.search(r"^BODY:\s*\n(.*)$", out, re.S | re.M)
-        if not (slug and desc and body):
-            return None
-        text = desc.group(1) + "\n" + body.group(1)
+        user = (f"CANDIDATE: {c.get('topic')}\nKIND: {c.get('kind')}\n"
+                f"The distiller's reading (**not evidence — never cite it**): "
+                f"{c.get('why')}\n{warn}\n"
+                f"=== EVIDENCE (this is everything) ===\n{ev}\n\n"
+                f"=== NEARBY MEMORIES (candidates for [[links]]) ===\n"
+                f"{hints or '(nothing close)'}\n")
+        # The scribe is a model: its finished text gets the same deterministic floor
+        # as the candidate's quotes did. One retry with the violations named, then drop.
+        for attempt in (1, 2):
+            out = self.scribe(prompts.SCRIBE_SYS, user)
+            if not out:
+                return None
+            slug = re.search(r"^SLUG:\s*(.+)$", out, re.M)
+            title = re.search(r"^TITLE:\s*(.+)$", out, re.M)
+            desc = re.search(r"^DESC:\s*(.+)$", out, re.M)
+            body = re.search(r"^BODY:\s*\n(.*)$", out, re.S | re.M)
+            if not (slug and desc and body):
+                return None
+            text = desc.group(1) + "\n" + body.group(1)
+            invented = composed_number_violations(text, c["evidence"], self._evidence_date())
+            if not invented:
+                break
+            if attempt == 2:
+                _log(f"      ✗ composed text invents numbers the evidence lacks: {invented}")
+                return None
+            user += ("\n⚠️ REJECTED — these numbers appear NOWHERE in the evidence: "
+                     f"{', '.join(invented)}. Remove them, or use only numbers the evidence "
+                     "itself contains. Do not compute new ones.\n")
         _, plain = _split_draft(body.group(1))
         return {"slug": re.sub(r"[^a-z0-9-]+", "-", slug.group(1).strip().lower()).strip("-")[:48],
                 "title": (title.group(1).strip()[:40] if title else ""),
@@ -424,6 +437,10 @@ class Distiller:
         if not body:
             return None
         _, plain = _split_draft(body.group(1))
+        invented = composed_number_violations(plain, c["evidence"], date)
+        if invented:
+            _log(f"      ✗ extension invents numbers the evidence lacks: {invented}")
+            return None
         # The heading's date is the evidence's date, mechanically. 30 of 39 extension
         # headings in the house were dated before the distiller existed; one said 2025.
         head = section.group(1).strip() if section else f"## {date}"
@@ -456,9 +473,10 @@ class Distiller:
     def _write_manifest(self, d: dict, source: str, key: str) -> str:
         manifest = {
             # 2: tags, the evidence each claiming tag rests on, the ones refused and
-            # why, and the three curation sentences. Additive — a v1 manifest is
-            # still read by everything that reads manifests.
-            "gate_version": 2,
+            # why, and the three curation sentences. 3: the composed text's numbers
+            # are re-verified against the evidence before staging. Additive — a v1
+            # manifest is still read by everything that reads manifests.
+            "gate_version": 3,
             "source_key": key,
             "source_file": os.path.basename(source),
             "source_sha256": self._source_digest(source),

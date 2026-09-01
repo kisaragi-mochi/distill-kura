@@ -359,8 +359,10 @@ call fail on `undefined.prepare`. The plugin therefore declares the package as a
 physical duplicate can still require deduplication; see the install checks in
 [`examples/dsh-presets/`](examples/dsh-presets/).
 
-Leave `allowSwitch` at its default and the agent also gets `kura_use`, so it can move
-between kura mid-conversation without a preset change. Tools: `kura_recall`,
+`allowSwitch` has no fixed default: it follows `store`. A preset that names a store is
+bound to it — no `kura_use`, no drifting mid-conversation — and only an explicit
+`allowSwitch: true` reopens that door. Name no store and the session is free: every
+tool takes a `store` argument and `kura_use` switches for the session. Tools: `kura_recall`,
 `kura_read`, `kura_doctor`, `kura_list`, `kura_use`, and `kura_remember` (only when the
 store is writable). Full wiring, including the MCP bridge and the `isolate` realm rule
 for service rows, is in [`examples/dsh-presets/`](examples/dsh-presets/).

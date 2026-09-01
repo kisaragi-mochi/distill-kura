@@ -391,3 +391,13 @@ def test_claim_reserves_before_reading(tmp_path):
     second = w.claim([str(j)], budget_chars=100_000, min_chars=1000)
     assert first is not None and second is not None
     assert second[1] > first[1]          # different starting offsets
+
+
+def test_recall_respects_an_explicit_nothing(tmp_path):
+    # The thinker read the whole index and answered []. Word overlap must NOT be
+    # allowed to override that with look-alikes — refusal is an answer.
+    s = a_store(tmp_path)
+    t = StubThinker("[]")
+    d = recall(s, t, "cooling ssd", hops=0, fastpath_cfg={"enabled": False})
+    assert d["how"] == "meaning→none"
+    assert d["picked"] == [] and d["walked"] == []

@@ -27,6 +27,30 @@ directory. Exit 2 when every mouth is fresh, so a scheduler can tell "nothing to
 from work; a failed mouth is exit 1, because a failure is neither. `kura tend` runs it
 as a track after each weave, counting bakes and restores — work, never launches.
 
+### The gate reaches the composed text (gate_version 3)
+
+The candidate's quotes were verified; the scribe's finished text was not — and the
+scribe is a model too: told "write no numbers", it could still write one with nothing
+behind it. Now every numeric token of two or more digits in the final DESC+BODY must
+already exist in a verified quote or in the evidence's own date, checked by the same
+deterministic substring floor as the quotes themselves. One retry with the violations
+named, then the draft is dropped. A derived number — a ratio the scribe computed — is
+refused on purpose: arithmetic the evidence never did is a claim the evidence never
+made. (Found in an outside review; confirmed against the code before fixing.)
+
+### An explicit nothing is an answer
+
+`pick_by_meaning` distinguished "the thinker is unreachable" (None) from "the thinker
+read the whole index and named nothing" ([]) — and recall then overrode the second
+with word overlap anyway, handing back look-alikes for questions the store knows
+nothing about. The explicit empty pick is now respected (`how: "meaning→none"`);
+word overlap remains the fallback only when the thinker is unreachable.
+
+### Docs
+
+`allowSwitch` in the README now matches the code: it follows `store` (naming a store
+binds the preset, fail-closed) rather than defaulting open.
+
 ## 0.2.0
 
 The first release shaped by outside review: a security/isolation review, an adversarial
