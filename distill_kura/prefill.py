@@ -133,34 +133,52 @@ def build(store: Store, loom: Loom | None = None, header: str | None = None,
             "the prefill header contains something that changes over time "
             "(a date, a clock, a session id). Anything volatile placed in front of the "
             "index re-prices the whole prefix on every turn — put it after the block.")
+    frame_open, frame_close = BEGIN.format(store=store.name), END
     body, escaped = _escape_braces(body)
+    map_text = f"{frame_open}\n{head}\n{body.rstrip()}\n{frame_close}\n"
+    map_tokens = estimate(map_text)
+    stats["map_tokens"] = map_tokens
     budget = int(window_tokens * fraction)
     ceiling = int(window_tokens * hard_fraction)
 
-    frame_open, frame_close = BEGIN.format(store=store.name), END
-    text = f"{frame_open}\n{head}\n{body.rstrip()}\n{frame_close}\n"
-    if trail is not None:
-        # Appended AFTER the frame: the map's bytes end where the trail begins, so
-        # a trail that changed alone (the fresh window slides with time, no store
-        # write involved) leaves the map's prefix byte-identical for the cache.
-        t = trail.text_on_disk()
-        if t is None:
-            stats["trail"] = "absent (run `kura trail`)"
-        elif trail.is_stale():
-            stats["trail"] = "stale — not appended; one rebuild heals it"
-            stats["trail_stale"] = True
-        else:
-            text = text + t
-            stats["trail"] = "appended"
-    tokens = estimate(text)
-    truncated = False
-    if tokens > ceiling:
-        # Refuse loudly rather than cutting the map down to size.
+    if map_tokens > ceiling:
+        # Refuse loudly rather than cutting the map down to size. The MAP alone
+        # over the hard ceiling: nothing fits, and the honest stub says so.
         text = (f"{frame_open}\n"
-                + TOO_BIG.format(label=store.label, tokens=tokens, ceiling=ceiling)
+                + TOO_BIG.format(label=store.label, tokens=map_tokens, ceiling=ceiling)
                 + f"{frame_close}\n")
         truncated = True
-        tokens = estimate(text)
+        if trail is not None:
+            stats["trail"] = "omitted: the map alone is over the ceiling"
+    else:
+        # The map fits; it is the floor. The trail rides after it, and the MAP
+        # outranks the trail at the ceiling: an optional 200-token trail must
+        # never take the whole world-map down with it.
+        text = map_text
+        truncated = False
+        if trail is not None:
+            # Appended AFTER the frame: the map's bytes end where the trail
+            # begins, so a trail that changed alone (the fresh window slides
+            # with time, no store write involved) leaves the map's prefix
+            # byte-identical for the cache.
+            t = trail.text_on_disk()
+            if t is None:
+                stats["trail"] = "absent (run `kura trail`)"
+            elif trail.is_stale():
+                stats["trail"] = "stale — not appended; one rebuild heals it"
+                stats["trail_stale"] = True
+            else:
+                t, esc = _escape_braces(t)
+                escaped += esc    # the trail rides the same escape: {{today}} in an
+                                  # index line must not come back alive through it
+                candidate = map_text + t
+                if estimate(candidate) > ceiling:
+                    stats["trail"] = "omitted: ceiling — the map stands alone"
+                else:
+                    text = candidate
+                    stats["trail"] = "appended"
+                    stats["trail_tokens"] = estimate(t)
+    tokens = estimate(text)
     stats.update({
         "tokens_est": tokens,
         "window_tokens": window_tokens,

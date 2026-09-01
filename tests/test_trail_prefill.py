@@ -107,3 +107,42 @@ def test_trail_tokens_is_a_known_prefill_key(tmp_path):
                    '[models.thinker]\nurl = "http://127.0.0.1:9/v1"\n'
                    % (tmp_path / "m"), encoding="utf-8")
     assert Registry.load(str(cfg)) is not None
+
+
+# ── the reviewer's round: the map outranks the trail; the trail wears the escape ──
+
+def test_a_ceiling_crossing_trail_steps_aside_not_the_map(tmp_path):
+    """An optional ~200-token trail used to take the whole world-map down: the
+    combined block crossed the hard ceiling and BOTH were replaced by the
+    TOO_BIG stub. The map is the floor; the trail is what leaves."""
+    s = build(tmp_path)
+    for i in range(3, 30):                       # a map that fits, but only just
+        s.remember_direct(f"fresh-{i}", f"another recent work item {i}",
+                          f"dated {time.strftime('%Y-%m-%d')}")
+    t = Trail(s, loom=_loom(s))
+    assert t.write()["written"] is True
+    # a ceiling that the MAP alone fits under but map+trail does not
+    map_tokens = prefill.build(s, _loom(s)).stats["tokens_est"]
+    window = 100000
+    ceiling_just_above_map = (map_tokens + 40) / window
+    pf = prefill.build(s, _loom(s), window_tokens=window, fraction=0.9,
+                       hard_fraction=ceiling_just_above_map, trail=t)
+    assert pf.stats["map_tokens"] <= pf.stats["ceiling_tokens"]
+    assert pf.stats["trail"] == "omitted: ceiling — the map stands alone"
+    assert "<<<END KURA-MAP>>>" in pf.text and "<<<KURA-TRAIL>>>" not in pf.text
+    assert pf.stats.get("over_ceiling") is not True, "the map was NOT stubbed"
+
+
+def test_the_trail_rides_the_same_brace_escape(tmp_path):
+    """The map body escapes {{...}} at render time; a raw trail would smuggle the
+    same braces back into the prompt one block later."""
+    s = build(tmp_path)
+    s.remember_direct("braced", "a trigger mentioning {{today}} plainly",
+                      f"dated {time.strftime('%Y-%m-%d')}")
+    t = Trail(s, loom=_loom(s))
+    assert t.write()["written"] is True
+    assert "{{today}}" in (t.text_on_disk() or "")     # the file keeps its braces
+    pf = prefill.build(s, _loom(s), trail=t)
+    assert "{{" not in pf.text
+    assert pf.stats["braces_escaped"] >= 1
+    assert "{{today}}" in s.read_exact("braced")        # the memory itself untouched
