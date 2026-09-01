@@ -43,9 +43,12 @@ the stale cloth fresh, and pay-forward bakes the stale map into KV. So the weave
 the sha256 of the index text it read, `persist()` re-hashes the index under the store's
 write lock and refuses a cloth whose source has moved, and `is_stale()` compares hashes,
 never mtimes — of the source AND of the cloth itself, so a corrupted or hand-edited
-cloth cannot wear a valid freshness stamp. The hashes live in a sidecar
-(`<cloth>.state.json`), not in the cloth text: the injected map must stay byte-stable
-and free of anything volatile.
+cloth cannot wear a valid freshness stamp. And because the weave's real input is wider
+than the index text — `layer_of()` reads memory types and body dates too — the store's
+revision counter is captured beside the hash: a body-only change leaves the index
+byte-identical and slips any hash, but it bumps the revision. The record lives in a
+sidecar (`<cloth>.state.json`), not in the cloth text: the injected map must stay
+byte-stable and free of anything volatile.
 """
 from __future__ import annotations
 
@@ -462,16 +465,23 @@ class Loom:
         """Build the cloth. `generate=False` reports what the current ledger would give
         without calling a model — that is what `status` uses, so asking the loom how big
         the cloth is never costs a GPU second."""
+        # The revision is captured BEFORE the index is read: a mutation landing in
+        # between then shows as revision-moved at persist time, which is the safe
+        # direction (a refused persist costs one re-weave; a missed one costs a lie).
+        revision = self.store.revision()
         raw = self.store.index_text()
         hooks = self._hooks()
         now = time.time()
-        # The hash of the exact index text this cloth is woven from. `persist()`
-        # verifies it against the index again, under the store lock, before writing:
-        # a memory poured while the loom is busy on triggers must not vanish under a
-        # cloth that then looks fresher than the index.
+        # The hash of the exact index text this cloth is woven from, and the store
+        # revision it was woven at. `persist()` verifies both again, under the store
+        # lock, before writing: a memory poured while the loom is busy on triggers
+        # must not vanish under a cloth that then looks fresher than the index — and
+        # a body or type change (which `layer_of` reads) leaves the index text
+        # byte-identical, so only the revision can see it.
         stats = {"pinned": 0, "fresh": 0, "trigger": 0, "passthrough": 0, "grouped": 0,
                  "hooks_reused": 0, "hooks_written": 0, "hooks_mechanical": 0,
-                 "llm_calls": 0, "source_sha256": _sha256(raw)}
+                 "llm_calls": 0, "source_sha256": _sha256(raw),
+                 "source_revision": revision}
         dirty = False
         verbatim = False
         out: list[str] = []
@@ -632,9 +642,12 @@ class Loom:
             return self._persist_checked(cloth)
 
     def _persist_checked(self, cloth: Cloth) -> dict:
+        current_rev = self.store.revision()
         current = _sha256(self.store.index_text())
         expected = cloth.stats.get("source_sha256")
-        if expected is not None and current != expected:
+        expected_rev = cloth.stats.get("source_revision")
+        if ((expected is not None and current != expected)
+                or (expected_rev is not None and current_rev != expected_rev)):
             cloth.stats["written"] = False
             cloth.stats["refused"] = "source moved while weaving"
             return cloth.stats
@@ -646,7 +659,7 @@ class Loom:
                 # date — a cloth written before the record existed (or with only half
                 # of it) is byte-identical yet unprovable, and one no-op weave must
                 # heal that.
-                self._record_state(current, _sha256(cloth.text))
+                self._record_state(current, _sha256(cloth.text), current_rev)
                 cloth.stats["written"] = False
                 return cloth.stats
             bdir = os.path.join(self.store.still, "index-backups")
@@ -666,17 +679,20 @@ class Loom:
         os.replace(tmp, self.out_path)
         # The cloth first, its record second: a crash between the two leaves an
         # unprovable cloth (served as stale — safe), never a fresh stamp on old text.
-        self._record_state(current, _sha256(cloth.text))
+        self._record_state(current, _sha256(cloth.text), current_rev)
         cloth.stats["written"] = True
         cloth.stats["path"] = self.out_path
         return cloth.stats
 
-    def _record_state(self, source_sha: str, cloth_sha: str) -> None:
-        """Remember which canonical index the cloth on disk was verified against AND
-        which cloth bytes were actually written. The stamp proves the PRODUCT too:
-        without `cloth_sha256`, a cloth corrupted or hand-edited while the index sat
-        unchanged would still wear a valid freshness stamp."""
-        record = {"cloth_sha256": cloth_sha, "source_sha256": source_sha}
+    def _record_state(self, source_sha: str, cloth_sha: str, revision: int) -> None:
+        """Remember which canonical index the cloth on disk was verified against, which
+        cloth bytes were actually written, and which store revision it all happened at.
+        The stamp proves the PRODUCT too: without `cloth_sha256`, a cloth corrupted or
+        hand-edited while the index sat unchanged would still wear a valid freshness
+        stamp. And the revision sees what no index hash can: a body or type change
+        (read by `layer_of`) that leaves the index text byte-identical."""
+        record = {"cloth_sha256": cloth_sha, "source_revision": revision,
+                  "source_sha256": source_sha}
         if self._state() == record:
             return                               # no churn when nothing changed
         os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
@@ -715,16 +731,28 @@ class Loom:
         wrote under the store lock proves both ends: the SOURCE (the current index
         hashes to `source_sha256`) and the PRODUCT (the cloth on disk hashes to
         `cloth_sha256`) — a corrupted or hand-edited cloth must not wear a valid
-        freshness stamp. No record, or half a record, means the cloth cannot be
-        proven current, which is treated the same as stale — the canonical index is
-        always the safe fallback, and one re-weave heals the record."""
+        freshness stamp. The store REVISION guards what neither hash can see: the
+        weave's real input includes memory types and body dates (`layer_of`), and a
+        body-only change leaves the index text byte-identical while bumping the
+        counter. No record, or half a record, means the cloth cannot be proven
+        current, which is treated the same as stale — the canonical index is always
+        the safe fallback, and one re-weave heals the record.
+
+        Honesty about revision 0: with no counter file, `revision()` answers 0 —
+        "no counted mutation yet" — so a store upgraded mid-life weaves at 0, sits
+        as blind to out-of-band body edits as it was before the counter existed,
+        and heals on its first weave after its first counted mutation."""
         cloth = self.cloth_on_disk()
         if cloth is None:
             return True
         st = self._state()
         source, product = st.get("source_sha256"), st.get("cloth_sha256")
+        revision = st.get("source_revision")
         if not (isinstance(source, str) and source
-                and isinstance(product, str) and product):
+                and isinstance(product, str) and product
+                and isinstance(revision, int) and not isinstance(revision, bool)):
+            return True                          # pre-upgrade sidecar: unprovable
+        if self.store.revision() != revision:
             return True
         return (_sha256(self.store.index_text()) != source
                 or _sha256(cloth) != product)

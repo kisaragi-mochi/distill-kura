@@ -234,6 +234,17 @@ between over-announces (a wasted re-read) rather than under-announces (a stale m
 served until an unrelated write). The counter exists for the weave to consume next:
 "did anything change?" without hashing the store.
 
+- The cloth's freshness stamp now sees past the index text: `weave()` captures
+  `Store.revision()` (before reading the index), the sidecar records
+  `source_revision` beside the two hashes, `persist()` re-reads the revision inside
+  the store lock and refuses ("source moved while weaving") when it moved, and
+  `is_stale()` requires the revision to match as well as both hashes. Motive: the
+  weave's real input includes memory types and body dates (`layer_of`) — a body-only
+  change leaves the index byte-identical and slips any hash, but bumps the counter.
+  A pre-upgrade sidecar without `source_revision` is unprovable → stale, healed by
+  one re-weave; a store with no counter file honestly weaves at revision 0 ("no
+  counted mutation yet") and starts counting from its first mutation.
+
 ## 0.2.0
 
 The first release shaped by outside review: a security/isolation review, an adversarial

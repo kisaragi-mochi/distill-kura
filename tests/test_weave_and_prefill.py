@@ -413,6 +413,7 @@ def test_a_cloth_without_a_source_record_is_not_trusted(tmp_path):
     import json as _json
     st = _json.load(open(loom.state_path, encoding="utf-8"))
     assert st["source_sha256"] and st["cloth_sha256"]   # both ends re-recorded
+    assert isinstance(st["source_revision"], int)       # and the revision beside them
 
 
 def test_a_mutated_cloth_cannot_wear_a_valid_freshness_stamp(tmp_path):
@@ -436,6 +437,45 @@ def test_a_mutated_cloth_cannot_wear_a_valid_freshness_stamp(tmp_path):
     healed = loom.write()
     assert healed["written"] is True
     assert loom.cloth_on_disk() == good and loom.is_stale() is False
+
+
+def test_a_body_only_change_is_caught_by_the_revision(tmp_path):
+    """The weave's real input is wider than the index text: layer_of() reads memory
+    types and body dates. A body rewrite through the store leaves the index
+    byte-identical — no hash can see it — but bumps the store revision, and the
+    revision is part of the freshness stamp."""
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    assert loom.is_stale() is False
+    before = s.index_text()
+    s.remember("recent-thing",
+               "the run finished at 43.7 t/s after the fans went in, which was the whole point",
+               "body 2020-01-01")               # the date layer_of reads has moved
+    assert s.index_text() == before             # the index hash alone says "fresh"
+    assert loom.is_stale() is True              # the revision says the store moved
+    loom.write()
+    assert loom.is_stale() is False             # one re-weave heals
+
+
+def test_persist_refuses_on_a_mid_weave_body_change(tmp_path):
+    """Same refusal as the poured-memory case, through the counter instead of the
+    hash: a body rewritten while the loom was busy leaves the index byte-identical,
+    so only the captured revision can prove the source moved."""
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    before_cloth = loom.cloth_on_disk()
+    cloth = loom.weave()
+    before = s.index_text()
+    s.remember("recent-thing",
+               "the run finished at 43.7 t/s after the fans went in, which was the whole point",
+               "body 2020-01-01")
+    assert s.index_text() == before
+    stats = loom.persist(cloth)
+    assert stats["written"] is False
+    assert stats["refused"] == "source moved while weaving"
+    assert loom.cloth_on_disk() == before_cloth
 
 
 # ── the attribution floor ───────────────────────────────────────────────────
