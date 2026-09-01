@@ -299,8 +299,18 @@ function tools(cfg, state) {
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         const to = target(args.store);
-        const d = await call(cfg, "GET",
-          `/memory/${encodeURIComponent(args.slug)}` + q(to), undefined, exec?.signal);
+        let d;
+        try {
+          d = await call(cfg, "GET",
+            `/memory/${encodeURIComponent(args.slug)}` + q(to), undefined, exec?.signal);
+        } catch (e) {
+          // The server answers an unknown slug with 404 by design (EXACT reads).
+          // The tool promised "an unknown slug simply says so" — keep that promise.
+          if (/^kura 404\b/.test(String(e && e.message))) {
+            return `${head(to)}\n(no memory called ${args.slug})`;
+          }
+          throw e;
+        }
         return `${head(to)}\n` + (d.text || `(no memory called ${args.slug})`);
       },
     }),
