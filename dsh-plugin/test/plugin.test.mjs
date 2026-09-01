@@ -32,6 +32,15 @@ function fakeKura() {
     } else if (req.url.startsWith("/recall")) {
       res.end(JSON.stringify({ store: "maker", how: "meaning", picked: ["p"], walked: ["p"],
                                elapsed_s: 0.1, context: "recalled text" }));
+    } else if (req.url.startsWith("/glance/")) {
+      const slug = decodeURIComponent(req.url.slice("/glance/".length).split("?")[0]);
+      if (slug === "maker-note") {
+        res.end(JSON.stringify({ ok: true, slug, text: "[maker-note]\nMaker — a trigger\n" }));
+      } else {
+        // An unknown slug is the server's 404, which the plugin reads as "no such memory".
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "no such memory" }));
+      }
     } else if (req.url.startsWith("/memory/")) {
       res.end(JSON.stringify({ text: "a whole memory" }));
     } else if (req.url.startsWith("/prefill")) {
@@ -203,6 +212,20 @@ test("bound to a preset: a store argument cannot escape", async () => {
     await ctx.registered.get("kura_recall").execute({ question: "q", store: "eq" }, {});
     assert.ok(seen.some((p) => p.includes("store=maker")));
     assert.ok(!seen.some((p) => p.includes("store=eq")));
+  } finally { srv.close(); }
+});
+
+test("kura_glance confirms a held slug and says so for an unknown one", async () => {
+  const { srv, url, seen } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url, store: "maker" });
+    const held = await ctx.registered.get("kura_glance").execute({ slug: "maker-note" }, {});
+    assert.equal(held, "[kura: maker]\n[maker-note]\nMaker — a trigger\n");
+    assert.ok(seen.some((p) => p.startsWith("/glance/maker-note")));
+    const unknown = await ctx.registered.get("kura_glance").execute({ slug: "nope" }, {});
+    assert.match(unknown, /\(no memory called nope\)/);
+    assert.ok(!unknown.includes("cannot reach"));
   } finally { srv.close(); }
 });
 

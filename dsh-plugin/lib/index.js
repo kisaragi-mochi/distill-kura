@@ -268,10 +268,10 @@ function tools(cfg, state) {
       name: "kura_recall",
       description:
         `Recall from ${cfg.label} — long-term memory retrieved by MEANING, not keywords, then ` +
-        `walking the [[links]] between memories. Call it whenever the question touches past ` +
-        `decisions, measurements, people, machines, or anything done here before; prefer it to ` +
-        `guessing. An empty answer means it is not remembered yet — say so plainly instead of ` +
-        `inventing something to fill the gap.` +
+        `walking the [[links]] between memories. Use it when you cannot tell WHICH memory the ` +
+        `question is about — the fallback when no slug on the map or in the conversation clearly ` +
+        `fits, not the first door. An empty answer means it is not remembered yet — say so ` +
+        `plainly instead of inventing something to fill the gap.` +
         (state.bound ? ` This agent is bound to the '${cfg.store}' kura.` : ""),
       parameters: {
         question: {
@@ -303,8 +303,9 @@ function tools(cfg, state) {
     defineTool({
       name: "kura_read",
       description:
-        `Read one whole memory from ${cfg.label} by its slug. Use after kura_recall when the ` +
-        `excerpt is not enough and you need the full text. An unknown slug simply says so.`,
+        `Read one whole memory from ${cfg.label} by its slug. Use after kura_glance (or ` +
+        `kura_recall) when the summary is not enough and you need the full text. An unknown ` +
+        `slug simply says so.`,
       parameters: {
         slug: { type: "string", description: "Memory slug, without .md", required: true },
         store: { type: "string", description: "Which kura. Omit for the current one." },
@@ -320,6 +321,38 @@ function tools(cfg, state) {
         } catch (e) {
           // The server answers an unknown slug with 404 by design (EXACT reads).
           // The tool promised "an unknown slug simply says so" — keep that promise.
+          if (/^kura 404\b/.test(String(e && e.message))) {
+            return `${head(to)}\n(no memory called ${args.slug})`;
+          }
+          throw e;
+        }
+        return `${head(to)}\n` + (d.text || `(no memory called ${args.slug})`);
+      },
+    }),
+
+    defineTool({
+      name: "kura_glance",
+      description:
+        `Confirm ONE memory from ${cfg.label} by its slug — the exact index line, the ` +
+        `verified KEEP sentence and its [[links]], about 150 tokens. Call it when you ` +
+        `recognise a slug on the resident map or from recall and want to be sure it is the ` +
+        `right memory before reading the whole thing. An unknown slug simply says there is ` +
+        `no memory by that name — a confirmation, not a search.`,
+      parameters: {
+        slug: { type: "string", description: "Memory slug, without .md", required: true },
+        store: { type: "string", description: "Which kura. Omit for the current one." },
+      },
+      output: TEXT,
+      isConcurrencySafe: () => true,
+      async execute(args, exec) {
+        const to = target(args.store);
+        let d;
+        try {
+          d = await call(cfg, "GET",
+            `/glance/${encodeURIComponent(args.slug)}` + q(to), undefined, exec?.signal);
+        } catch (e) {
+          // Same 404-by-design promise as kura_read: an unknown slug is "no such
+          // memory", not "the kura is unreachable".
           if (/^kura 404\b/.test(String(e && e.message))) {
             return `${head(to)}\n(no memory called ${args.slug})`;
           }

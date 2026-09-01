@@ -65,9 +65,11 @@ It is not a search index of documents: it holds distilled facts — decisions th
 made, measurements that were taken, landmines that will recur — one fact per memory,
 linked to each other.
 
-· Call kura_recall whenever the question touches what was decided, measured, or done
-  here before. Recall works by MEANING, so ask it in plain language; the words need not
-  match anything.
+· See a memory you recognise on the resident map, or a name in the conversation?
+  Confirm it with kura_glance first — an exact one-memory check, and usually all you
+  need; kura_read opens the whole text only when the detail matters.
+· Cannot tell WHICH memory is meant? Call kura_recall — it works by MEANING, so ask it
+  in plain language; the words need not match anything.
 · An empty result means it is not remembered YET. Say so plainly. Never fill the gap
   with a plausible invention — a confident guess about this household is the one failure
   mode this memory exists to prevent.
@@ -108,10 +110,10 @@ TOOLS: list[dict] = [
         "name": "kura_recall",
         "description": (
             f"Recall from {LABEL} — long-term memory retrieved by MEANING rather than keyword, "
-            "then following [[links]] between memories. Call it whenever the question touches "
-            "past decisions, measurements, people, machines, or anything done before — prefer "
-            "it over guessing. An empty result means it is simply not remembered yet: say so "
-            "plainly and never fill the gap with invention." + _bound_note()),
+            "then following [[links]] between memories. Use it when you cannot tell WHICH "
+            "memory the question is about — the fallback when no slug on the map or in the "
+            "conversation clearly fits, not the first door. An empty result means it is "
+            "simply not remembered yet: say so plainly and never fill the gap with invention." + _bound_note()),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -129,7 +131,23 @@ TOOLS: list[dict] = [
         "name": "kura_read",
         "description": (
             f"Read one whole memory from {LABEL} by its slug (e.g. 'storage-doctrine'). "
-            "Use after kura_recall when a summary is not enough and you need the full text."),
+            "Use after kura_glance (or kura_recall) when a summary is not enough and you "
+            "need the full text."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"slug": {"type": "string", "description": "Memory slug, without .md"},
+                           "store": {"type": "string", "description": "Which kura. Omit for the current one."}},
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "kura_glance",
+        "description": (
+            f"Confirm ONE memory from {LABEL} by its slug — the exact index line, the "
+            "verified KEEP sentence and its [[links]], about 150 tokens. Call it when you "
+            "recognise a slug on the resident map or from recall and want to be sure it is "
+            "the right memory before reading the whole thing. An unknown slug simply says "
+            "there is no memory by that name — a confirmation, not a search."),
         "inputSchema": {
             "type": "object",
             "properties": {"slug": {"type": "string", "description": "Memory slug, without .md"},
@@ -282,6 +300,16 @@ def call_tool(name: str, args: dict) -> str:
             # description promises what an unknown slug means, so say that instead of
             # "[cannot reach the kura] HTTPError 404" (which sent the model hunting
             # for a broken server).
+            if e.code == 404:
+                return f"(no memory called {args.get('slug')!r} in {store or 'the default kura'})"
+            raise
+        return d.get("text") or f"(no memory called {args.get('slug')!r} in {store or 'the default kura'})"
+
+    if name == "kura_glance":
+        slug = urllib.parse.quote((args.get("slug") or "").strip())
+        try:
+            d = http("GET", f"/glance/{slug}" + _q(store))
+        except urllib.error.HTTPError as e:
             if e.code == 404:
                 return f"(no memory called {args.get('slug')!r} in {store or 'the default kura'})"
             raise

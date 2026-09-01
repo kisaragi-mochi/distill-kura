@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -39,6 +40,14 @@ class FakeKura(BaseHTTPRequestHandler):
         if self.path.startswith("/memory/"):
             # a missing slug is the server's 404, which the bridge must read as
             # "no such memory" rather than an outage
+            return self._json({"error": "no such memory"}, status=404)
+        if self.path.startswith("/glance/"):
+            # the one held slug gets its mechanical confirmation; anything else is a
+            # 404, which the bridge must read as "no such memory" rather than an outage
+            slug = urllib.parse.unquote(self.path[len("/glance/"):].split("?", 1)[0])
+            if slug == "maker-note":
+                return self._json({"ok": True, "slug": slug,
+                                   "text": "[maker-note]\nMaker — a trigger\n"})
             return self._json({"error": "no such memory"}, status=404)
         if self.path.startswith("/prefill"):
             return self._json({"text": "<<<KURA-MAP store=maker>>>\n- [A](a.md) — t\n"
@@ -247,6 +256,32 @@ def test_kura_read_of_a_missing_slug_says_there_is_no_such_memory():
     srv, url = start()
     try:
         out = speak(url, [INIT, call("kura_read", {"slug": "no-such-slug"})])
+        assert out[1]["result"]["isError"] is False
+        assert out[1]["result"]["content"][0]["text"] == \
+            "(no memory called 'no-such-slug' in the default kura)"
+    finally:
+        srv.shutdown()
+
+
+def test_kura_glance_of_a_held_slug_returns_its_confirmation():
+    """The glance is the mechanical confirmation of one memory — the text comes back
+    verbatim, so the model can answer without opening the whole thing."""
+    srv, url = start()
+    try:
+        out = speak(url, [INIT, call("kura_glance", {"slug": "maker-note"})])
+        assert out[1]["result"]["isError"] is False
+        assert out[1]["result"]["content"][0]["text"] == "[maker-note]\nMaker — a trigger\n"
+        assert any(c.startswith("GET /glance/") for c in FakeKura.calls)
+    finally:
+        srv.shutdown()
+
+
+def test_kura_glance_of_an_unknown_slug_says_there_is_no_such_memory():
+    """A glance at a name the store does not hold is "no such memory" (the server's
+    404), never a "[cannot reach]" outage."""
+    srv, url = start()
+    try:
+        out = speak(url, [INIT, call("kura_glance", {"slug": "no-such-slug"})])
         assert out[1]["result"]["isError"] is False
         assert out[1]["result"]["content"][0]["text"] == \
             "(no memory called 'no-such-slug' in the default kura)"
