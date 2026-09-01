@@ -136,6 +136,13 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--questions", default="bench/fixtures/questions.json")
     b.add_argument("--hops", type=int, default=1)
     b.add_argument("--verbose", action="store_true")
+    b = bsub.add_parser("worldline", help="breadcrumb → shared world recovery (raw traces)")
+    b.add_argument("--cases", default="bench/worldline/cases.json")
+    b.add_argument("--routing", default="full", choices=["agent-only", "fastpath", "full"],
+                   help="agent-only: the model reads the map alone; fastpath: tier zero "
+                        "only, silence is silence; full: the production path")
+    b.add_argument("--hops", type=int, default=1)
+    b.add_argument("--trace", help="append JSONL traces here (default: <store>/_still/worldline-traces.jsonl)")
 
     p = sub.add_parser("init", help="create a new store")
     p.add_argument("name")
@@ -224,6 +231,14 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(r, ensure_ascii=False, indent=1))
             # A retention run that scores badly should not look like a passing command.
             return 0 if r["score"] >= 0.9 else 1
+        if a.bcmd == "worldline":
+            r = bench.worldline(reg, store, a.cases, routing=a.routing,
+                                hops=a.hops, trace_path=a.trace)
+            print(json.dumps(r, ensure_ascii=False, indent=1))
+            # A wrong branch (an abandoned plan anchoring a case) is the one result
+            # that must never read as a passing run; nothing runnable is the other.
+            s = r["summary"]
+            return 0 if s["runnable"] and not s["wrong_branch"] else 1
         sys.exit("kura bench {compress|retention}")
 
     if a.cmd in ("weave", "prefill"):

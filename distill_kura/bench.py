@@ -38,6 +38,24 @@ from .store import Store
 from .tokens import estimate
 
 
+def worldline(reg: Registry, store: Store, cases_path: str, routing: str = "full",
+              hops: int = 1, trace_path: str | None = None) -> dict:
+    """Can the house return to the right shared world from a small breadcrumb?
+
+    Raw traces, no composite score — see `distill_kura/worldline.py` and
+    `bench/worldline/README.md`. The resident context is what the agent actually
+    wears: the woven cloth when current, the canonical index otherwise.
+    """
+    from . import worldline as wl
+    from .prefill import build, loom_for
+    pf = build(store, loom_for(store, reg.prefill_cfg_for(store)))
+    return wl.run(store, wl.load_cases(cases_path), routing=routing,
+                  thinker=reg.models_for(store).thinker, resident=pf.text,
+                  fastpath_cfg=reg.fastpath_cfg_for(store), hops=hops,
+                  trace_path=trace_path
+                  or os.path.join(store.still, "worldline-traces.jsonl"))
+
+
 def counter(command: str | None):
     """A token counter: the named command, or the built-in estimate."""
     if not command:
