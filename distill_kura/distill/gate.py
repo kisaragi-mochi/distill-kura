@@ -21,6 +21,7 @@ Four things happen here:
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from ..store import InvalidTag, normalize_tags
 from .sources import Segment
@@ -97,53 +98,77 @@ def gate(cands: list[dict], segs: list[Segment], store_text: str = "") -> tuple[
     return kept, dropped, ideas
 
 
-# ── the composed text, re-checked ────────────────────────────────────────
+# ── the final surface, re-checked ────────────────────────────────────────
 #
-# The gate above verifies what the CANDIDATE brought. The scribe then writes the
-# final text — and the scribe is a model too: told "write no numbers", it can still
-# write "the GPU count was 12" with nothing behind it. The mark (HMAC) proves who
-# staged a draft, not that its claims are grounded. So the numbers get their own
-# deterministic floor, token by token: every numeric token of two or more digits in
-# the final text must equal a numeric token the evidence itself contains. Never by
-# concatenating the evidence's digits — that would let "899 ms … 2.3 ms" vouch for
-# an invented "923". A sign is meaning and is kept ("-12.5" is not "+12.5"); a
-# range is one claim ("12-16" is not licensed by "12" and "16"); a DERIVED number
-# (a ratio the scribe computed) is refused on purpose: arithmetic the evidence
-# never did is a claim the evidence never made.
+# The gate above verifies what the CANDIDATE brought. Models write text after
+# that — the scribe composing, the judge fixing — and every one of them is a
+# model: told "write no numbers", it can still write one with nothing behind it.
+# The mark (HMAC) proves who staged a draft, not that its claims are grounded.
+# So everything a model wrote that will be stored or indexed — title, trigger,
+# section heading, body, the curation sentences — gets a deterministic floor,
+# token by token: a numeric token in the final surface must equal a numeric
+# token the evidence itself contains. Never by concatenating the evidence's
+# digits ("899 ms … 2.3 ms" must not vouch for an invented "923"). A sign is
+# meaning; a range is one claim; scientific notation is one token; Unicode
+# lookalikes (−, –, —, full-width digits) are normalised before scanning, so a
+# dash from a different alphabet is not a disguise. Single digits are verified
+# too — "8 GPUs" and "4-bit" are exactly the claims a house full of local
+# models invents — with one mechanical exception: ordered-list markers.
 
-_NUM_TOKEN = re.compile(r"[+-]?\d[\d,.:/-]*\d|[+-]?\d")
+_SCI_OR_NUM = re.compile(r"\d+(?:\.\d+)?[eE][+-]?\d+|[+-]?\d[\d,.:/-]*\d|[+-]?\d")
+_LIST_MARKER = re.compile(r"(?m)^\s*\d+[.)]\s+")
+
+
+def _num_normalize(s: str) -> str:
+    s = unicodedata.normalize("NFKC", s).replace("\u2212", "-")   # true minus
+    return re.sub(r"(?<=\d)\s?[\u2013\u2014]\s?(?=\d)", "-", s)  # digit–digit dashes
 
 
 def _canon_num(t: str) -> str:
     return t.rstrip(",.:/-").replace(",", "")
 
 
+def _num_tokens(s: str) -> list[str]:
+    return [_canon_num(m.group(0)) for m in _SCI_OR_NUM.finditer(s)]
+
+
 def composed_number_violations(text: str, evidence: list[dict], allowed: str = "") -> list[str]:
     """→ numeric tokens the final text claims that its evidence never contained.
 
-    Canonicalisation forgives formatting (commas, trailing punctuation) and nothing
-    else. An unsigned token in the text may cite a signed one in the evidence (the
-    magnitude is the evidence's); a signed token must match sign and all. Tokens
-    with fewer than two digits are prose, not measurements. `allowed` is extra text
-    whose numbers are legitimate — the caller decides what that is, and today the
-    pipeline passes nothing.
+    Canonicalisation forgives formatting (commas, trailing punctuation, Unicode
+    spellings) and nothing else. An unsigned token in the text may cite a signed
+    one in the evidence (the magnitude is the evidence's); a signed token must
+    match sign and all. `allowed` is extra text whose numbers are legitimate —
+    the caller decides what that is, and today the pipeline passes nothing.
     """
-    hay = norm(" ".join(str(e.get("text", "")) for e in evidence)) + " " + allowed
+    hay = _num_normalize(norm(" ".join(str(e.get("text", "")) for e in evidence)) + " " + allowed)
     exact: set[str] = set()
     unsigned: set[str] = set()
-    for m in _NUM_TOKEN.finditer(hay):
-        c = _canon_num(m.group(0))
+    for c in _num_tokens(hay):
         exact.add(c)
         unsigned.add(c.lstrip("+-"))
     bad: list[str] = []
-    for m in _NUM_TOKEN.finditer(text):
-        t = _canon_num(m.group(0))
-        if len(re.sub(r"\D", "", t)) < 2:
-            continue
+    for t in _num_tokens(_LIST_MARKER.sub("", _num_normalize(text))):
         ok = (t in exact) if t[:1] in "+-" else (t in unsigned)
         if not ok and t not in bad:
             bad.append(t)
     return bad
+
+
+def final_surface_violations(surface: str, evidence: list[dict], classes: list[str],
+                             allowed: str = "") -> list[str]:
+    """The one door every model-written surface must pass before it earns a mark.
+
+    `surface` is everything that will be stored or indexed: title, description,
+    section heading, body, curation sentences — concatenation is fine, this is a
+    floor, not a parser. `allowed` is text whose numbers CODE put there (an
+    extension heading's mechanically stamped date). Returns human-readable
+    violations; empty means pass.
+    """
+    v = [f"invented number: {t}" for t in composed_number_violations(surface, evidence, allowed)]
+    if attributes_to_human(surface, classes):
+        v.append("credits the human with no [USER] quote")
+    return v
 
 
 # ── tags: a model proposes, the evidence decides ─────────────────────────

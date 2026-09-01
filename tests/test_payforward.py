@@ -269,13 +269,82 @@ def test_a_second_runner_on_the_same_slot_skips_cleanly(tmp_path):
         r = payforward.run(reg)
         x = r["results"][0]
         assert x["did"] == "skipped-locked" and r["locked"] == 1
-        assert r["worked"] == 0 and r["failed"] == 0           # not work, not a failure
+        assert r["worked"] == 0 and r["failed"] == 0           # busy has its own tally key
         assert m.log == []                                     # the mouth was never touched
         assert not os.path.exists(payforward.state_path(st))   # and the state never moved
+        # busy is NOT fresh: the lock proves another runner exists, not that it is
+        # warming THIS etag — a scheduler must retry (1), never rest on it (2)
+        assert cli.main(["-c", cfg, "pay-forward"]) == 1
         fcntl.flock(holder, fcntl.LOCK_UN)
         holder.close()
         assert payforward.run(reg)["results"][0]["did"] == "baked"   # released → work proceeds
         assert state_of(st)["mouths"]["slow"]["etag"]          # one consistent record
+    finally:
+        srv.shutdown()
+
+
+def test_two_mouths_of_one_store_both_keep_their_records(tmp_path):
+    """The ledger is one file per STORE. Mouth b also rides mouth a's slot file —
+    same store, same etag, so the content-addressed name matches — and both records
+    must survive the shared file (merge-forward under the ledger lock)."""
+    srv, m, url = start_mouth()
+    try:
+        st = Store(name="m", path=str(tmp_path / "m"), label="m")
+        st.init_files()
+        st.remember("ssd-tier", "running a huge model off an SSD tier", "body")
+        cfg = tmp_path / "kura.toml"
+        cfg.write_text(f"""
+[stores.m]
+path = "{tmp_path / 'm'}"
+[models.thinker]
+url = "http://127.0.0.1:9/v1"
+model = "none"
+[[payforward.mouths]]
+name = "a"
+url = "{url}"
+store = "m"
+[[payforward.mouths]]
+name = "b"
+url = "{url}"
+store = "m"
+slot = 1
+""", encoding="utf-8")
+        reg = Registry.load(str(cfg))
+        r = payforward.run(reg)
+        assert [x["did"] for x in r["results"]] == ["baked", "restored"]
+        assert set(state_of(reg.store("m"))["mouths"]) == {"a", "b"}   # no lost update
+    finally:
+        srv.shutdown()
+
+
+def test_the_ledger_lock_stalls_the_record_not_the_bake(tmp_path):
+    """The slot lock cannot guard the ledger (two mouths, two slot locks, one file),
+    so _advance takes its own. Holding it must stall only the read-modify-write:
+    the mouth work runs to completion, and the record lands intact on release."""
+    import fcntl
+    import threading
+    import time as _t
+    srv, m, url = start_mouth()
+    try:
+        reg, st, cfg = build(tmp_path, url)
+        os.makedirs(st.still, exist_ok=True)
+        holder = open(payforward.state_path(st) + ".lock", "w")
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        out = {}
+        thr = threading.Thread(target=lambda: out.update(payforward.run(reg)))
+        thr.start()
+        deadline = _t.time() + 10
+        while _t.time() < deadline and not any(e.startswith("save:") for e in m.log):
+            _t.sleep(0.02)
+        assert any(e.startswith("save:") for e in m.log)        # the mouth work finished …
+        _t.sleep(0.2)
+        assert not os.path.exists(payforward.state_path(st))    # … but the ledger waits
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
+        thr.join(timeout=10)
+        assert not thr.is_alive()
+        assert out["worked"] == 1
+        assert state_of(st)["mouths"]["slow"]["etag"]           # then lands intact
     finally:
         srv.shutdown()
 

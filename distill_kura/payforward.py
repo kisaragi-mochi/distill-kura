@@ -40,8 +40,11 @@ who wrote it or when. That buys the whole algorithm, per mouth:
                            physical identity (normalized base url + slot id), in the
                            system temp directory: machine-local, because the runners
                            that can collide — `kura tend` and the systemd restart
-                           hook — are machine-local too. A second runner skips
-                           cleanly (`skipped-locked`) instead of racing the first.
+                           hook — are machine-local too. A second runner reports
+                           busy (`skipped-locked`) instead of racing the first — and
+                           busy is NOT fresh: the lock proves another runner exists,
+                           not that it is warming YOUR etag, so the run exits as
+                           transient (retry), never as all-fresh.
 
 State lives per store in `_still/payforward.json`, keyed by mouth name — workshop
 bookkeeping like the tend heartbeat, written atomically and only ever after a confirmed
@@ -197,20 +200,34 @@ def _write_state(store: Store, state: dict) -> None:
 
 def _advance(store: Store, name: str, result: dict) -> None:
     """Record a CONFIRMED success. Never called on a failure path, so an unreachable
-    mouth or a failed save leaves the last good record standing."""
-    state = _read_state(store)
-    m = state.setdefault("mouths", {}).setdefault(name, {})
-    now = datetime.now().isoformat(timespec="seconds")
-    m.update({"etag": result["etag"], "filename": result["file"],
-              "slot": result["slot"], "checked_at": now})
-    for k in ("bake_s", "restore_s", "probe_s", "save_s", "prompt_n", "bytes"):
-        if result.get(k) is not None:
-            m[k] = result[k]
-    if result["did"] == "baked":
-        m["baked_at"] = now
-    elif result["did"] == "restored":
-        m["restored_at"] = now
-    _write_state(store, state)
+    mouth or a failed save leaves the last good record standing.
+
+    Two locks, two resources. The SLOT lock (in `pay_one`) guards one mouth's KV and
+    is held for the whole restore/bake — but it cannot guard this file: the ledger is
+    one file per STORE, and two mouths of one store hold two DIFFERENT slot locks, so
+    `--mouth A` and `--mouth B` running together would read-modify-write over each
+    other and the slower writer would erase the faster one's record. So the ledger's
+    read-modify-write takes its own lock, held for milliseconds — blocking, because
+    the wait is a file read and a file write, never a bake."""
+    os.makedirs(store.still, exist_ok=True)
+    lock = open(state_path(store) + ".lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = _read_state(store)               # re-read INSIDE the lock: merge-forward
+        m = state.setdefault("mouths", {}).setdefault(name, {})
+        now = datetime.now().isoformat(timespec="seconds")
+        m.update({"etag": result["etag"], "filename": result["file"],
+                  "slot": result["slot"], "checked_at": now})
+        for k in ("bake_s", "restore_s", "probe_s", "save_s", "prompt_n", "bytes"):
+            if result.get(k) is not None:
+                m[k] = result[k]
+        if result["did"] == "baked":
+            m["baked_at"] = now
+        elif result["did"] == "restored":
+            m["restored_at"] = now
+        _write_state(store, state)
+    finally:
+        lock.close()
 
 
 # ── the run ──────────────────────────────────────────────────────────────
@@ -241,8 +258,8 @@ def pay_one(reg: Registry, mouth: dict, force: bool = False) -> dict:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             r["did"] = "skipped-locked"
-            r["note"] = ("another pay-forward holds this slot right now; its run "
-                         "covers this mouth")
+            r["note"] = ("another pay-forward holds this slot right now — busy, not "
+                         "fresh: it may be finishing an older map. Retry later.")
             return r
         return _pay_locked(reg, mouth, force, store, pf, fname, r, base, key, warm_bar)
     finally:

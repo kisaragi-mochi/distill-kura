@@ -201,9 +201,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(r, ensure_ascii=False))
         if r["worked"]:
             return 0
-        if r["failed"]:
-            return 1                            # a failure is not "nothing to do"
-        return 2                                # every mouth fresh — the scheduler may rest
+        if r["failed"] or r["locked"]:
+            # failed is broken and locked is busy (another runner held the slot — it
+            # may be finishing an OLDER map). Both mean "not done": a scheduler must
+            # retry, never rest as if the fleet were verified warm.
+            return 1
+        return 2                                # every mouth VERIFIED fresh — the scheduler may rest
 
     store = _store(reg, a.store)
 

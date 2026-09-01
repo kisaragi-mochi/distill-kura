@@ -33,7 +33,7 @@ from ..tokens import estimate
 from ..registry import Registry
 from ..store import ANNOTATION_KEYS, FROZEN, Store, normalize_tags
 from . import prompts
-from .gate import (attributes_to_human, composed_number_violations, gate, norm,
+from .gate import (attributes_to_human, final_surface_violations, gate, norm,
                    salvage, verify_tags)
 from .seeds import Seeds
 from .sources import Segment, as_evidence, discover_all, source_for
@@ -368,15 +368,23 @@ class Distiller:
             if not (slug and desc and body):
                 return None
             text = desc.group(1) + "\n" + body.group(1)
-            invented = composed_number_violations(text, c["evidence"])
-            if not invented:
+            # The floor sees everything that will be stored or indexed: the title
+            # lands in MEMORY.md and the resident map, the curation sentences are
+            # saved under the curation mark — all of it is model-written surface.
+            _, s_ann, _ = _curation_of(out)
+            cand_ann = " ".join(str(c.get(k) or "") for k in ANNOTATION_KEYS)
+            surface = "\n".join([(title.group(1) if title else ""), text,
+                                 " ".join(s_ann.values()), cand_ann])
+            bad = final_surface_violations(surface, c["evidence"], c["classes"])
+            if not bad:
                 break
             if attempt == 2:
-                _log(f"      ✗ composed text invents numbers the evidence lacks: {invented}")
+                _log(f"      ✗ final surface fails the floor: {bad}")
                 return None
-            user += ("\n⚠️ REJECTED — these numbers appear NOWHERE in the evidence: "
-                     f"{', '.join(invented)}. Remove them, or use only numbers the evidence "
-                     "itself contains. Do not compute new ones.\n")
+            user += ("\n⚠️ REJECTED — fix these and answer again: "
+                     f"{'; '.join(bad)}. A number must come from the evidence itself "
+                     "(do not compute new ones); never credit the human without their "
+                     "own quoted words.\n")
         _, plain = _split_draft(body.group(1))
         return {"slug": re.sub(r"[^a-z0-9-]+", "-", slug.group(1).strip().lower()).strip("-")[:48],
                 "title": (title.group(1).strip()[:40] if title else ""),
@@ -437,16 +445,21 @@ class Distiller:
         if not body:
             return None
         _, plain = _split_draft(body.group(1))
-        invented = composed_number_violations(plain, c["evidence"])
-        if invented:
-            _log(f"      ✗ extension invents numbers the evidence lacks: {invented}")
-            return None
         # The heading's date is the evidence's date, mechanically. 30 of 39 extension
         # headings in the house were dated before the distiller existed; one said 2025.
         head = section.group(1).strip() if section else f"## {date}"
         head = self._DATE_IN_TEXT.sub(date, head)
         if date not in head:
             head = f"## {date} " + head.lstrip("#").strip()
+        # The floor runs AFTER the mechanical date stamp: the heading's date is
+        # code's claim, so it rides in `allowed`; every other number — a "99x" in
+        # the section, the body, the curation sentences — must be the evidence's.
+        _, s_ann, _ = _curation_of(out or "")
+        bad = final_surface_violations("\n".join([head, plain, " ".join(s_ann.values())]),
+                                       c["evidence"], c["classes"], allowed=date)
+        if bad:
+            _log(f"      ✗ extension surface fails the floor: {bad}")
+            return None
         text = head + "\n" + plain
         return {"slug": target, "title": "", "description": "", "extends": target,
                 "body": text.strip(), "kind": c.get("kind", "project"),
@@ -474,9 +487,12 @@ class Distiller:
         manifest = {
             # 2: tags, the evidence each claiming tag rests on, the ones refused and
             # why, and the three curation sentences. 3: the composed text's numbers
-            # are re-verified against the evidence before staging. Additive — a v1
-            # manifest is still read by everything that reads manifests.
-            "gate_version": 3,
+            # are re-verified against the evidence before staging. 4: the floor
+            # covers the whole model-written surface (title, trigger, section,
+            # curation sentences, and a judge's FIX before it is re-signed), with
+            # Unicode-normalised tokens and single digits verified. Additive — a
+            # v1 manifest is still read by everything that reads manifests.
+            "gate_version": 4,
             "source_key": key,
             "source_file": os.path.basename(source),
             "source_sha256": self._source_digest(source),
@@ -653,6 +669,23 @@ class Distiller:
                 "new_body": m.group(1).strip() if m else None,
                 "belongs_because": bb.group(1).strip() if bb else None}
 
+    def _manifest_evidence(self, draft_raw: str) -> tuple[list[dict] | None, list[str]]:
+        """The draft's FULL evidence, from its content-addressed manifest.
+
+        The header's own evidence lines are truncated for human eyes (300 chars);
+        re-verification needs the real quotes, and the manifest has them. No
+        manifest, no re-signing — fail closed."""
+        m = re.search(r"evidence_manifest:\s*sha256:([0-9a-f]{64})", draft_raw)
+        if not m:
+            return None, []
+        try:
+            with open(os.path.join(self._evidence_dir(), m.group(1) + ".json"),
+                      encoding="utf-8") as f:
+                man = json.load(f)
+            return list(man.get("quotes") or []), list(man.get("evidence_classes") or [])
+        except (OSError, ValueError):
+            return None, []
+
     def drain(self, limit: int = 0) -> dict:
         ds = sorted(glob.glob(os.path.join(self.drafts_dir, "*.md")))
         if limit:
@@ -683,8 +716,18 @@ class Distiller:
                         hd["BELONGS_BECAUSE"] = j["belongs_because"]
                     keep_head = [f"{k}: {v}" for k, v in hd.items()]
                     body = ("\n".join(keep_head) + "\n\n" if keep_head else "") + j["new_body"] + "\n"
-                    # The scribe rewrote the body with the evidence in front of it, so it
-                    # is still gated — but the mark has to follow the text it signs.
+                    # The judge is the LAST model to touch this text, so the door
+                    # stands behind it too: the mark is a proof of having passed the
+                    # floor, and a FIX that cannot pass does not get re-signed — the
+                    # draft stays as staged, for the next drain to judge cold.
+                    ev, classes = self._manifest_evidence(raw)
+                    if ev is None:
+                        _log(f"  ⚠ fix refused {j['slug']} — no readable evidence manifest")
+                        continue
+                    bad = final_surface_violations(body, ev, classes)
+                    if bad:
+                        _log(f"  ⚠ fix refused {j['slug']} — {'; '.join(bad)[:90]}")
+                        continue
                     keep = re.sub(r"gate:\s*[0-9a-f]{32}", f"gate: {self._mark(body)}",
                                   raw.split("-->")[0]) + "-->\n"
                     open(p, "w", encoding="utf-8").write(keep + body)

@@ -143,7 +143,7 @@ def test_tags_and_sentences_travel_from_candidate_to_store(tmp_path):
     # the manifest says why each claiming tag exists, and why one does not
     ref = [l for l in draft.splitlines() if "evidence_manifest:" in l][0].split("sha256:")[1].strip()
     man = json.load(open(os.path.join(store.path, "_evidence", ref + ".json")))
-    assert man["gate_version"] == 3
+    assert man["gate_version"] == 4
     assert man["tags"] == ["decision", "emotion-carried", "entrusted"]
     assert man["tag_evidence"]["entrusted"]["quote"].endswith("remember that")
     assert man["tags_refused"]["expired"] == "reserved for the forgetting pass; a model may not assign it"
@@ -370,3 +370,39 @@ def test_the_prompts_rank_by_charter_not_by_a_universal_list():
         t = getattr(prompts, name).lower()
         for w in ("score", "salience", "priority_", "rank by", "more important than"):
             assert w not in t, (name, w)
+
+
+# ── the door behind the last writer (round-three review) ────────────────────
+#
+# A judge's FIX rewrites the body last of all — and used to be re-signed without
+# re-verification. Now the mark is a proof of having passed the floor.
+
+def test_a_fix_that_invents_a_number_is_refused(tmp_path):
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE,
+               "draw the last line": "FIX\nreason: sharpen it\nBODY:\nreached 99 TPS on the slow disk"})
+    r = d.run(chunks=1)
+    assert r["drafts"] == ["archive-on-slow-disk"]
+    before = open(os.path.join(d.drafts_dir, "archive-on-slow-disk.md"), encoding="utf-8").read()
+    out = d.drain()
+    after = open(os.path.join(d.drafts_dir, "archive-on-slow-disk.md"), encoding="utf-8").read()
+    assert out["poured"] == 0 and out["fixed"] == 0 and out["left"] == 1
+    assert after == before                       # not rewritten, not re-signed
+    assert not store.read("archive-on-slow-disk")
+
+
+def test_a_fix_that_stays_inside_the_evidence_pours(tmp_path):
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE,
+               "draw the last line": "FIX\nreason: tighten\nBODY:\nthe archive lives on the slow disk"})
+    r = d.run(chunks=1)
+    assert r["drafts"] == ["archive-on-slow-disk"]
+    out = d.drain()
+    assert out["fixed"] == 1 and out["poured"] == 1
+    assert "slow disk" in store.read_exact("archive-on-slow-disk")

@@ -183,12 +183,19 @@ def test_composed_derived_ratio_is_refused_on_purpose():
     assert composed_number_violations("that is roughly 390x faster", ev) == ["390"]
 
 
-def test_composed_date_and_small_numbers_are_not_claims():
+def test_composed_allowed_text_and_list_markers():
     from distill_kura.distill.gate import composed_number_violations
     ev = [{"class": "USER", "text": "please keep the archive on the slow disk"}]
-    out = composed_number_violations("## 2026-09-01 decided; 3 things to check",
-                                     ev, allowed="2026-09-01")
-    assert out == []
+    assert composed_number_violations("## 2026-09-01 decided", ev, allowed="2026-09-01") == []
+    assert composed_number_violations("1. check the fans\n2. check the disk", ev) == []
+
+
+def test_composed_single_digits_are_claims_now():
+    # "8 GPUs" and "4-bit" are exactly what a local-model house invents.
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "ran on 4 GPUs"}]
+    assert composed_number_violations("ran on 8 GPUs", ev) == ["8"]
+    assert composed_number_violations("ran on 4 GPUs", ev) == []
 
 
 # Three exploits from the second outside review — each passed the first gate v3 draft.
@@ -216,3 +223,27 @@ def test_composed_markdown_bullet_is_not_a_sign():
     from distill_kura.distill.gate import composed_number_violations
     ev = [{"class": "TOOL", "text": "counted 12 entries"}]
     assert composed_number_violations("- 12 entries were counted", ev) == []
+
+
+# Round three: the Unicode disguises, and the door behind the last writer.
+
+def test_composed_unicode_dashes_are_not_a_disguise():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "12 GPUs and 16 GB; profit was +12.5%"}]
+    assert composed_number_violations("needs 12\u201316 GPUs", ev) == ["12-16"]      # en dash
+    assert composed_number_violations("loss was \u221212.5%", ev) == ["-12.5"]       # true minus
+
+
+def test_composed_scientific_notation_is_one_token():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "about 1e9 parameters"}]
+    assert composed_number_violations("about 1e9 parameters", ev) == []
+    assert composed_number_violations("about 2e9 parameters", ev) == ["2e9"]
+
+
+def test_final_surface_covers_attribution_too():
+    from distill_kura.distill.gate import final_surface_violations
+    ev = [{"class": "SELF", "text": "I think the slow disk is right"}]
+    out = final_surface_violations("the user decided on the slow disk", ev, ["SELF"])
+    assert out == ["credits the human with no [USER] quote"]
+    assert final_surface_violations("the slow disk seems right", ev, ["SELF"]) == []

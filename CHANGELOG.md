@@ -27,7 +27,13 @@ success, read-modify-written under the slot's lock). One runner per physical slo
 whole sequence holds a machine-local flock keyed on (normalized base url, slot) — the
 runners that can collide, `kura tend` and the systemd restart hook, are machine-local —
 and a second runner skips cleanly instead of racing. Two config entries naming one
-physical slot are refused at load. Old slot files are
+physical slot are refused at load. The ledger itself takes a second lock — the slot
+lock cannot cover it: two mouths of one store hold two different slot locks and share
+one `payforward.json`, so `--mouth A` / `--mouth B` running together was a lost update.
+The read-modify-write now holds a millisecond flock beside the file. And busy is no
+longer fresh: a held slot lock proves another runner exists, not that it is warming
+your etag, so `skipped-locked` exits 1 (transient — retry) and only a verified
+all-fresh run exits 2. Old slot files are
 not pruned, because the slots API can save and restore a filename but cannot list the
 directory. Exit 2 when every mouth is fresh, so a scheduler can tell "nothing to do"
 from work; a failed mouth is exit 1, because a failure is neither. `kura tend` runs it
@@ -52,6 +58,21 @@ invented "923". A sign is meaning ("-12.5" is not "+12.5"); a range is one claim
 auto-allowed in the body — an extension heading gets its date from code, after
 verification. The gate's test-file contract now states exactly which classes the
 deterministic floor covers, no more.
+
+The third review found the door missing where it mattered most: the judge's FIX
+is the LAST model to touch the text, and used to be re-signed without
+re-verification. Now nothing earns a mark without passing the floor — a FIX is
+re-checked against the draft's full evidence manifest (fail closed if the
+manifest is unreadable) and refused if it cannot pass, leaving the draft as
+staged. The floor also widened to the whole model-written surface: title,
+recognition trigger, section heading and the curation sentences, not just
+DESC+BODY — a title lands in the resident map, and "99-GPU構成" must not enter
+through it. Tokens are Unicode-normalised (en/em dashes between digits, the
+true minus, full-width digits), scientific notation is one token, and single
+digits are verified too — "8 GPUs", "4-bit" and "2x" are exactly the claims a
+local-model house invents — with ordered-list markers mechanically excluded.
+Manifests written from here on say `gate_version: 4`, so provenance can tell
+which floor a memory passed.
 
 ### An explicit nothing is an answer
 
