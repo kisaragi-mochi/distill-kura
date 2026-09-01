@@ -1,0 +1,34 @@
+{
+  "comment": "Worldline benchmark cases. Each case is one utterance a person might open a session with, and what a well-remembering house should do with it. target_slugs: reaching any one counts. acceptable_related: neighbours that also count as landing well (reported separately, never required). must_not_anchor: landing here is a wrong branch. Category 'unknown' has empty target_slugs: success is answering from nothing, i.e. opening NOTHING. Adapt the slugs to the store you run against; a case whose targets are absent from the store is skipped honestly, never scored.",
+  "cases": [
+    {"id": "wf-direct-1", "utterance": "continued: the freetoken-hybrid experiment", "target_slugs": ["freetoken-hybrid"], "acceptable_related": ["exl3-cpu"], "must_not_anchor": [], "category": "direct-name"},
+    {"id": "wf-direct-2", "utterance": "pick up the sazanami-pcie-audit where we left it", "target_slugs": ["sazanami-pcie-audit"], "acceptable_related": [], "must_not_anchor": [], "category": "direct-name"},
+
+    {"id": "wf-callsign-1", "utterance": "あの全員野球の続きなんだけど", "target_slugs": ["freetoken-hybrid"], "acceptable_related": ["exl3-quantization"], "must_not_anchor": [], "category": "shared-callsign"},
+    {"id": "wf-callsign-2", "utterance": "知性備蓄部門の予算の話、あれどうなった", "target_slugs": ["lab-infra-budget"], "acceptable_related": [], "must_not_anchor": [], "category": "shared-callsign"},
+
+    {"id": "wf-ellipsis-1", "utterance": "そういえば昨日のやつ、うまくいった?", "target_slugs": ["distill-kura-wal"], "acceptable_related": ["weave-revision"], "must_not_anchor": [], "category": "ellipsis"},
+    {"id": "wf-ellipsis-2", "utterance": "あの件の続きで困ってるんだけど", "target_slugs": ["ds4-gpu-bringup"], "acceptable_related": [], "must_not_anchor": [], "category": "ellipsis"},
+
+    {"id": "wf-reversal-1", "utterance": "やっぱり前の方式に戻そうと思う", "target_slugs": ["inference-backend-choice"], "acceptable_related": [], "must_not_anchor": [], "category": "reversal"},
+    {"id": "wf-reversal-2", "utterance": "見直したら、あの判断は取り消しで", "target_slugs": ["storage-tiering-doctrine"], "acceptable_related": [], "must_not_anchor": [], "category": "reversal"},
+
+    {"id": "wf-superseded-1", "utterance": "推論サーバーどうする? あの古いプランでいい?", "target_slugs": ["inference-backend-choice"], "acceptable_related": [], "must_not_anchor": ["old-abandoned-plan"], "category": "superseded-plan"},
+    {"id": "wf-superseded-2", "utterance": "記憶の保存先、例の撤回した案で進める?", "target_slugs": ["memory-store-layout"], "acceptable_related": [], "must_not_anchor": ["sqlite-first-draft"], "category": "superseded-plan"},
+
+    {"id": "wf-cross-1", "utterance": "オプション取引のヘッジの話から離れるけど、GPUの電力ってどうだったっけ", "target_slugs": ["gpu-power-measure"], "acceptable_related": [], "must_not_anchor": ["lna-options-hedge"], "category": "cross-domain"},
+    {"id": "wf-cross-2", "utterance": "蔵の話はおいといて。PCIeの安定性、あれ原因判明した?", "target_slugs": ["pcie-audit-findings"], "acceptable_related": [], "must_not_anchor": [], "category": "cross-domain"},
+
+    {"id": "wf-recent-1", "utterance": "昨日決めたやつ、もう一度説明して", "target_slugs": ["distill-kura-wal"], "acceptable_related": ["gate-envelope-v6"], "must_not_anchor": [], "category": "recent-thread"},
+    {"id": "wf-recent-2", "utterance": "続きやろう。最後どこまで進んだっけ", "target_slugs": ["ds4-gpu-bringup"], "acceptable_related": [], "must_not_anchor": [], "category": "recent-thread"},
+
+    {"id": "wf-doctrine-1", "utterance": "なんでCPUモデルをエディタにしてるんだっけ", "target_slugs": ["cpu-editor-doctrine"], "acceptable_related": [], "must_not_anchor": [], "category": "old-doctrine"},
+    {"id": "wf-doctrine-2", "utterance": "確か重要な方針があったはず。数値を保存するときの", "target_slugs": ["tool-evidence-doctrine"], "acceptable_related": [], "must_not_anchor": [], "category": "old-doctrine"},
+
+    {"id": "wf-near-1", "utterance": "weaveのやつ、どっちだったっけ", "target_slugs": ["weave-revision"], "acceptable_related": [], "must_not_anchor": ["weave-cas"], "category": "near-collision"},
+    {"id": "wf-near-2", "utterance": "quantizationの件", "target_slugs": ["exl3-quantization"], "acceptable_related": [], "must_not_anchor": ["gguf-quantization"], "category": "near-collision"},
+
+    {"id": "wf-unknown-1", "utterance": "そういえば京都の家の改修どうしよう", "target_slugs": [], "acceptable_related": [], "must_not_anchor": [], "category": "unknown"},
+    {"id": "wf-unknown-2", "utterance": "learned the piano tuning trick yet?", "target_slugs": [], "acceptable_related": [], "must_not_anchor": [], "category": "unknown"}
+  ]
+}
