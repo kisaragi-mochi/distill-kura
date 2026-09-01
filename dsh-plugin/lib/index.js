@@ -263,40 +263,38 @@ function withoutStoreParam(tool) {
 function tools(cfg, state) {
   const target = (store) => (state.bound ? cfg.store : store || state.current);
 
+  // Registration order is the schema order a small model sees; the guidance says
+  // glance first — the confirmation door — with read and recall after it.
   const list = [
     defineTool({
-      name: "kura_recall",
+      name: "kura_glance",
       description:
-        `Recall from ${cfg.label} — long-term memory retrieved by MEANING, not keywords, then ` +
-        `walking the [[links]] between memories. Use it when you cannot tell WHICH memory the ` +
-        `question is about — the fallback when no slug on the map or in the conversation clearly ` +
-        `fits, not the first door. An empty answer means it is not remembered yet — say so ` +
-        `plainly instead of inventing something to fill the gap.` +
-        (state.bound ? ` This agent is bound to the '${cfg.store}' kura.` : ""),
+        `Confirm ONE memory from ${cfg.label} by its slug — the exact index line, the ` +
+        `verified KEEP sentence and its [[links]], about 150 tokens. Call it when you ` +
+        `recognise a slug on the resident map or from recall and want to be sure it is the ` +
+        `right memory before reading the whole thing. An unknown slug simply says there is ` +
+        `no memory by that name — a confirmation, not a search.`,
       parameters: {
-        question: {
-          type: "string",
-          description: "What you want to remember, as a natural question",
-          required: true,
-        },
-        hops: { type: "integer", description: "How many [[link]] hops to walk (default 1)" },
-        store: {
-          type: "string",
-          description: "Ask a different kura by store or mode name. Omit for the current one.",
-        },
+        slug: { type: "string", description: "Memory slug, without .md", required: true },
+        store: { type: "string", description: "Which kura. Omit for the current one." },
       },
       output: TEXT,
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         const to = target(args.store);
-        const d = await call(cfg, "POST", "/recall" + q(to),
-          { question: args.question, hops: args.hops ?? 1 }, exec?.signal);
-        const how = d.how === "meaning" ? "meaning" : `${d.how}  ⚠ degraded`;
-        return (
-          `${head(d.store || to, `${d.elapsed_s}s / ${how}`)}\n` +
-          `picked: ${JSON.stringify(d.picked)}\nwalked: ${JSON.stringify(d.walked)}\n\n` +
-          (d.context || "(nothing recalled — not remembered yet)")
-        );
+        let d;
+        try {
+          d = await call(cfg, "GET",
+            `/glance/${encodeURIComponent(args.slug)}` + q(to), undefined, exec?.signal);
+        } catch (e) {
+          // Same 404-by-design promise as kura_read: an unknown slug is "no such
+          // memory", not "the kura is unreachable".
+          if (/^kura 404\b/.test(String(e && e.message))) {
+            return `${head(to)}\n(no memory called ${args.slug})`;
+          }
+          throw e;
+        }
+        return `${head(to)}\n` + (d.text || `(no memory called ${args.slug})`);
       },
     }),
 
@@ -331,34 +329,38 @@ function tools(cfg, state) {
     }),
 
     defineTool({
-      name: "kura_glance",
+      name: "kura_recall",
       description:
-        `Confirm ONE memory from ${cfg.label} by its slug — the exact index line, the ` +
-        `verified KEEP sentence and its [[links]], about 150 tokens. Call it when you ` +
-        `recognise a slug on the resident map or from recall and want to be sure it is the ` +
-        `right memory before reading the whole thing. An unknown slug simply says there is ` +
-        `no memory by that name — a confirmation, not a search.`,
+        `Recall from ${cfg.label} — long-term memory retrieved by MEANING, not keywords, then ` +
+        `walking the [[links]] between memories. Use it when you cannot tell WHICH memory the ` +
+        `question is about — the fallback when no slug on the map or in the conversation clearly ` +
+        `fits, not the first door. An empty answer means it is not remembered yet — say so ` +
+        `plainly instead of inventing something to fill the gap.` +
+        (state.bound ? ` This agent is bound to the '${cfg.store}' kura.` : ""),
       parameters: {
-        slug: { type: "string", description: "Memory slug, without .md", required: true },
-        store: { type: "string", description: "Which kura. Omit for the current one." },
+        question: {
+          type: "string",
+          description: "What you want to remember, as a natural question",
+          required: true,
+        },
+        hops: { type: "integer", description: "How many [[link]] hops to walk (default 1)" },
+        store: {
+          type: "string",
+          description: "Ask a different kura by store or mode name. Omit for the current one.",
+        },
       },
       output: TEXT,
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         const to = target(args.store);
-        let d;
-        try {
-          d = await call(cfg, "GET",
-            `/glance/${encodeURIComponent(args.slug)}` + q(to), undefined, exec?.signal);
-        } catch (e) {
-          // Same 404-by-design promise as kura_read: an unknown slug is "no such
-          // memory", not "the kura is unreachable".
-          if (/^kura 404\b/.test(String(e && e.message))) {
-            return `${head(to)}\n(no memory called ${args.slug})`;
-          }
-          throw e;
-        }
-        return `${head(to)}\n` + (d.text || `(no memory called ${args.slug})`);
+        const d = await call(cfg, "POST", "/recall" + q(to),
+          { question: args.question, hops: args.hops ?? 1 }, exec?.signal);
+        const how = d.how === "meaning" ? "meaning" : `${d.how}  ⚠ degraded`;
+        return (
+          `${head(d.store || to, `${d.elapsed_s}s / ${how}`)}\n` +
+          `picked: ${JSON.stringify(d.picked)}\nwalked: ${JSON.stringify(d.walked)}\n\n` +
+          (d.context || "(nothing recalled — not remembered yet)")
+        );
       },
     }),
 

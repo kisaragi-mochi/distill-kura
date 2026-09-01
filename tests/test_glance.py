@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from distill_kura.glance import glance                     # noqa: E402
 from distill_kura.store import Store                       # noqa: E402
+from distill_kura.tokens import estimate                   # noqa: E402
 
 
 def build(tmp_path) -> Store:
@@ -103,3 +104,51 @@ def test_glance_needs_no_model(tmp_path):
     constructs no endpoint, no server, nothing — and the glance answers."""
     g = glance(build(tmp_path), "exl3-quantization")
     assert g["ok"] and g["relations"] == []
+
+
+def test_a_grouped_index_line_is_the_shared_recognition_line(tmp_path):
+    """Real indexes group related memories on one line
+    (`- topic — [A](a.md)/[B](b.md)` — a measured 26% of one store). The grouped
+    line IS the group's trigger, so glance must show that RAW line verbatim and
+    never fall back to a frontmatter description — which summarises one memory
+    and would break the verbatim contract."""
+    s = build(tmp_path)
+    s.remember_direct("storage-doctrine", "storage doctrine description", "body",
+                      title="Storage doctrine")
+    s.remember_direct("storage-encoding", "storage encoding description", "body",
+                      title="Storage encoding")
+    grouped = "- storage doctrine — [Storage doctrine](storage-doctrine.md)/" \
+              "[Storage encoding](storage-encoding.md)"
+    cur = open(s.index_path, encoding="utf-8").read()
+    lines = [l for l in cur.splitlines()
+             if "storage-doctrine" not in l and "storage-encoding" not in l]
+    with open(s.index_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n" + grouped + "\n")
+    for slug, link_text in (("storage-doctrine", "Storage doctrine"),
+                            ("storage-encoding", "Storage encoding")):
+        g = glance(s, slug)
+        assert g["ok"]
+        assert g["title"] == link_text
+        assert grouped[2:] in g["text"], "the raw grouped line, verbatim"
+        assert g["text"].startswith(f"[{slug}]\n")
+        assert "storage doctrine description" not in g["text"], \
+            "the frontmatter description must not leak in as the recognition line"
+        assert "storage encoding description" not in g["text"]
+
+
+def test_a_link_heavy_glance_is_bounded_to_the_token_budget(tmp_path):
+    """A memory can carry dozens of [[links]]; without a bound the glance stops
+    being the ~150-token confirmation it promises. The rendered text cuts the
+    links with an honest tail — the dict keeps the FULL list for tooling."""
+    s = build(tmp_path)
+    siblings = [f"related-memory-{i:02d}-with-a-long-enough-slug" for i in range(24)]
+    for name in siblings:
+        s.remember_direct(name, f"description of {name}", "body")
+    s.remember_direct("link-hub", "the hub that links everything",
+                      "Body with " + " ".join(f"[[{x}]]" for x in siblings),
+                      title="Link hub")
+    g = glance(s, "link-hub")
+    assert g["ok"]
+    assert g["links"] == siblings, "the dict keeps the FULL links list"
+    assert "more links (open the memory for them)" in g["text"]
+    assert estimate(g["text"]) <= 200

@@ -332,3 +332,19 @@ def test_a_whitespace_store_name_is_refused_rather_than_unbinding():
         assert p.stdout.strip() == ""      # it never served a single frame
     finally:
         srv.shutdown()
+
+
+def test_tools_list_registers_glance_before_read_and_recall():
+    """Guidance says glance first — the confirmation door, with recall as the
+    fallback. Registration order IS the schema order a small model sees, so the
+    TOOLS list must lead with kura_glance. Import-time filtering is env-sensitive
+    (KURA_READONLY hides kura_remember, KURA_STORE binds), so run it as the
+    module expects: read-only default, no store."""
+    os.environ["KURA_READONLY"] = "1"
+    os.environ.pop("KURA_STORE", None)
+    import importlib
+    import distill_kura.mcp as mcp
+    importlib.reload(mcp)
+    names = [t["name"] for t in mcp.TOOLS]
+    assert names.index("kura_glance") < names.index("kura_read")
+    assert names.index("kura_read") < names.index("kura_recall")

@@ -107,6 +107,34 @@ def _bound_note() -> str:
 
 TOOLS: list[dict] = [
     {
+        "name": "kura_glance",
+        "description": (
+            f"Confirm ONE memory from {LABEL} by its slug — the exact index line, the "
+            "verified KEEP sentence and its [[links]], about 150 tokens. Call it when you "
+            "recognise a slug on the resident map or from recall and want to be sure it is "
+            "the right memory before reading the whole thing. An unknown slug simply says "
+            "there is no memory by that name — a confirmation, not a search."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"slug": {"type": "string", "description": "Memory slug, without .md"},
+                           "store": {"type": "string", "description": "Which kura. Omit for the current one."}},
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "kura_read",
+        "description": (
+            f"Read one whole memory from {LABEL} by its slug (e.g. 'storage-doctrine'). "
+            "Use after kura_glance (or kura_recall) when a summary is not enough and you "
+            "need the full text."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"slug": {"type": "string", "description": "Memory slug, without .md"},
+                           "store": {"type": "string", "description": "Which kura. Omit for the current one."}},
+            "required": ["slug"],
+        },
+    },
+    {
         "name": "kura_recall",
         "description": (
             f"Recall from {LABEL} — long-term memory retrieved by MEANING rather than keyword, "
@@ -125,34 +153,6 @@ TOOLS: list[dict] = [
                           "description": "Which kura to ask (store or mode name). Omit for the current one."},
             },
             "required": ["question"],
-        },
-    },
-    {
-        "name": "kura_read",
-        "description": (
-            f"Read one whole memory from {LABEL} by its slug (e.g. 'storage-doctrine'). "
-            "Use after kura_glance (or kura_recall) when a summary is not enough and you "
-            "need the full text."),
-        "inputSchema": {
-            "type": "object",
-            "properties": {"slug": {"type": "string", "description": "Memory slug, without .md"},
-                           "store": {"type": "string", "description": "Which kura. Omit for the current one."}},
-            "required": ["slug"],
-        },
-    },
-    {
-        "name": "kura_glance",
-        "description": (
-            f"Confirm ONE memory from {LABEL} by its slug — the exact index line, the "
-            "verified KEEP sentence and its [[links]], about 150 tokens. Call it when you "
-            "recognise a slug on the resident map or from recall and want to be sure it is "
-            "the right memory before reading the whole thing. An unknown slug simply says "
-            "there is no memory by that name — a confirmation, not a search."),
-        "inputSchema": {
-            "type": "object",
-            "properties": {"slug": {"type": "string", "description": "Memory slug, without .md"},
-                           "store": {"type": "string", "description": "Which kura. Omit for the current one."}},
-            "required": ["slug"],
         },
     },
     {
