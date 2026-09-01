@@ -24,7 +24,7 @@ import os
 import time
 from dataclasses import dataclass
 
-from .store import Store
+from .store import Store, contained
 from .tokens import estimate
 from .weave import Loom
 
@@ -33,7 +33,7 @@ TRAIL_END = "<<<END KURA-TRAIL>>>"
 # Constant on purpose: a header that carried a date or a revision number would
 # re-price the prefix cache every time the trail was rebuilt.
 HEADER = "CURRENT PATH — these are recent breadcrumbs, not the whole memory:"
-STATE_VERSION = 1
+STATE_VERSION = 2
 
 
 def _sha256(text: str) -> str:
@@ -42,11 +42,16 @@ def _sha256(text: str) -> str:
 
 @dataclass
 class TrailStamp:
-    """What the trail was built FROM. Captured the way `weave()` captures it:
-    the revision BEFORE the index is read, so a mutation landing between the two
-    shows up as a moved revision at persist time — the safe direction."""
+    """What the trail was built FROM — canonical state AND the knobs that shape it.
+    The revision is captured BEFORE the index is read (the weave's rule), and the
+    spec/valid_until halves exist because the trail's own docstring says the fresh
+    window slides with time: a trail built on day 13 read on day 15 with an
+    unchanged store would otherwise wear a valid freshness stamp over breadcrumbs
+    that have aged out of the window."""
     source_revision: int
     source_sha256: str
+    spec_sha256: str
+    valid_until: float
 
 
 class Trail:
@@ -56,26 +61,58 @@ class Trail:
         self.loom = loom or Loom(store)
         self.trail_tokens = int(trail_tokens)
         self.out_path = out_path or os.path.join(store.still, "trailhead.md")
+        # The same three guards the loom carries — a derived writer must never
+        # touch a canonical file. The trail is rebuildable from the store at any
+        # time; a memory it overwrote is not.
+        if os.path.abspath(self.out_path) == os.path.abspath(store.index_path):
+            raise ValueError(
+                f"the trail would overwrite the canonical index ({store.index_path}). "
+                "Trail to a different file.")
+        inside = contained(store.path, self.out_path)
+        if inside and not contained(store.still, self.out_path):
+            # The loom's wound, reopened: `out_path` at a store-root `.md` silently
+            # eats a memory one rebuild at a time while the stats say `written`.
+            raise ValueError(
+                f"the trail would be written into a memory slot ({self.out_path}); "
+                f"rebuilding there destroys that memory. Put it under {store.still}, "
+                f"or outside the store entirely.")
+        if inside and store.write_policy == "frozen":
+            raise ValueError(f"store '{store.name}' is frozen: nothing may be written "
+                             f"inside it, including the trail. Point the trail outside "
+                             f"the store to keep one for an archive.")
         self.state_path = self.out_path + ".state.json"
+
+    def _spec(self) -> dict:
+        """Everything besides the canonical state that shapes the trail's bytes."""
+        return {"fresh_days": self.loom.fresh_days,
+                "pinned_types": list(self.loom.pinned_types),
+                "trail_tokens": self.trail_tokens,
+                "bulk_touch_share": self.loom.bulk_touch_share}
+
+    def spec_sha256(self) -> str:
+        return _sha256(json.dumps(self._spec(), sort_keys=True))
 
     # ── building ─────────────────────────────────────────────────────────
     def build(self) -> tuple[str | None, TrailStamp]:
         """The trail text (None when the fresh layer is empty — an empty CURRENT
         PATH block would cost prompt tokens to say nothing), and the stamp of the
-        canonical state it was built from."""
-        stamp = TrailStamp(self.store.revision(), _sha256(self.store.index_text()))
+        canonical state AND shaping spec it was built from."""
         now = time.time()
+        stamp = TrailStamp(self.store.revision(), _sha256(self.store.index_text()),
+                           self.spec_sha256(), 0.0)
         fresh = [s for s in self.store.slugs()
                  if self.loom.layer_of(s, now) == "fresh"]
         # Newest first by the memory's own internal date (the loom's age logic:
         # a date written inside the memory, mtime only when nothing bulk-touched
         # it). Ties break on the slug, so the same store always yields the same
         # bytes at the same revision.
-        fresh.sort(key=lambda s: (self.loom.age_days(s, now), s))
+        ages = {s: self.loom.age_days(s, now) for s in fresh}
+        fresh.sort(key=lambda s: (ages[s], s))
 
         lines: list[str] = []
         seen_line: set[str] = set()
         used = 0
+        included: list[float] = []              # ages of the breadcrumbs included
         for slug in fresh:
             line = self._index_line(slug)
             if line is None or line in seen_line:      # a grouped line names several
@@ -86,8 +123,15 @@ class Trail:
             seen_line.add(line)
             lines.append(line)
             used += cost
+            included.append(ages[slug])
         if not lines:
             return None, stamp
+        # How long this trail can call itself current: until the FIRST included
+        # breadcrumb ages out of the fresh window. Past that moment the text is a
+        # lie about the present even though the store never moved — the pure-time
+        # hazard the revision and the index hash cannot see.
+        horizon_days = min(self.loom.fresh_days - a for a in included)
+        stamp.valid_until = now + max(0.0, horizon_days) * 86400.0
         text = (f"{TRAIL_BEGIN}\n{HEADER}\n" + "\n".join(lines)
                 + f"\n{TRAIL_END}\n")
         return text, stamp
@@ -109,6 +153,10 @@ class Trail:
         moved since the build. `None` (nothing fresh) REMOVES the trail: a
         surviving "current path" of stale breadcrumbs is a lie about the present."""
         if self.store.write_policy == "frozen":
+            # Reachable only for a trail OUTSIDE the store (the constructor refuses
+            # in-store paths on a frozen store): taking the store lock would write
+            # a lock file inside it, so the CAS check runs unlocked — and nothing
+            # can move a frozen store's index anyway.
             return self._persist_checked(text, stamp)
         with self.store._locked():
             return self._persist_checked(text, stamp)
@@ -152,7 +200,8 @@ class Trail:
     @staticmethod
     def _state_for(stamp: TrailStamp, trail_sha: str) -> dict:
         return {"version": STATE_VERSION, "source_revision": stamp.source_revision,
-                "source_sha256": stamp.source_sha256, "trail_sha256": trail_sha}
+                "source_sha256": stamp.source_sha256, "trail_sha256": trail_sha,
+                "spec_sha256": stamp.spec_sha256, "valid_until": stamp.valid_until}
 
     # ── reading it back ──────────────────────────────────────────────────
     def text_on_disk(self) -> str | None:
@@ -171,21 +220,33 @@ class Trail:
 
     def is_stale(self) -> bool:
         """True unless the trail on disk is provably the product of the current
-        canonical state. No file, no (complete, current-version) record, a moved
-        index, a moved revision, or a text that no longer hashes to its own
-        record — each of those is stale, and one rebuild heals all of them."""
+        canonical state, shaped by the current spec, and still inside its own
+        time horizon. No file, no (complete, current-version) record, a moved
+        index, a moved revision, a changed config, a text that no longer hashes
+        to its own record, or a passed valid_until — each is stale, and one
+        rebuild heals all of them.
+
+        Revision 0 is an HONEST value (a store whose mutations predate the
+        counter, the weave's documented contract) and is checked by type, not
+        truthiness — `if not st.get(...)` used to read 0 as "missing" and leave
+        such a store permanently stale."""
         text = self.text_on_disk()
         if text is None:
             return True
         st = self._state()
         if st.get("version") != STATE_VERSION:
             return True                       # a future format is not ours to trust
-        for k in ("source_revision", "source_sha256", "trail_sha256"):
+        for k in ("source_sha256", "trail_sha256", "spec_sha256", "valid_until"):
             if not st.get(k):
                 return True                   # half a record proves nothing
-        return (self.store.revision() != st["source_revision"]
+        revision = st.get("source_revision")
+        if not (isinstance(revision, int) and not isinstance(revision, bool)):
+            return True
+        return (self.store.revision() != revision
                 or _sha256(self.store.index_text()) != st["source_sha256"]
-                or _sha256(text) != st["trail_sha256"])
+                or _sha256(text) != st["trail_sha256"]
+                or self.spec_sha256() != st["spec_sha256"]
+                or time.time() > float(st["valid_until"]))
 
     # ── one-shot ─────────────────────────────────────────────────────────
     def write(self) -> dict:
