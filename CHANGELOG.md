@@ -55,6 +55,26 @@ already sharing the projects, people, decisions, failures and turns of phrase.
   agent-only and are refused with any other routing, so one flag can never swap
   the production path's thinker.
 
+- **USER callsigns (M3)**: the shared vernacular ("全員野球") that routes back to
+  a memory — gated like a quote, because a routing word is worth exactly its
+  provenance. Only an exact substring of a SURVIVING [USER] quote passes
+  verify_callsigns (the agent coining a nickname, a tool printing the string, a
+  paraphrase of what the human "meant" — all the same refusal); 3–40 codepoints
+  after NFKC+casefold with the display keeping the human's spelling; at most two.
+  Provenance lives in the manifest (`memory_slug` is code-chosen — compose,
+  EXTENDS or COVERED target, never a model proposal; `routing_cues_version`
+  stays separate from `gate_version`). A COVERED candidate keeps a late-born
+  cue: memory novelty and routing novelty are different questions, and the new
+  word is provenanced against the existing slug without moving one canonical
+  byte. `_still/cues.json` is a derived index rebuilt from hash-verified
+  manifests (delete it and the same ledger returns); a cue naming a slug outside
+  slug_set() is not routing material, and the same cue on two memories is
+  AMBIGUOUS — silence, never a guess. Tier zero answers through a pre-head:
+  a unique verified cue in the question routes directly (`how=fastpath-cue`,
+  the cue named in the reply), not mixed into the five heads; ambiguous or
+  absent is silence and the heads run exactly as before. `kura bench worldline
+  --no-cues` runs the comparison that isolates what the shared vocabulary buys.
+
 ### The full-repo review (2026-09): every finding verified, then fixed
 
 A review pass over every module, with each finding verified against the code (and
