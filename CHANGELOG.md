@@ -27,9 +27,33 @@ already sharing the projects, people, decisions, failures and turns of phrase.
   reused verbatim — current position, not importance; the read log is never
   consulted. Appended AFTER the byte-stable map so a trail-only change (the
   fresh window slides with time) leaves the map's prefix identical — pinned by
-  test — with the cloth's two-ended freshness proof; a stale trail is not
-  appended and an empty fresh layer removes it rather than lying about the
-  present.
+  test — with the cloth's two-ended freshness proof extended by a config-spec
+  hash and a `valid_until` horizon (the moment the first included breadcrumb
+  ages out; time alone retires the trail). A stale trail is not appended, an
+  empty fresh layer removes it, the map outranks it at the hard ceiling, and
+  `kura tend` rebuilds it after every weave and whenever its horizon passes —
+  the watcher's trail track is model-free and counted as work. Hardened by an
+  outside review: the trail carries the loom's containment guards (never the
+  canonical index, never a memory slot, nothing inside a frozen store), and
+  revision 0 proves a trail as well as any other number.
+
+- **Glance, reviewed twice**: grouped index lines (`- topic — [A](a.md)/[B](b.md)`,
+  a measured 26% of one store) return their whole shared line verbatim; the
+  ~150-token contract is a TARGET (the recognition line and the verified KEEP are
+  never cut — links are budgeted with an out-loud `+N more links` tail, and the
+  reply carries tokens_est / over_target / links_shown / links_omitted); and both
+  tool registries register glance before read before recall, the order the
+  guidance teaches.
+
+- **The worldline benchmark, hardened**: agent-only reads the model's reply as a
+  WHOLE JSON array (prose is a format error — following the format is part of the
+  ability), counts only exact slug_set membership as `opened`, separates
+  `proposed_slugs` / `invalid_slugs` / `format_error`, scores an unknown case as
+  correctly refused ONLY on a valid empty array (a hallucinated slug no longer
+  vanishes into a false pass), and stamps the url+model of whoever was actually
+  measured — `--agent-url`/`--agent-model` name a conversation model for
+  agent-only and are refused with any other routing, so one flag can never swap
+  the production path's thinker.
 
 ### The full-repo review (2026-09): every finding verified, then fixed
 
