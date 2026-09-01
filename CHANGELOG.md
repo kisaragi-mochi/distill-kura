@@ -2,6 +2,35 @@
 
 ## 0.3.0 — unreleased
 
+### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
+
+The next purpose, in the plan's words: from the smallest breadcrumb, restore the
+large shared world correctly — on a 50 tok/s prefill model, opening a session
+already sharing the projects, people, decisions, failures and turns of phrase.
+
+- **`kura bench worldline`** (M0): twenty opening-utterance cases across ten
+  categories (a shared callsign, an ellipsis, a superseded plan, a question the
+  store knows nothing about) with a raw-metrics JSONL trace and three routing
+  modes that keep the credit separate — `agent-only` (the conversation model
+  reads the resident map alone; an unreachable model is an outage, never an
+  honest empty answer), `fastpath` (tier zero only; its silence IS the
+  measurement), `full` (the production path). No composite score exists, on
+  purpose. A case written against another house is skipped with its reason.
+- **`kura_glance`** (M1): the "ああ、それね" tier — an exact ~150-token
+  confirmation of one recognised slug (canonical index line, the KEEP sentence
+  only when curation is verified, in-store [[links]]) before a full read costs
+  its tokens. `GET /glance/<slug>`, `kura glance`, MCP and DSH tools, and the
+  tool ladder turned around: glance what you recognise, read for detail, recall
+  only when the NAME is unclear — the thinker leaves the everyday critical path.
+- **The Hot Trail** (M2, `_still/trailhead.md`): the fresh layer, newest
+  internal date first, ~200 tokens, every line an existing recognition line
+  reused verbatim — current position, not importance; the read log is never
+  consulted. Appended AFTER the byte-stable map so a trail-only change (the
+  fresh window slides with time) leaves the map's prefix identical — pinned by
+  test — with the cloth's two-ended freshness proof; a stale trail is not
+  appended and an empty fresh layer removes it rather than lying about the
+  present.
+
 ### The full-repo review (2026-09): every finding verified, then fixed
 
 A review pass over every module, with each finding verified against the code (and
