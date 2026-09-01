@@ -42,8 +42,10 @@ the cloth's mtime ends up NEWER than the index — so any mtime-based staleness 
 the stale cloth fresh, and pay-forward bakes the stale map into KV. So the weave records
 the sha256 of the index text it read, `persist()` re-hashes the index under the store's
 write lock and refuses a cloth whose source has moved, and `is_stale()` compares hashes,
-never mtimes. The hash lives in a sidecar (`<cloth>.state.json`), not in the cloth text:
-the injected map must stay byte-stable and free of anything volatile.
+never mtimes — of the source AND of the cloth itself, so a corrupted or hand-edited
+cloth cannot wear a valid freshness stamp. The hashes live in a sidecar
+(`<cloth>.state.json`), not in the cloth text: the injected map must stay byte-stable
+and free of anything volatile.
 """
 from __future__ import annotations
 
@@ -640,10 +642,11 @@ class Loom:
         if os.path.exists(self.out_path):
             prev = open(self.out_path, encoding="utf-8", errors="ignore").read()
             if prev == cloth.text:
-                # Idempotent: no churn, no backup. The source record is still brought
-                # up to date — a cloth written before the record existed is
-                # byte-identical yet unprovable, and one no-op weave must heal that.
-                self._record_source(current)
+                # Idempotent: no churn, no backup. The record is still brought up to
+                # date — a cloth written before the record existed (or with only half
+                # of it) is byte-identical yet unprovable, and one no-op weave must
+                # heal that.
+                self._record_state(current, _sha256(cloth.text))
                 cloth.stats["written"] = False
                 return cloth.stats
             bdir = os.path.join(self.store.still, "index-backups")
@@ -661,22 +664,25 @@ class Loom:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(cloth.text)
         os.replace(tmp, self.out_path)
-        # The cloth first, its source record second: a crash between the two leaves an
+        # The cloth first, its record second: a crash between the two leaves an
         # unprovable cloth (served as stale — safe), never a fresh stamp on old text.
-        self._record_source(current)
+        self._record_state(current, _sha256(cloth.text))
         cloth.stats["written"] = True
         cloth.stats["path"] = self.out_path
         return cloth.stats
 
-    def _record_source(self, sha: str) -> None:
-        """Remember which canonical index the cloth on disk was verified against."""
-        if self.source_sha256() == sha:
+    def _record_state(self, source_sha: str, cloth_sha: str) -> None:
+        """Remember which canonical index the cloth on disk was verified against AND
+        which cloth bytes were actually written. The stamp proves the PRODUCT too:
+        without `cloth_sha256`, a cloth corrupted or hand-edited while the index sat
+        unchanged would still wear a valid freshness stamp."""
+        record = {"cloth_sha256": cloth_sha, "source_sha256": source_sha}
+        if self._state() == record:
             return                               # no churn when nothing changed
         os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
         tmp = self.state_path + f".tmp.{os.getpid()}"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"source_sha256": sha}, f, ensure_ascii=False, indent=1,
-                      sort_keys=True)
+            json.dump(record, f, ensure_ascii=False, indent=1, sort_keys=True)
         os.replace(tmp, self.state_path)
 
     # ── reading it back ──────────────────────────────────────────────────
@@ -686,28 +692,39 @@ class Loom:
         except OSError:
             return None
 
-    def source_sha256(self) -> str | None:
-        """The recorded hash of the index the cloth on disk was woven from, if any."""
+    def _state(self) -> dict:
         try:
             with open(self.state_path, encoding="utf-8") as f:
                 d = json.load(f)
-            v = d.get("source_sha256") if isinstance(d, dict) else None
-            return v if isinstance(v, str) and v else None
+            return d if isinstance(d, dict) else {}
         except (OSError, ValueError):
-            return None
+            return {}
+
+    def source_sha256(self) -> str | None:
+        """The recorded hash of the index the cloth on disk was woven from, if any."""
+        v = self._state().get("source_sha256")
+        return v if isinstance(v, str) and v else None
 
     def is_stale(self) -> bool:
-        """True when the canonical index has moved on since the cloth was woven.
+        """True when the canonical index has moved on since the cloth was woven —
+        or when the cloth itself is no longer the text that was written.
 
         By HASH, not by mtime. A memory poured while the loom was busy leaves the
         cloth NEWER than the index — mtime calls exactly that state fresh, which is
-        the one lie pay-forward would then bake into KV. The recorded hash is the
-        index `persist()` verified under the store lock; no record means the cloth
-        cannot be proven current, which is treated the same as stale — the canonical
-        index is always the safe fallback, and one re-weave heals the record."""
-        if not os.path.exists(self.out_path):
+        the one lie pay-forward would then bake into KV. The record `persist()`
+        wrote under the store lock proves both ends: the SOURCE (the current index
+        hashes to `source_sha256`) and the PRODUCT (the cloth on disk hashes to
+        `cloth_sha256`) — a corrupted or hand-edited cloth must not wear a valid
+        freshness stamp. No record, or half a record, means the cloth cannot be
+        proven current, which is treated the same as stale — the canonical index is
+        always the safe fallback, and one re-weave heals the record."""
+        cloth = self.cloth_on_disk()
+        if cloth is None:
             return True
-        recorded = self.source_sha256()
-        if recorded is None:
+        st = self._state()
+        source, product = st.get("source_sha256"), st.get("cloth_sha256")
+        if not (isinstance(source, str) and source
+                and isinstance(product, str) and product):
             return True
-        return _sha256(self.store.index_text()) != recorded
+        return (_sha256(self.store.index_text()) != source
+                or _sha256(cloth) != product)

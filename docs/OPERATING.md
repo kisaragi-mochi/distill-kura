@@ -59,7 +59,7 @@ one-pass-when-quiet loop, but `tend` is the one to run.
 
 ## Deploying means proving it
 
-**Issuing a restart command is not evidence the new build is serving.** The night this
+**Issuing a restart command is not evidence the new build is serving. (`build_id` is a launch stamp — what the launcher claimed — not a code attestation; it is exactly enough to catch a stale survivor holding the port).** The night this
 section was written, a restart "succeeded" — and an old process, bound to `0.0.0.0`,
 kept the port and served three deploys' worth of stale code while `/health` answered
 `ok: true` the whole time. Two habits close that hole:

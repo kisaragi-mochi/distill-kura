@@ -410,6 +410,32 @@ def test_a_cloth_without_a_source_record_is_not_trusted(tmp_path):
     again = loom.write()                        # byte-identical cloth, no churn…
     assert again["written"] is False
     assert loom.is_stale() is False             # …but the record is healed
+    import json as _json
+    st = _json.load(open(loom.state_path, encoding="utf-8"))
+    assert st["source_sha256"] and st["cloth_sha256"]   # both ends re-recorded
+
+
+def test_a_mutated_cloth_cannot_wear_a_valid_freshness_stamp(tmp_path):
+    """The sidecar proves the PRODUCT as well as the source: were only the index
+    hashed, a cloth corrupted or hand-edited while the index sat unchanged would
+    still say fresh — and prefill would wear the mutated map on every turn. Either
+    hash mismatching is stale; the canonical index is the fallback; one re-weave
+    heals."""
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    assert loom.is_stale() is False             # steady state unchanged
+    good = loom.cloth_on_disk()
+    assert "43.7" in good                       # the fresh line rides in full
+    with open(loom.out_path, "w", encoding="utf-8") as f:
+        f.write(good.replace("43.7", "99.9"))   # a hand-edit; the index untouched
+    assert loom.is_stale() is True
+    pf = build(s, loom)
+    assert pf.stats.get("stale") is True and pf.stats["source"] == "canonical"
+    assert "99.9" not in pf.text                # the mutation is never served
+    healed = loom.write()
+    assert healed["written"] is True
+    assert loom.cloth_on_disk() == good and loom.is_stale() is False
 
 
 # ── the attribution floor ───────────────────────────────────────────────────

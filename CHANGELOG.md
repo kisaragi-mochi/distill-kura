@@ -163,6 +163,35 @@ and `tampered_manifest` per memory.
   over. A source that already credits the human may keep a crediting trigger.
   `LEDGER_VERSION` → 7 so cached hooks re-earn their place.
 
+### The mark signs the envelope (gate_version 6)
+
+Signing the name exposed the rest of the envelope. Two doors closed at once:
+the judge is no longer a mint — a draft whose mark is invalid for its CURRENT
+name is mechanically tossed before any model sees it (a rename used to be
+laundered through FIX, which re-signed the stolen identity), and the mark now
+signs `slug + kind + evidence-manifest digest + body`. `kind` decides pinned
+status in the resident map, and a header edit used to promote a memory without
+touching a signed byte; the manifest pointer could be swapped to a DIFFERENT
+validly-hashed manifest, forging provenance that no tamper check would ever
+see. Both attacks are regression tests now. `pour` also re-hashes the
+manifest's bytes before the memory exists — a mark can be valid while the file
+behind it rots, and provenance must exist before the memory does.
+
+tidy's CAS gains its second end (the memory body the model read is re-read
+under the lock, not just the index line), doctor reports
+`invalid_manifest_pointer` for pointers that are not even digests, the
+verified loader requires a JSON object, and the freshness stamp on the woven
+cloth is a two-ended proof — from the weave's own hands:
+
+- The cloth's freshness stamp now proves the PRODUCT as well as the source:
+  `persist()` records `cloth_sha256` (the exact cloth bytes written) beside
+  `source_sha256` in `<cloth>.state.json`, and `is_stale()` — and through it
+  prefill's serving check — requires BOTH to match; a cloth corrupted or
+  hand-edited while the index sat unchanged is served as stale (canonical
+  fallback, one re-weave heals). Crash ordering unchanged: cloth first, record
+  second, so a crash between the two yields "unprovable → stale", never a fresh
+  stamp on old text.
+
 ## 0.2.0
 
 The first release shaped by outside review: a security/isolation review, an adversarial

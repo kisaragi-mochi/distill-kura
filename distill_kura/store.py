@@ -866,9 +866,10 @@ class Store:
         if hashlib.sha256(raw).hexdigest() != hexdigest:
             return None
         try:
-            return json.loads(raw.decode("utf-8"))
+            man = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             return None
+        return man if isinstance(man, dict) else None
 
     def doctor(self) -> dict:
         from . import fastpath          # local: fastpath is a layer ON TOP of this API
@@ -892,6 +893,7 @@ class Store:
         invalid_tags = {n: why for n in files if (why := self.tag_problems(n))}
         missing_manifest = []
         tampered_manifest = []
+        invalid_manifest_pointer = []
         for n in files:
             fm = self.frontmatter(n)
             # Every provenance pointer is audited, not just the newest one:
@@ -899,7 +901,11 @@ class Store:
             # recurred_manifest marks another occasion — any of them broken is a
             # hole in the story of why this memory exists.
             for key, val in fm.items():
-                if not (key.endswith("_manifest") and str(val).startswith("sha256:")):
+                if not key.endswith("_manifest"):
+                    continue
+                if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(val)):
+                    if n not in invalid_manifest_pointer:
+                        invalid_manifest_pointer.append(n)   # a pointer that is not even a digest
                     continue
                 hexd = str(val)[7:]
                 if not os.path.exists(os.path.join(self.path, "_evidence", hexd + ".json")):
@@ -933,6 +939,7 @@ class Store:
             "index_tokens_est": estimate(idx),
             "invalid_tags": invalid_tags,
             "tampered_manifest": tampered_manifest,
+            "invalid_manifest_pointer": invalid_manifest_pointer,
             "missing_manifest": sorted(missing_manifest),
             "tagged": sum(1 for n in files if self.tags(n)),
             # Who wrote the curation. `tampered` is always named. `unsigned` is named

@@ -488,10 +488,12 @@ class Distiller:
             # covers the whole model-written surface (title, trigger, section,
             # curation sentences, and a judge's FIX before it is re-signed), with
             # Unicode-normalised tokens and single digits verified. 5: the slug is
-            # part of the gated surface and the mark signs slug+body — identity,
-            # not just content. Additive — a v1 manifest is still read by
-            # everything that reads manifests.
-            "gate_version": 5,
+            # part of the gated surface. 6: the mark signs the whole envelope —
+            # slug, kind, evidence-manifest digest and body — the judge never
+            # judges an unsigned draft, and pour verifies the manifest's bytes.
+            # Additive — a v1 manifest is still read by everything that reads
+            # manifests.
+            "gate_version": 6,
             "source_key": key,
             "source_file": os.path.basename(source),
             "source_sha256": self._source_digest(source),
@@ -561,7 +563,7 @@ class Distiller:
             f.write(f"<!-- distilled {datetime.now(timezone.utc).isoformat()[:19]}Z\n"
                     f"     source: {os.path.basename(source)}\n"
                     f"     kind: {d['kind']}   evidence classes: {','.join(d['classes'])}{flags}\n"
-                    f"     gate: {self._mark(d['slug'], body)}\n"
+                    f"     gate: {self._mark(d['slug'], d['kind'], manifest, body)}\n"
                     f"     evidence_manifest: sha256:{manifest}\n"
                     f"     evidence:\n{ev}\n-->\n" + body)
         return p
@@ -585,12 +587,35 @@ class Distiller:
     def _draft_body(raw: str) -> str:
         return re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S).strip()
 
-    def _mark(self, slug: str, body: str) -> str:
-        # v5: the mark binds the NAME as well as the text. A signed draft renamed
-        # from 12-gpu-rig.md to 99-gpu-rig.md used to keep a valid mark and pour
-        # under the new identity — "what memory this is" was never signed.
-        return hmac.new(self._gate_key(), f"{slug}\n{body.strip()}".encode("utf-8"),
+    def _mark(self, slug: str, kind: str, manifest: str, body: str) -> str:
+        # v6: the mark signs the ENVELOPE, not just the text. v5 bound the name
+        # (a renamed draft used to pour under a stolen identity); v6 also binds
+        # what KIND of memory this is (kind decides pinned status in the resident
+        # map — a header edit used to promote a memory without touching a signed
+        # byte) and WHICH evidence it claims to come from (a pointer swapped to a
+        # different, validly-hashed manifest used to forge provenance forever).
+        blob = f"gate-format-v6\n{slug}\n{kind}\n{manifest}\n{body.strip()}"
+        return hmac.new(self._gate_key(), blob.encode("utf-8"),
                         hashlib.sha256).hexdigest()[:32]
+
+    _ENV_KIND = re.compile(r"kind:\s*(\w+)")
+    _ENV_MAN = re.compile(r"evidence_manifest:\s*sha256:([0-9a-f]{64})")
+    _ENV_MARK = re.compile(r"gate:\s*([0-9a-f]{32})")
+
+    def _envelope_of(self, raw: str) -> tuple[str, str, str] | None:
+        """(kind, manifest_hex, mark) from a draft's header — None if any is absent."""
+        head = raw.split("-->")[0]
+        k = self._ENV_KIND.search(head)
+        m = self._ENV_MAN.search(head)
+        g = self._ENV_MARK.search(head)
+        return (k.group(1), m.group(1), g.group(1)) if (k and m and g) else None
+
+    def _draft_mark_valid(self, slug: str, raw: str) -> bool:
+        env = self._envelope_of(raw)
+        if env is None:
+            return False
+        kind, man, mark = env
+        return hmac.compare_digest(mark, self._mark(slug, kind, man, self._draft_body(raw)))
 
     def pour(self, slug: str) -> dict:
         # A draft is named by a bare slug. Joined as a path, `../../../out/o` read a file
@@ -603,11 +628,16 @@ class Distiller:
         raw = open(p, encoding="utf-8").read()
         if "🚫" in raw.split("-->")[0]:
             return {"ok": False, "why": "credits the human with no [USER] evidence; not poured"}
-        m = re.search(r"gate:\s*([0-9a-f]{32})", raw.split("-->")[0])
-        if not m or not hmac.compare_digest(m.group(1), self._mark(slug, self._draft_body(raw))):
+        if not self._draft_mark_valid(slug, raw):
             return {"ok": False,
                     "why": "this draft carries no valid gate mark — it was not staged by "
-                           "the distiller, or its body was edited afterwards"}
+                           "the distiller, or its name, kind, manifest or body was "
+                           "edited afterwards"}
+        env = self._envelope_of(raw)
+        if env and self.store.load_manifest_verified(env[1]) is None:
+            return {"ok": False,
+                    "why": "the evidence manifest this draft claims is missing or "
+                           "tampered — provenance must exist before the memory does"}
         body = re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S)
         kind = re.search(r"kind:\s*(\w+)", raw)
         head, add = _split_draft(body)
@@ -691,8 +721,33 @@ class Distiller:
             ds = ds[:limit]
         if not ds:
             return {"ok": True, "why": "no drafts"}
+        # The judge must never be a mint: a draft whose mark is invalid for its
+        # CURRENT name (renamed, or header-edited) is not judged at all — a FIX
+        # re-signs, and re-signing laundered a stolen identity into a valid one.
+        signed, pre_tossed = [], []
+        for pth in ds:
+            s0 = os.path.basename(pth)[:-3]
+            raw0 = open(pth, encoding="utf-8").read()
+            if self._draft_mark_valid(s0, raw0):
+                signed.append(pth)
+                continue
+            # Mechanically, without a model: judging an unsigned draft would let a
+            # FIX mint a fresh mark for a stolen name — the judge must never be a
+            # mint. The toss is recorded like any other, body included.
+            with open(os.path.join(self.still, "tossed.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps({"slug": s0, "verdict": "TOSS",
+                                    "why": "no valid mark for its current name/kind/manifest",
+                                    "at": datetime.now(timezone.utc).isoformat()[:19],
+                                    "body": raw0[:4000]}, ensure_ascii=False) + "\n")
+            os.remove(pth)
+            pre_tossed.append(s0)
+            _log(f"  ✗ toss {s0} — no valid mark for its current name; never judged")
+        ds = signed
+        if not ds:
+            return {"ok": True, "poured": 0, "fixed": 0, "tossed": len(pre_tossed),
+                    "left": len(glob.glob(os.path.join(self.drafts_dir, "*.md")))}
         _log(f"drain: {len(ds)} drafts, {self.slots} at a time")
-        poured, fixed, tossed = [], [], []
+        poured, fixed, tossed = [], [], pre_tossed
         with ThreadPoolExecutor(max_workers=self.slots) as pool:
             for j in pool.map(self.judge_draft, ds):
                 p = os.path.join(self.drafts_dir, j["slug"] + ".md")
@@ -723,11 +778,13 @@ class Distiller:
                     if ev is None:
                         _log(f"  ⚠ fix refused {j['slug']} — no readable evidence manifest")
                         continue
-                    bad = final_surface_violations(body, ev, classes)
+                    bad = final_surface_violations(f"{j['slug']}\n{body}", ev, classes)
                     if bad:
                         _log(f"  ⚠ fix refused {j['slug']} — {'; '.join(bad)[:90]}")
                         continue
-                    keep = re.sub(r"gate:\s*[0-9a-f]{32}", f"gate: {self._mark(j['slug'], body)}",
+                    env = self._envelope_of(raw)
+                    keep = re.sub(r"gate:\s*[0-9a-f]{32}",
+                                  f"gate: {self._mark(j['slug'], env[0], env[1], body)}",
                                   raw.split("-->")[0]) + "-->\n"
                     open(p, "w", encoding="utf-8").write(keep + body)
                     fixed.append(j["slug"])
@@ -802,7 +859,7 @@ class Distiller:
                 continue
             repl.append((lines[i],
                          f"- [{mt.group(1).strip()[:40]}]({slug}.md) — {md.group(1).strip()[:200]}",
-                         slug, why))
+                         slug, why, body))
         fixed = skipped_stale = 0
         if repl:
             # The model calls above ran on a SNAPSHOT, and a pour may have landed
@@ -812,7 +869,11 @@ class Distiller:
             # read is stale and is skipped, never guessed at.
             with self.store._locked():
                 cur = self.store.index_text().splitlines()
-                for old_line, new_line, slug, why in repl:
+                for old_line, new_line, slug, why, body_snap in repl:
+                    if self.store.read(slug)[:6000] != body_snap:
+                        skipped_stale += 1
+                        _log(f"  ⚠ tidy skipped {slug} — the memory changed while the model wrote")
+                        continue
                     try:
                         cur[cur.index(old_line)] = new_line
                     except ValueError:
