@@ -110,6 +110,8 @@ class ClaudeCodeSource(Source):
                     d = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(d, dict):
+                    continue          # a stray non-object line is not a message
                 t = d.get("type")
                 # A subagent's transcript records the PARENT MODEL's instructions as
                 # `type: user` with `isSidechain: true`. That text is model-written:
@@ -117,7 +119,8 @@ class ClaudeCodeSource(Source):
                 # approved X" in a delegation prompt would pass the gate as a decision.
                 # Tool results stay [TOOL]; everything else in a sidechain is [SELF].
                 side = bool(d.get("isSidechain"))
-                c = (d.get("message") or {}).get("content")
+                msg = d.get("message")
+                c = msg.get("content") if isinstance(msg, dict) else None
                 parts = c if isinstance(c, list) else ([c] if isinstance(c, str) else [])
                 for p in parts:
                     cls = None
@@ -148,7 +151,9 @@ class ClaudeCodeSource(Source):
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
         size = os.path.getsize(path)
-        end = min(start + budget_chars, size)
+        # sip() reads limit_chars*4 BYTES (a char is up to 4 in UTF-8); the reserve
+        # covers exactly that window so the mark never sits past unread bytes.
+        end = min(start + budget_chars * 4, size)
         return end, max(0, end - start)
 
 
@@ -175,17 +180,30 @@ class DshSource(Source):
 
     @staticmethod
     def _lines(path: str):
-        p = subprocess.run(["zstd", "-dc", path], capture_output=True, timeout=300)
+        try:
+            p = subprocess.run(["zstd", "-dc", path], capture_output=True, timeout=300)
+        except FileNotFoundError:
+            raise RuntimeError("zstd is not installed; DSH session archives cannot be read")
+        if p.returncode != 0:
+            # A corrupt archive used to yield no lines at all: every event was
+            # "skipped", the watermark never moved, and the session read as drunk
+            # on every pass — a silent hole in the journal.
+            raise RuntimeError(f"zstd failed on {path} (rc={p.returncode}): "
+                               f"{p.stderr.decode(errors='replace')[:200]}")
         for line in p.stdout.splitlines():
             try:
-                yield json.loads(line)
+                d = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(d, dict):
+                yield d
 
     @staticmethod
     def _classify(d: dict) -> Segment | None:
         t = d.get("type")
-        data = d.get("data") or {}
+        data = d.get("data")
+        if not isinstance(data, dict):
+            return None
         if t == "user/message":
             if (data.get("source") or {}).get("kind") != "user":
                 return None                       # injected context is not the human
@@ -233,15 +251,20 @@ class DshSource(Source):
         return segs, last
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
+        # The SAME walk sip() takes, breaking only after a segment is counted — so
+        # the reserved end is exactly where sip() with this budget stops. Breaking on
+        # unclassified events too let the marks run ahead of the reads, and every
+        # chunk's unread tail was skipped forever (two thirds of a DSH journal).
         total, end = 0, start
         for d in self._lines(path):
             seq = d.get("seq")
             if seq is None or seq <= start:
                 continue
             s = self._classify(d)
-            if s:
-                total += min(len(s.text), MAX_TOOL if s.cls == "TOOL" else MAX_SEG)
             end = max(end, seq)
+            if not s:
+                continue
+            total += min(len(s.text), MAX_TOOL if s.cls == "TOOL" else MAX_SEG)
             if total >= budget_chars:
                 break
         return end, total
@@ -276,7 +299,9 @@ class TextSource(Source):
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
         size = os.path.getsize(path)
-        end = min(start + budget_chars, size)
+        # sip() reads limit_chars*4 BYTES (a char is up to 4 in UTF-8); the reserve
+        # covers exactly that window so the mark never sits past unread bytes.
+        end = min(start + budget_chars * 4, size)
         return end, max(0, end - start)
 
 

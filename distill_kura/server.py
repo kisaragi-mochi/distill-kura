@@ -86,6 +86,17 @@ def _make_handler(reg: Registry):
 
         # ── GET ──────────────────────────────────────────────────────────
         def do_GET(self):
+            # Malformed client values (?window=big, {"hops": "one"}) used to escape
+            # as ValueError/TypeError and drop the connection with no reply at all.
+            # The bad-json branch two doors down shows the contract: bad input is a
+            # 400, an error the client can read.
+            try:
+                return self._do_GET()
+            except (ValueError, TypeError) as e:
+                return self._send(400, {"error": f"invalid argument: "
+                                                 f"{type(e).__name__}: {e}"})
+
+        def _do_GET(self):
             path, sel, q = self._split(self.path)
             if path.startswith("/health"):
                 d = reg.stores[reg.default]
@@ -188,8 +199,18 @@ def _make_handler(reg: Registry):
 
         # ── POST ─────────────────────────────────────────────────────────
         def do_POST(self):
+            try:
+                return self._do_POST()
+            except (ValueError, TypeError) as e:
+                return self._send(400, {"error": f"invalid argument: "
+                                                 f"{type(e).__name__}: {e}"})
+
+        def _do_POST(self):
             path, sel, _ = self._split(self.path)
-            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return self._send(400, {"error": "bad Content-Length"})
             try:
                 p = json.loads(self.rfile.read(n) or b"{}")
             except ValueError:

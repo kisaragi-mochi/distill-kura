@@ -162,8 +162,11 @@ def recall(store: Store, thinker: Endpoint | None, question: str, hops: int = 1,
         # the best-ranked one, cut to fit and labelled as cut: a partial memory is an
         # answer, an empty context reads as "nothing is remembered".
         head = fit(store.read(order[0]), question, max(120, total_chars - 80))
-        parts = [f"=== {store.label}: {order[0]} (truncated) ===\n"
-                 + head[:max(0, total_chars - 60)]]
+        # The ceiling is on the WHOLE context, header included — the main loop above
+        # accounts for it piece by piece, and this branch used to guess a fixed -60
+        # margin that a long label + slug walked straight past.
+        header = f"=== {store.label}: {order[0]} (truncated) ===\n"
+        parts = [header + head[:max(0, total_chars - len(header))]]
         included = [order[0]]
     ctx = "\n\n".join(parts)
     store.note_read(included, "recall")

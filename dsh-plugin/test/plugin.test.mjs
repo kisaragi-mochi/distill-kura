@@ -306,6 +306,49 @@ test("switching kura swaps the resident map too", async () => {
   } finally { srv.close(); }
 });
 
+test("a late refresh cannot clobber a newer store's resident map", async () => {
+  // The interleave: the timer's refresh for the default store is still in flight when
+  // kura_use moves current to eq and eq's map lands. A's late failure used to set
+  // ok=false on whatever map was resident (and a late 200 used to install A's over
+  // B's), so the section must still serve eq's map after A's fetch finally fails.
+  const hanging = [];
+  const srv = createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.url.startsWith("/stores")) {
+      res.end(JSON.stringify({ default: "maker",
+                               stores: { maker: { label: "m", memories: 1 },
+                                         eq: { label: "e", memories: 2 } },
+                               modes: { talking: "eq" } }));
+    } else if (req.url.startsWith("/prefill")) {
+      if (req.url.includes("store=eq")) {
+        res.end(JSON.stringify({ text: "<<<KURA-MAP store=eq>>>\ntrigger for eq\n",
+                                 etag: "e-eq", store: "eq" }));
+      } else {
+        // A's request (the initial background refresh) hangs until released.
+        hanging.push(res);
+      }
+    } else {
+      res.end(JSON.stringify({ memories: 3 }));
+    }
+  });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url: `http://127.0.0.1:${srv.address().port}` });
+    const sec = ctx.sections.get("distill-kura:map");
+    await until(() => hanging.length === 1);
+    const out = await ctx.registered.get("kura_use").execute({ store: "eq" }, {});
+    assert.match(out, /Now recalling from 'eq'/);
+    assert.match(sec.text({}), /store=eq/);
+    // Now A's request finally fails — it must not take eq's map down with it.
+    hanging[0].statusCode = 500;
+    hanging[0].end(JSON.stringify({ error: "maker is down" }));
+    await new Promise((r) => setTimeout(r, 100));
+    assert.match(sec.text({}), /store=eq/);
+    assert.ok(!sec.text({}).includes("MISSING"));
+  } finally { srv.close(); }
+});
+
 test("prefill can be turned off, and then nothing is registered", async () => {
   const { srv, url } = await fakeKura();
   try {

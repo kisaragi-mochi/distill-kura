@@ -2,6 +2,89 @@
 
 ## 0.3.0 — unreleased
 
+### The full-repo review (2026-09): every finding verified, then fixed
+
+A review pass over every module, with each finding verified against the code (and
+run, where a number could lie) before anything was changed.
+
+**The drink lost most of a DSH journal.** `claim()` reserved 2.2× the chunk budget
+while `sip()` read 1×, and the marks only move forward: every chunk's unread tail
+was "drunk" on paper and skipped forever. Measured on a simulated journal before
+the fix — 239 of 360 classified events never distilled; after, 0 of 360. The
+reserve and the read now agree event for event: the DSH adapter's `claim_bound`
+walks exactly the path `sip` takes, and the byte adapters reserve the full
+`4 × budget` window their `sip` reads (reserving less is recoverable — `advance()`
+takes the true stop; reserving more is silent loss).
+
+**An outage was read as a verdict.** `ask()` returns None for unreachable,
+timeout and empty replies, and `scribe()` collapsed that to `""` — which
+`judge_draft` read as "the scribe did not keep the shape": a TOSS, and TOSS
+deletes. A quiet hour with the editor down emptied the drafts queue. `scribe()`
+now returns None intact and drain answers SKIP — the draft stays staged, counted
+as `skipped`, judged again next silence. The same loop no longer pours a FIX
+whose `BODY:` failed to parse: falling through to `pour()` filed exactly the text
+the judge had condemned (now `fix_unparsed`, left staged).
+
+**Two gate flaws, one per direction.** `_canon_num` erased every comma, so "1,5"
+canonicalised to "15" and a claimed 1,5 GB passed on evidence that said 15 GB —
+a comma is now forgiven only as a thousands separator (`1,234,567` still passes
+against `1234567`; `12,34` fails closed). And the exponent's case was meaning:
+"1.23e-4" against evidence "1.23E-4" was a false violation; "E" folds to "e".
+
+**The extension path skipped half the floor.** The new-memory path floors the
+candidate's own three sentences; `_compose_extension` floored only the scribe's,
+so an unbacked number in the CANDIDATE's `belongs_because` reached the memory
+under the curation mark. Both sentences sets stand on the floor now.
+
+**`readonly = false` silently thawed a frozen store.** The deprecated key was
+applied after validation and always won, so `frozen` + `readonly = false` became
+`direct-allowed`, signalled by nothing. Weakening now refuses at construction
+(the registry already refused the pair at load); tightening (`readonly = true` →
+distiller-only) keeps its documented meaning.
+
+**`[models]` was the one table that loaded silently.** A typo'd key
+(`api_key_ev`) was dropped without a word — requests went out unauthenticated and
+failed at call time — and a typo'd role meant no thinker at all. `[models]` and
+`[model_profiles.*]` are checked at load like every other table: unknown roles
+and keys throw naming the offender, value types are checked, `dialect` must be
+one of the three, and `[server] port` refuses `8085.9` and `true` instead of
+silently truncating them.
+
+**Tier zero cited two-letter slugs.** The name head matched slugs as raw
+substrings with no length floor (the title check had one), so a memory `ai.md`
+scored a full name hit from "tr**ai**ning" — and with no runner-up the margin
+gate is skipped by design, making it a confident answer. A slug is a citation
+only as a whole name: three characters minimum, boundaries at anything that is
+not slug alphabet (a question naming `ssd-tier-mission` no longer cites
+`ssd-tier` — it named a different memory).
+
+**The server dropped the socket instead of answering 400.** `?window=big`,
+`{"hops": "one"}`, `{"question": null}` and a garbage `Content-Length` all
+escaped as uncaught ValueError/TypeError: the client got no HTTP reply at all,
+where the bad-json branch two lines down promises a readable 400. Both verb
+handlers wrap their dispatch; malformed values are a 400 naming the error.
+
+**And the smaller ones, each verified before fixing:** recall's truncated-memory
+fallback now counts its own header against `total_chars` (a long label + slug
+walked past the ceiling by up to tens of chars); `remember_direct` with an empty
+description is refused instead of writing `- [](slug.md) — ` — a line no later
+write can match; `tend_state()` survives a heartbeat that parses as JSON but
+lies about its shape (it used to take `doctor` down with it); annotating a
+memory whose tags line is unreadable refuses rather than erasing the tags;
+`Loom.persist()` refuses a Cloth with no source provenance instead of writing it
+unconditionally; the MCP bridge no longer dies on a valid-JSON non-object line
+and reads a 404 as "no memory called …" rather than "cannot reach"; a bare
+`KURA_WRITE_LOG` filename actually writes; `kura distill pour --all` with no
+drafts and `kura tend --once` with no work exit 2 per the exit-code contract,
+and a refused single pour exits 1; `bench` closes its files, names the offender
+when a questions fixture is malformed, and skips (counting) malformed metric
+lines; the DSH plugin's background refresh cannot clobber a newer store's
+resident map with a late failure, `kura_map` applies the same served-store check
+the cache does, and `url: "http://"` is refused at load; `fake_llm.py`'s
+coverage key actually matches now; the rooms example finds its charters through
+the default `<store>/charter.md` lookup instead of a CWD-relative path the
+README's copy step never creates.
+
 ### Pay it forward (new)
 
 The resident map is byte-stable so a prefix cache can hold it — but the first turn

@@ -191,6 +191,17 @@ def index_for(store: Store) -> _Index:
 
 # ── scoring ──────────────────────────────────────────────────────────────
 
+def _cited(name: str, qn: str) -> bool:
+    """A slug named by the question — as a WORD, not a substring. "ai" inside
+    "training" and "go" inside "algorithm" used to score a full name-head hit;
+    with no runner-up the margin gate was skipped entirely and tier zero answered
+    an unrelated memory with full confidence. Three characters minimum, and
+    boundaries at anything that is not slug alphabet (a trailing "-mission" means
+    the question named a longer, different slug)."""
+    return (len(name) >= 3
+            and re.search(rf"(?<![a-z0-9-]){re.escape(name)}(?![a-z0-9-])", qn) is not None)
+
+
 def _score(idx: _Index, question: str, top: int, gate: float) -> tuple[list[dict], str]:
     qn = re.sub(r"\s+", " ", _norm(question)).strip()
     q_tok, q3, q2 = _words(question), _grams(question, 3), _grams(question, 2)
@@ -199,10 +210,10 @@ def _score(idx: _Index, question: str, top: int, gate: float) -> tuple[list[dict
     name_sc: dict[int, float] = {}
     for i, m in enumerate(idx.mems):
         s = 0.0
-        if m["nm_slug"] and m["nm_slug"] in qn:
+        if _cited(m["nm_slug"], qn):
             s += 1.0
         base = m["nm_slug"].rsplit("/", 1)[-1]
-        if base != m["nm_slug"] and base in qn:
+        if base != m["nm_slug"] and _cited(base, qn):
             s += 1.0
         if len(m["nm_title"]) >= 3 and m["nm_title"] in qn:
             s += 1.0

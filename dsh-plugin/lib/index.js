@@ -86,7 +86,10 @@ function settle(config) {
   const c = { ...DEFAULTS, ...(config || {}) };
   if (c.allowSwitch === undefined) c.allowSwitch = c.store === "";
   // Rule 1: refuse loudly. A typo here must never present as "memory is empty today".
-  if (typeof c.url !== "string" || !/^https?:\/\//.test(c.url)) {
+  // A bare "http://" passes /^https?:\/\// but trims to "http:" and fetch throws a
+  // TypeError later — require a host: at least one non-slash, non-space character
+  // after the scheme.
+  if (typeof c.url !== "string" || !/^https?:\/\/[^/\s]/.test(c.url)) {
     throw new Error(`distill-kura: url must be an http(s) URL, got ${JSON.stringify(c.url)}`);
   }
   if (typeof c.store !== "string") {
@@ -194,6 +197,11 @@ function mapCache(cfg, state) {
     },
     async refresh() {
       const target = state.bound ? cfg.store : state.current;
+      // A timer refresh for store A and a kura_use-triggered refresh for store B can
+      // interleave: A's request is still in flight when current moves to B, and A's
+      // late failure then downgraded B's resident map (ok=false) — or a late 200
+      // installed A's over B's. Only the newest refresh may write state.map.
+      const gen = (this.gen = (this.gen || 0) + 1);
       this.invalidate(target);
       try {
         // Conditional: the map is the largest thing we fetch and it changes a few times
@@ -201,6 +209,9 @@ function mapCache(cfg, state) {
         const d = await call(cfg, "GET", "/prefill" + q(target), undefined, undefined,
           this.isFor(target) && state.map.etag
             ? { "If-None-Match": `"${state.map.etag}"` } : {});
+        // A newer refresh superseded this one: bail without touching state.map, so a
+        // stale outcome cannot clobber whatever map is resident now.
+        if (gen !== this.gen) return false;
         if (d === UNCHANGED) {
           state.map.at = Date.now();
           return true;
@@ -223,6 +234,9 @@ function mapCache(cfg, state) {
         }
         return true;
       } catch (err) {
+        // Only the still-current refresh may downgrade: a stale failure must not mark
+        // the resident map — which now describes a newer store — as failed.
+        if (gen !== this.gen) return false;
         // A staleness grace period is only ever granted to the store the map is FOR.
         state.map.ok = this.isFor(target) && Date.now() - state.map.at < cfg.refreshMs * 5;
         state.map.error = String(err && err.message ? err.message : err);
@@ -376,6 +390,12 @@ function tools(cfg, state) {
       async execute(args, exec) {
         const to = target(args.store);
         const d = await call(cfg, "GET", "/prefill" + q(to), undefined, exec?.signal);
+        // Same served-store check as refresh(): the server names the store it answered
+        // for, and a map describing a different kura is not ours to show.
+        if (d.store !== undefined && to && d.store !== to) {
+          return `${head(to)}\n` +
+            `(the server answered for a different kura (${d.store}); the map for ${to} could not be read)`;
+        }
         return d.text;
       },
     }));

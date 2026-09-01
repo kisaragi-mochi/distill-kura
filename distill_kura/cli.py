@@ -324,7 +324,9 @@ def main(argv: list[str] | None = None) -> int:
             t.beat(0.0, stamp)
             print(json.dumps({"store": store.name, "done": t.done,
                               "next_ok": {k: int(v) for k, v in t.next_ok.items()}}, ensure_ascii=False))
-            return 0
+            # A tick that did no work is exit 2 ("nothing to do") — the old always-0
+            # made a scheduler that saw "worked" rest while the queue never emptied.
+            return 0 if any((t.done or {}).values()) else 2
         t.watch()
         return 0
 
@@ -387,13 +389,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if rows else 2
         if a.dcmd == "pour":
             if a.all:
-                for slug, _, _ in drafts_of(store):
+                drafts = drafts_of(store)
+                for slug, _, _ in drafts:
                     print(json.dumps(dis.pour(slug), ensure_ascii=False))
-                return 0
+                # No drafts is "nothing to do" — the docstring's exit 2 — or a
+                # scheduler sees success and never comes back.
+                return 2 if not drafts else 0
             if not a.slug:
                 sys.exit("give a slug or --all")
-            print(json.dumps(dis.pour(a.slug), ensure_ascii=False))
-            return 0
+            r = dis.pour(a.slug)
+            print(json.dumps(r, ensure_ascii=False))
+            return 0 if r.get("ok") else 1
         if a.dcmd == "drain":
             r = dis.drain(a.n)
             print(json.dumps(r, ensure_ascii=False))

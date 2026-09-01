@@ -157,7 +157,16 @@ class Store:
             raise ValueError(f"[stores.{self.name}] write_policy must be one of "
                              f"{list(WRITE_POLICIES)}, got {self.write_policy!r}")
         if self.readonly is not None:
-            # Honour the documented meaning, not the old behaviour.
+            # Honour the documented meaning, not the old behaviour — but never let
+            # the deprecated key SILENTLY WEAKEN a policy already set: `readonly =
+            # false` used to turn a `frozen` store into a fully writable one,
+            # signalled by nothing. Tightening (readonly = true → distiller-only)
+            # keeps its documented meaning.
+            if self.readonly is False and self.write_policy != DIRECT_ALLOWED:
+                raise ValueError(
+                    f"[stores.{self.name}] readonly=false would silently change "
+                    f"write_policy={self.write_policy!r} to 'direct-allowed'. "
+                    f"Set write_policy on its own (readonly is deprecated).")
             self.write_policy = DISTILLER_ONLY if self.readonly else DIRECT_ALLOWED
         if self.persona is None and os.path.exists(os.path.join(self.path, "persona.json")):
             self.persona = os.path.join(self.path, "persona.json")
@@ -602,7 +611,18 @@ class Store:
             if not fm_raw:
                 return {"ok": False, "error": f"{s} has no frontmatter to annotate"}
             fm = self.frontmatter(s)
-            have = self.tags(s)
+            # Reading through tags() hides an unreadable tags line (it returns () by
+            # design, for doctor); writing that () back would ERASE the tags. An
+            # unreadable line is a refusal, not a haircut.
+            raw_tags = fm.get("tags")
+            if raw_tags:
+                try:
+                    have = normalize_tags(raw_tags)
+                except InvalidTag as e:
+                    return {"ok": False, "error": f"{s}'s existing tags are unreadable "
+                                                  f"({e}); fix them before annotating"}
+            else:
+                have = ()
             new_tags = normalize_tags(tuple(have) + add)
             new_ann = {**self.annotations(s), **{k: v for k, v in (annotations or {}).items() if v}}
             new_meta = {**{k: v for k, v in fm.items()
@@ -679,6 +699,10 @@ class Store:
         self._bump_revision()
         self._replace_file(self.index_path, text.encode("utf-8"))
         self._fsync_dir(self.path)
+        # A rewritten index re-titles memories; the title map must not outlive it
+        # or resolve() answers with names the index no longer carries.
+        self._titles = None
+        self._slugs_cache = None
 
     def _still_ourselves(self) -> bool:
         """The directory we were constructed against is still that directory.
@@ -957,6 +981,11 @@ class Store:
             # touches, or replay would have to guess.
             d1 = (hook or description).replace("\n", " ").strip()
             t1 = (title or "").replace("\n", " ").strip()
+            if not d1:
+                # An empty trigger wrote `- [](slug.md) — ` into MEMORY.md: a line
+                # no later write can match, so the rot persisted until hand-edited.
+                return {"ok": False, "error": "a memory needs a description "
+                                              "(the index trigger line)"}
             cur = self.index_text()
             new_index: str | None = None
             if existed and d1:
@@ -1047,10 +1076,13 @@ class Store:
             return {"alive": False, "why": "no watcher has ever run here"}
         try:
             d = json.load(open(p, encoding="utf-8"))
-        except (OSError, ValueError):
+            # A heartbeat that parses as JSON but is not the expected shape (a list,
+            # a string "at") used to escape this try as AttributeError/ValueError
+            # and take `doctor` down with it — the one diagnostic that reports it.
+            age = time.time() - float(d.get("at") or 0)
+            pid = int(d.get("pid") or 0)
+        except (OSError, ValueError, AttributeError, TypeError):
             return {"alive": False, "why": "heartbeat unreadable"}
-        age = time.time() - float(d.get("at") or 0)
-        pid = int(d.get("pid") or 0)
         alive = age < stale_after_s
         if alive and pid:
             try:

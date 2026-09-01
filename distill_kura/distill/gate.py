@@ -125,7 +125,12 @@ def _num_normalize(s: str) -> str:
 
 
 def _canon_num(t: str) -> str:
-    return t.rstrip(",.:/-").replace(",", "")
+    # A comma is forgiven only as a THOUSANDS separator (\d{1,3}(,\d{3})+): erasing
+    # every comma made "1,5" canonicalise to "15", so a claimed 1,5 passed on
+    # evidence that said 15 — two different numbers, one vouching for the other.
+    # A comma that is not a thousands separator stays, and the token fails closed.
+    # "E" folds to "e": 1.23E-4 and 1.23e-4 are one magnitude, not two claims.
+    return re.sub(r"(?<=\d),(?=\d{3}(\D|$))", "", t.rstrip(",.:/-").replace("E", "e"))
 
 
 def _num_tokens(s: str) -> list[str]:

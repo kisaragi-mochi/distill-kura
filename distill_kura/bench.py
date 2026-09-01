@@ -86,16 +86,24 @@ def retention(reg: Registry, store: Store, questions_path: str,
 
     rows, by_cat = [], {}
     for q in questions:
-        d = do_recall(store, thinker, q["question"], hops=hops, top=top)
-        found = bool(re.search(q["expect"], d.get("context", ""), re.I))
-        wanted = not q.get("must_not_store")
-        ok = found if wanted else not found
-        rows.append({"id": q["id"], "category": q["category"], "found": found,
-                     "expected_to_be_found": wanted, "pass": ok,
-                     "walked": d.get("walked", []), "how": d.get("how")})
-        c = by_cat.setdefault(q["category"], {"pass": 0, "total": 0})
-        c["total"] += 1
-        c["pass"] += 1 if ok else 0
+        try:
+            d = do_recall(store, thinker, q["question"], hops=hops, top=top)
+            found = bool(re.search(q["expect"], d.get("context", ""), re.I))
+            wanted = not q.get("must_not_store")
+            ok = found if wanted else not found
+            rows.append({"id": q["id"], "category": q["category"], "found": found,
+                         "expected_to_be_found": wanted, "pass": ok,
+                         "walked": d.get("walked", []), "how": d.get("how")})
+            c = by_cat.setdefault(q["category"], {"pass": 0, "total": 0})
+            c["total"] += 1
+            c["pass"] += 1 if ok else 0
+        except (re.error, KeyError) as e:
+            # One malformed question must abort the run naming the offender, not be
+            # skipped silently — a benchmark that quietly drops a question overstates
+            # the store.
+            raise RuntimeError(
+                f"retention: question {q.get('id')!r} is malformed "
+                f"({type(e).__name__}: {e})") from e
 
     passed = sum(1 for r in rows if r["pass"])
     return {
@@ -123,18 +131,22 @@ def compress(reg: Registry, store: Store, tokenizer_command: str | None = None,
     dis = Distiller(reg, store)
     metrics_path = os.path.join(store.still, "metrics.jsonl")
     raw_tokens = batches = 0
+    malformed_metric_lines = 0
     recorded_keys: set[str] = set()
     if os.path.exists(metrics_path):
-        for line in open(metrics_path, encoding="utf-8", errors="ignore"):
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if session and session not in str(row.get("source_key", "")):
-                continue
-            raw_tokens += int(row.get("raw_tokens_est") or 0)
-            recorded_keys.add(str(row.get("source_key", "")))
-            batches += 1
+        with open(metrics_path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                    if session and session not in str(row.get("source_key", "")):
+                        continue
+                    # raw_tokens_est can be a JSON type int() refuses (a list, a dict)
+                    # — one such line used to crash the whole benchmark.
+                    raw_tokens += int(row.get("raw_tokens_est") or 0)
+                    recorded_keys.add(str(row.get("source_key", "")))
+                    batches += 1
+                except (ValueError, TypeError, AttributeError):
+                    malformed_metric_lines += 1
 
     st = store_tokens(store, count)
     # The numerator must be ONLY what came out of the recorded batches. Dividing the
@@ -152,7 +164,8 @@ def compress(reg: Registry, store: Store, tokenizer_command: str | None = None,
             unattributed += 1
             continue
         try:
-            src_key = json.load(open(mpath, encoding="utf-8")).get("source_key", "")
+            with open(mpath, encoding="utf-8") as f:
+                src_key = json.load(f).get("source_key", "")
         except (OSError, ValueError):
             unattributed += 1
             continue
@@ -195,6 +208,10 @@ def compress(reg: Registry, store: Store, tokenizer_command: str | None = None,
         out["note"] = ("batches were recorded but no memory carries an evidence manifest "
                        "pointing at them, so store_ratio is undefined. Memories poured "
                        "before manifests existed cannot be attributed to a batch.")
+    if malformed_metric_lines:
+        # The count only lands in the report when it is non-zero: a healthy log does
+        # not deserve a field everyone has to re-read.
+        out["malformed_metric_lines"] = malformed_metric_lines
     if not raw_tokens:
         out["note"] = ("no distiller metrics yet, so store_ratio cannot be computed. "
                        "Run `kura distill run` (metrics land in _still/metrics.jsonl); "

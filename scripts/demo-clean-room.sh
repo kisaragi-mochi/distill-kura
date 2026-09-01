@@ -16,10 +16,18 @@ say() { printf '\n\033[1m── %s\033[0m\n' "$1"; }
 
 say "a fake model, so the demo is the same everywhere"
 python3 "$ROOT/scripts/fake_llm.py" 18099 & FAKE_PID=$!
+ready=""
 for _ in $(seq 50); do
-  curl -sf "http://127.0.0.1:18099/v1/models" >/dev/null 2>&1 && break
+  if curl -sf "http://127.0.0.1:18099/v1/models" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
   sleep 0.1
 done
+if [ -z "$ready" ]; then
+  echo "the fake model never became reachable on port 18099 (is it already in use?)" >&2
+  exit 1
+fi
 
 say "a journal to distil"
 mkdir -p journal

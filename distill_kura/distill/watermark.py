@@ -67,7 +67,13 @@ class Watermarks:
                         continue
                     k = src.key(path)
                     start = cur.get(k, 0)
-                    end, approx = src.claim_bound(path, start, int(budget_chars * 2.2))
+                    # The reserve must be the window sip() will ACTUALLY consume with
+                    # the same budget — once it was 2.2× larger, the mark outran the
+                    # read, and every chunk's unread tail was skipped forever (two
+                    # thirds of a DSH journal, measured). Claiming less than sip reads
+                    # is recoverable (advance() moves the mark to the true stop);
+                    # claiming more is silent loss, the one unforgivable direction.
+                    end, approx = src.claim_bound(path, start, budget_chars)
                     if approx < min_chars or end <= start:
                         continue
                     cur[k] = end

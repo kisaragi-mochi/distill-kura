@@ -160,9 +160,12 @@ class Distiller:
         return self.models.brain.ask(self._sys(task), user, max_tokens=max_tokens,
                                      timeout=3600) or ""
 
-    def scribe(self, task: str, user: str, max_tokens: int = 1400) -> str:
-        return self.models.scribe.ask(self._sys(task.format(language=self.language)), user,
-                                      max_tokens=max_tokens, timeout=3600) or ""
+    def scribe(self, task: str, user: str, max_tokens: int = 1400) -> str | None:
+        # None survives on purpose: "the scribe was unreachable" and "the scribe
+        # answered" are different facts, and a caller that collapses them (as `or
+        # ""` once did) reads an outage as a verdict — a TOSS that deletes the draft.
+        return self.models.scribe.ask(self._sys(task.format(language=self.language)),
+                                      user, max_tokens=max_tokens, timeout=3600)
 
     # ── store text, for echo suppression ─────────────────────────────────
     def store_text(self) -> str:
@@ -452,7 +455,12 @@ class Distiller:
         # code's claim, so it rides in `allowed`; every other number — a "99x" in
         # the section, the body, the curation sentences — must be the evidence's.
         _, s_ann, _ = _curation_of(out or "")
-        bad = final_surface_violations("\n".join([head, plain, " ".join(s_ann.values())]),
+        # The candidate's own sentences ride along too (_curate merges them below),
+        # so they stand on the same floor as in the new-memory path: the extension
+        # branch used to floor only the scribe's sentences, and an unbacked number
+        # in the CANDIDATE's belongs_because slipped into the memory under the mark.
+        cand_ann = " ".join(str(c.get(k) or "") for k in ANNOTATION_KEYS)
+        bad = final_surface_violations("\n".join([head, plain, " ".join(s_ann.values()), cand_ann]),
                                        c["evidence"], c["classes"], allowed=date)
         if bad:
             _log(f"      ✗ extension surface fails the floor: {bad}")
@@ -689,9 +697,16 @@ class Distiller:
         if "🚫" in head:
             return {"slug": slug, "verdict": "TOSS", "judged_sha": judged_sha,
                     "why": "credits the human with no [USER] evidence (gate refused)"}
+        # ask() collapses every infrastructure failure to None (unreachable, timeout,
+        # HTTP error). Judging on "" would read "the model was down" as "the scribe
+        # did not keep the shape" — a TOSS that DELETES a gate-passed draft. No
+        # answer is not a verdict.
         out = self.scribe(prompts.POUR_SYS,
                           f"=== DRAFT: {slug} ===\n{body}\n\n"
                           f"=== EVIDENCE AND FLAGS (set by the distiller) ===\n{head}", 1600)
+        if not (out or "").strip():
+            return {"slug": slug, "verdict": "SKIP", "judged_sha": judged_sha,
+                    "why": "the scribe was unreachable or answered nothing — not a verdict"}
         first = (out.splitlines() or [""])[0].upper()
         v = next((x for x in ("POUR", "FIX", "TOSS") if x in first), None)
         why = (re.search(r"^reason[:：]\s*(.+)$", out, re.M | re.I) or [None, ""])[1] if v else ""
@@ -761,6 +776,7 @@ class Distiller:
                     "left": len(glob.glob(os.path.join(self.drafts_dir, "*.md")))}
         _log(f"drain: {len(ds)} drafts, {self.slots} at a time")
         poured, fixed, tossed = [], [], []
+        skipped, unparsed = [], []          # not verdicts: left staged, loudly
         quarantined = pre_quarantined
         with ThreadPoolExecutor(max_workers=self.slots) as pool:
             for j in pool.map(self.judge_draft, ds):
@@ -776,6 +792,13 @@ class Distiller:
                 if j.get("judged_sha") and now_sha != j["judged_sha"]:
                     _log(f"  ⚠ {j['slug']} moved while judged; verdict discarded")
                     continue
+                if j["verdict"] == "SKIP":
+                    # The judge could not judge (unreachable or empty): the draft
+                    # stays exactly as staged for the next drain. Deleting on an
+                    # infrastructure failure is how a quiet outage empties the queue.
+                    _log(f"  ⏸ skip  {j['slug']} — {j['why'][:70]}")
+                    skipped.append(j["slug"])
+                    continue
                 if j["verdict"] == "TOSS":
                     with open(os.path.join(self.still, "tossed.jsonl"), "a", encoding="utf-8") as f:
                         f.write(json.dumps({**j, "at": datetime.now(timezone.utc).isoformat()[:19],
@@ -785,7 +808,15 @@ class Distiller:
                     tossed.append(j["slug"])
                     _log(f"  ✗ toss {j['slug']} — {j['why'][:70]}")
                     continue
-                if j["verdict"] == "FIX" and j.get("new_body"):
+                if j["verdict"] == "FIX":
+                    if not j.get("new_body"):
+                        # A FIX whose BODY section did not parse is NOT a POUR: the
+                        # judge said part of the text goes beyond the evidence, and
+                        # pouring the draft as staged would file exactly that part.
+                        # It stays staged for the next drain to judge cold.
+                        _log(f"  ⚠ fix unparsed {j['slug']} — no BODY: section; left staged")
+                        unparsed.append(j["slug"])
+                        continue
                     raw = open(p, encoding="utf-8").read()
                     # Every header line survives a FIX, not just the first one: keeping
                     # only TITLE dropped DESC, and the memory poured with its slug as
@@ -821,7 +852,8 @@ class Distiller:
                 else:
                     _log(f"  ⚠ not poured {j['slug']} — {r.get('why') or r.get('error')}")
         return {"ok": True, "poured": len(poured), "fixed": len(fixed), "tossed": len(tossed),
-                "quarantined": len(quarantined),
+                "quarantined": len(quarantined), "skipped": len(skipped),
+                "fix_unparsed": len(unparsed),
                 "left": len(glob.glob(os.path.join(self.drafts_dir, "*.md")))}
 
     # ── ⑧ index hygiene ──────────────────────────────────────────────────
@@ -866,7 +898,7 @@ class Distiller:
                 continue
             out = self.scribe(prompts.TIDY_SYS,
                               f"slug: {slug}\nwhat is wrong with the current line: {why}\n\n"
-                              f"=== THE MEMORY ===\n{body}", 300)
+                              f"=== THE MEMORY ===\n{body}", 300) or ""
             mt = re.search(r"^TITLE:\s*(.+)$", out, re.M)
             md = re.search(r"^DESC:\s*(.+)$", out, re.M)
             if not (mt and md):

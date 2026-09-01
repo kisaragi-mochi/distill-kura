@@ -41,6 +41,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -274,7 +275,16 @@ def call_tool(name: str, args: dict) -> str:
 
     if name == "kura_read":
         slug = urllib.parse.quote((args.get("slug") or "").strip())
-        d = http("GET", f"/memory/{slug}" + _q(store))
+        try:
+            d = http("GET", f"/memory/{slug}" + _q(store))
+        except urllib.error.HTTPError as e:
+            # A missing slug is the server's 404, not an outage — the tool's own
+            # description promises what an unknown slug means, so say that instead of
+            # "[cannot reach the kura] HTTPError 404" (which sent the model hunting
+            # for a broken server).
+            if e.code == 404:
+                return f"(no memory called {args.get('slug')!r} in {store or 'the default kura'})"
+            raise
         return d.get("text") or f"(no memory called {args.get('slug')!r} in {store or 'the default kura'})"
 
     if name == "kura_map":
@@ -291,7 +301,10 @@ def call_tool(name: str, args: dict) -> str:
                   **{k: args[k] for k in ("belongs_because", "keep", "may_fade") if args.get(k)}})
         if WRITE_LOG:
             try:
-                os.makedirs(os.path.dirname(WRITE_LOG), exist_ok=True)
+                # A bare filename has no directory component; os.makedirs("") raised
+                # FileNotFoundError, which the except swallowed, so write-logging
+                # silently never happened.
+                os.makedirs(os.path.dirname(WRITE_LOG) or ".", exist_ok=True)
                 with open(WRITE_LOG, "a", encoding="utf-8") as f:
                     f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                                         "store": store, "args": args, "result": d},
@@ -321,6 +334,10 @@ def main() -> None:
         try:
             m = json.loads(line)
         except ValueError:
+            continue
+        if not isinstance(m, dict):
+            # A valid-JSON non-object line (e.g. `[1, 2]` or `42`) has no .get and
+            # used to raise AttributeError here, killing the whole bridge process.
             continue
         mid, method = m.get("id"), m.get("method", "")
         params = m.get("params") or {}

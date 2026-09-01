@@ -26,9 +26,9 @@ class FakeKura(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _json(self, obj):
+    def _json(self, obj, status=200):
         b = json.dumps(obj).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
@@ -36,6 +36,10 @@ class FakeKura(BaseHTTPRequestHandler):
 
     def do_GET(self):
         FakeKura.calls.append("GET " + self.path)
+        if self.path.startswith("/memory/"):
+            # a missing slug is the server's 404, which the bridge must read as
+            # "no such memory" rather than an outage
+            return self._json({"error": "no such memory"}, status=404)
         if self.path.startswith("/prefill"):
             return self._json({"text": "<<<KURA-MAP store=maker>>>\n- [A](a.md) — t\n"
                                        "<<<END KURA-MAP>>>\n", "etag": "e1"})
@@ -218,6 +222,36 @@ def test_an_unreachable_kura_is_an_error_not_a_crash():
     out = speak("http://127.0.0.1:1", [INIT, call("kura_recall", {"question": "q"})])
     assert out[1]["result"]["isError"] is True
     assert "cannot reach" in out[1]["result"]["content"][0]["text"]
+
+
+def test_a_non_dict_json_line_does_not_kill_the_bridge():
+    """A line that is valid JSON but not an object has no .get — it used to raise
+    AttributeError and take the whole bridge process down with it."""
+    srv, url = start()
+    try:
+        e = {**os.environ, "KURA_URL": url, "PYTHONPATH": ROOT}
+        lines = [json.dumps(INIT), "[1, 2, 3]", "42",
+                 json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"})]
+        p = subprocess.run([sys.executable, "-m", "distill_kura.mcp"],
+                           input="\n".join(lines) + "\n", capture_output=True, text=True,
+                           env=e, timeout=60)
+        out = [json.loads(l) for l in p.stdout.splitlines() if l.strip()]
+        assert [m["id"] for m in out] == [1, 2]      # the ping still gets answered
+    finally:
+        srv.shutdown()
+
+
+def test_kura_read_of_a_missing_slug_says_there_is_no_such_memory():
+    """A 404 is the server saying "I have no such memory", not "I am unreachable" —
+    the tool's own description promises an unknown-slug answer."""
+    srv, url = start()
+    try:
+        out = speak(url, [INIT, call("kura_read", {"slug": "no-such-slug"})])
+        assert out[1]["result"]["isError"] is False
+        assert out[1]["result"]["content"][0]["text"] == \
+            "(no memory called 'no-such-slug' in the default kura)"
+    finally:
+        srv.shutdown()
 
 
 # ── the resident map over MCP ───────────────────────────────────────────────

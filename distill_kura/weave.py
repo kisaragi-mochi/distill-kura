@@ -646,6 +646,14 @@ class Loom:
         current = _sha256(self.store.index_text())
         expected = cloth.stats.get("source_sha256")
         expected_rev = cloth.stats.get("source_revision")
+        if expected is None and expected_rev is None:
+            # A Cloth woven by weave() always carries both. One without them did not
+            # come from here, and writing it unconditionally would skip the
+            # compare-and-swap this method exists to be.
+            cloth.stats["written"] = False
+            cloth.stats["refused"] = ("cloth has no source provenance; weave() it — "
+                                      "a hand-built Cloth is not checkable")
+            return cloth.stats
         if ((expected is not None and current != expected)
                 or (expected_rev is not None and current_rev != expected_rev)):
             cloth.stats["written"] = False

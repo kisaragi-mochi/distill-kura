@@ -92,6 +92,37 @@ _FASTPATH_TYPES = {"enabled": bool, "gate": (int, float)}
 _MOUTH_TYPES = {"name": str, "url": str, "store": str, "slot": int, "model": str,
                 "api_key_env": str}
 _MOUTH_REQUIRED = ("name", "url", "store")
+# [models.<role>] and [model_profiles.<p>.<role>]. Every other table is checked at
+# load; these were not, so `api_key_ev = "KEY"` (typo) was silently dropped and
+# requests left unauthenticated, and `timeout = "120"` crashed at call time — the
+# silently-ignored field that looks exactly like a working one.
+_MODEL_ROLES = {"thinker", "brain", "scribe"}
+_MODEL_TYPES = {"url": str, "model": str, "api_key_env": str, "timeout": (int, float),
+                "temperature": (int, float), "effort": str, "thinking": bool,
+                "dialect": str, "extra": dict}
+
+
+def _check_models(where: str, cfg) -> None:
+    if not cfg:
+        return                           # no [models] at all: thinker defaults apply
+    if not isinstance(cfg, dict):
+        raise ValueError(f"[{where}] must be a table of roles ({sorted(_MODEL_ROLES)}), "
+                         f"got {type(cfg).__name__}")
+    for role, rc in cfg.items():
+        if role not in _MODEL_ROLES:
+            raise ValueError(f"[{where}] has unknown role {role!r}. "
+                             f"Known: {sorted(_MODEL_ROLES)}.")
+        if not isinstance(rc, dict):
+            raise ValueError(f"[{where}.{role}] must be a table, got {type(rc).__name__}")
+        unknown = {k for k in rc if k not in _MODEL_TYPES and not k.startswith("x_")}
+        if unknown:
+            raise ValueError(f"[{where}.{role}] has unknown key(s) {sorted(unknown)}. "
+                             f"Known: {sorted(_MODEL_TYPES)}.")
+        _check_table(f"{where}.{role}", rc, _MODEL_TYPES)
+        d = rc.get("dialect")
+        if d is not None and d not in ("vllm", "openai", "generic"):
+            raise ValueError(f"[{where}.{role}] dialect must be vllm, openai or generic, "
+                             f"got {d!r}")
 
 
 def mouth_base(url: str) -> str:
@@ -321,7 +352,10 @@ class Registry:
         if not models_cfg and os.environ.get("KURA_THINKER_URL"):      # legacy env
             models_cfg = {"thinker": {"url": os.environ["KURA_THINKER_URL"],
                                       "model": os.environ.get("KURA_THINKER_MODEL", "default")}}
+        _check_models("models", models_cfg)
         profiles = {}
+        for pname, pcfg in (raw.get("model_profiles") or {}).items():
+            _check_models(f"model_profiles.{pname}", pcfg)
         for pname, pcfg in (raw.get("model_profiles") or {}).items():
             # Models.from_config chains thinker -> brain -> scribe, so a role missing at
             # the head lands on Endpoint()'s built-in default. A profile defining only
@@ -341,10 +375,23 @@ class Registry:
                 # store's whole index reaches a model it was never meant to see.
                 raise ValueError(f"[stores.{n}] model_profile = {want!r} is not defined. "
                                  f"Known profiles: {sorted(profiles)}")
+        # Port is coerced nowhere else silently: `8085.9` truncated to 8085 and
+        # `true` became 1, both accepted — every other value in this file is
+        # type-checked at load with the offender named.
+        port_raw = os.environ.get("KURA_PORT", srv.get("port", 8085))
+        if isinstance(port_raw, bool) or not isinstance(port_raw, (int, str)):
+            raise ValueError(f"[server] port must be an integer, got {type(port_raw).__name__} "
+                             f"({port_raw!r})")
+        if isinstance(port_raw, str):
+            if not (port_raw.strip().isascii() and port_raw.strip().isdigit()):
+                raise ValueError(f"[server] port must be an integer, got {port_raw!r}")
+            port = int(port_raw)
+        else:
+            port = port_raw
         return cls(stores=stores, modes=modes, models=Models.from_config(models_cfg),
                    profiles=profiles,
                    default=default, host=srv.get("host", "127.0.0.1"),
-                   port=int(os.environ.get("KURA_PORT", srv.get("port", 8085))),
+                   port=port,
                    config_path=path, raw=raw)
 
     # ── lookups ──────────────────────────────────────────────────────────
