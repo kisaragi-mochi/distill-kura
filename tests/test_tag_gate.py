@@ -496,8 +496,10 @@ def test_a_renamed_draft_cannot_be_laundered_through_fix(tmp_path):
     os.rename(os.path.join(d.drafts_dir, "archive-on-slow-disk.md"),
               os.path.join(d.drafts_dir, "stolen-name.md"))
     out = d.drain()
-    assert out["fixed"] == 0 and out["poured"] == 0 and out["tossed"] == 1
+    assert out["fixed"] == 0 and out["poured"] == 0 and out["quarantined"] == 1
     assert not store.read("stolen-name")
+    import glob as _g
+    assert _g.glob(os.path.join(store.path, "_still", "quarantine", "stolen-name*.md"))
 
 
 def test_a_kind_flip_breaks_the_mark(tmp_path):

@@ -659,7 +659,7 @@ rather than collapsing every cause into a silent `None`.
 ## Tests
 
 ```bash
-python3 -m pytest tests -q                              # 313 tests, no model required
+python3 -m pytest tests -q                              # 314 tests, no model required
 cd dsh-plugin && npm test                               # 24 more for the plugin
 ```
 

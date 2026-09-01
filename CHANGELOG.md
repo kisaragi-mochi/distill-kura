@@ -192,6 +192,19 @@ cloth is a two-ended proof — from the weave's own hands:
   second, so a crash between the two yields "unprovable → stale", never a fresh
   stamp on old text.
 
+### Three chores before the WAL
+
+The gate key's first-boot race is closed (`O_CREAT|O_EXCL`: the first writer
+mints, the loser reads the winner's key) and a short or corrupt `gate.key` is
+now a loud RuntimeError, never a silent regeneration — a fresh key orphans
+every existing mark in one stroke, the one repair that must never be
+automatic. A draft whose mark cannot be verified is QUARANTINED
+(`_still/quarantine/`, atomic rename, logged with its destination), not
+deleted: an invalid mark means "origin unprovable", not "content unwanted".
+And a judge's verdict now binds the exact bytes it judged (`judged_sha`,
+re-checked at apply time) — a draft fixed by a parallel drain while the model
+thought is "moved", and the stale verdict is discarded.
+
 ## 0.2.0
 
 The first release shaped by outside review: a security/isolation review, an adversarial

@@ -499,18 +499,37 @@ class Store:
     # with a file handle and an accident, not a principal with the filesystem.
     def gate_key(self) -> bytes:
         path = os.path.join(self.still, "gate.key")
-        try:
-            with open(path, "rb") as f:
-                key = f.read()
-            if len(key) >= 32:
-                return key
-        except OSError:
-            pass
-        key = secrets.token_bytes(32)
-        os.makedirs(self.still, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(key)
+        for attempt in (1, 2):
+            try:
+                with open(path, "rb") as f:
+                    key = f.read()
+            except FileNotFoundError:
+                key = None
+            if key is not None:
+                if len(key) >= 32:
+                    return key
+                # A short or empty key is corruption. Regenerating here would
+                # orphan every signature in the store in one silent stroke —
+                # the one repair that must never be automatic.
+                raise RuntimeError(
+                    f"gate key at {path} is {len(key)} bytes (needs 32+). "
+                    "Refusing to regenerate: a new key orphans every existing "
+                    "mark. Restore the key from backup, or move it aside "
+                    "DELIBERATELY and re-stage the drafts.")
+            os.makedirs(self.still, exist_ok=True)
+            try:
+                # First writer wins; a concurrent first-boot loses the race and
+                # reads the winner's key instead of minting a second one.
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, "wb") as f:
+                f.write(secrets.token_bytes(32))
+            # Loop once more to READ what we (or a racer) wrote — one code path.
+        with open(path, "rb") as f:
+            key = f.read()
+        if len(key) < 32:
+            raise RuntimeError(f"gate key at {path} unreadable after creation")
         return key
 
     def _curation_mark(self, slug: str, tags: tuple[str, ...], annotations: dict) -> str:

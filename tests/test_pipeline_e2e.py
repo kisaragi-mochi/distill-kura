@@ -159,7 +159,7 @@ def test_a_draft_crediting_the_human_without_evidence_is_never_poured(tmp_path):
         assert "bad" not in store.slugs()
         # and the drain agrees: it tosses it without even asking the model
         out = d.drain()
-        assert out["tossed"] == 1 and out["poured"] == 0
+        assert out["quarantined"] == 1 and out["poured"] == 0
     finally:
         srv.shutdown()
 

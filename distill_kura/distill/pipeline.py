@@ -685,8 +685,9 @@ class Distiller:
         head = raw.split("-->")[0]
         body = re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S).strip()
         slug = os.path.basename(path)[:-3]
+        judged_sha = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         if "🚫" in head:
-            return {"slug": slug, "verdict": "TOSS",
+            return {"slug": slug, "verdict": "TOSS", "judged_sha": judged_sha,
                     "why": "credits the human with no [USER] evidence (gate refused)"}
         out = self.scribe(prompts.POUR_SYS,
                           f"=== DRAFT: {slug} ===\n{body}\n\n"
@@ -696,7 +697,7 @@ class Distiller:
         why = (re.search(r"^reason[:：]\s*(.+)$", out, re.M | re.I) or [None, ""])[1] if v else ""
         m = re.search(r"^BODY:\s*\n(.*)$", out, re.S | re.M)
         bb = re.search(r"^BELONGS_BECAUSE:\s*(.+)$", out.split("BODY:", 1)[0], re.M)
-        return {"slug": slug, "verdict": v or "TOSS",
+        return {"slug": slug, "verdict": v or "TOSS", "judged_sha": judged_sha,
                 "why": (why or "the scribe did not keep the shape")[:160],
                 "new_body": m.group(1).strip() if m else None,
                 "belongs_because": bb.group(1).strip() if bb else None}
@@ -724,7 +725,7 @@ class Distiller:
         # The judge must never be a mint: a draft whose mark is invalid for its
         # CURRENT name (renamed, or header-edited) is not judged at all — a FIX
         # re-signs, and re-signing laundered a stolen identity into a valid one.
-        signed, pre_tossed = [], []
+        signed, pre_quarantined = [], []
         for pth in ds:
             s0 = os.path.basename(pth)[:-3]
             raw0 = open(pth, encoding="utf-8").read()
@@ -733,24 +734,48 @@ class Distiller:
                 continue
             # Mechanically, without a model: judging an unsigned draft would let a
             # FIX mint a fresh mark for a stolen name — the judge must never be a
-            # mint. The toss is recorded like any other, body included.
+            # mint. And an invalid mark means "origin unprovable", not "content
+            # unwanted" — so the draft is QUARANTINED, never destroyed: moved
+            # aside atomically where nothing judges, fixes or pours it, but a
+            # person can still look.
+            qdir = os.path.join(self.still, "quarantine")
+            os.makedirs(qdir, exist_ok=True)
+            qp = os.path.join(qdir, s0 + ".md")
+            n = 1
+            while os.path.exists(qp):
+                n += 1
+                qp = os.path.join(qdir, f"{s0}.{n}.md")
+            os.replace(pth, qp)
             with open(os.path.join(self.still, "tossed.jsonl"), "a", encoding="utf-8") as f:
-                f.write(json.dumps({"slug": s0, "verdict": "TOSS",
+                f.write(json.dumps({"slug": s0, "verdict": "QUARANTINE",
                                     "why": "no valid mark for its current name/kind/manifest",
-                                    "at": datetime.now(timezone.utc).isoformat()[:19],
-                                    "body": raw0[:4000]}, ensure_ascii=False) + "\n")
-            os.remove(pth)
-            pre_tossed.append(s0)
-            _log(f"  ✗ toss {s0} — no valid mark for its current name; never judged")
+                                    "moved_to": qp,
+                                    "at": datetime.now(timezone.utc).isoformat()[:19]},
+                                   ensure_ascii=False) + "\n")
+            pre_quarantined.append(s0)
+            _log(f"  ⊘ quarantine {s0} — no valid mark for its current name; never judged")
         ds = signed
         if not ds:
-            return {"ok": True, "poured": 0, "fixed": 0, "tossed": len(pre_tossed),
+            return {"ok": True, "poured": 0, "fixed": 0, "tossed": 0,
+                    "quarantined": len(pre_quarantined),
                     "left": len(glob.glob(os.path.join(self.drafts_dir, "*.md")))}
         _log(f"drain: {len(ds)} drafts, {self.slots} at a time")
-        poured, fixed, tossed = [], [], pre_tossed
+        poured, fixed, tossed = [], [], []
+        quarantined = pre_quarantined
         with ThreadPoolExecutor(max_workers=self.slots) as pool:
             for j in pool.map(self.judge_draft, ds):
                 p = os.path.join(self.drafts_dir, j["slug"] + ".md")
+                # The verdict binds the BYTES that were judged: another drain may
+                # have fixed this draft while the model thought. Moved → next drain.
+                try:
+                    now_sha = hashlib.sha256(open(p, encoding="utf-8").read()
+                                             .encode("utf-8")).hexdigest()
+                except OSError:
+                    _log(f"  ⚠ {j['slug']} vanished while judged; skipping")
+                    continue
+                if j.get("judged_sha") and now_sha != j["judged_sha"]:
+                    _log(f"  ⚠ {j['slug']} moved while judged; verdict discarded")
+                    continue
                 if j["verdict"] == "TOSS":
                     with open(os.path.join(self.still, "tossed.jsonl"), "a", encoding="utf-8") as f:
                         f.write(json.dumps({**j, "at": datetime.now(timezone.utc).isoformat()[:19],
@@ -796,6 +821,7 @@ class Distiller:
                 else:
                     _log(f"  ⚠ not poured {j['slug']} — {r.get('why') or r.get('error')}")
         return {"ok": True, "poured": len(poured), "fixed": len(fixed), "tossed": len(tossed),
+                "quarantined": len(quarantined),
                 "left": len(glob.glob(os.path.join(self.drafts_dir, "*.md")))}
 
     # ── ⑧ index hygiene ──────────────────────────────────────────────────

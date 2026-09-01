@@ -175,3 +175,14 @@ def test_the_charter_is_not_a_memory(tmp_path):
         f.write("what this shelf is for\n")
     s._slugs_cache = None
     assert s.slugs() == ["real"]
+
+
+def test_gate_key_corruption_is_loud_never_regenerated(tmp_path):
+    import pytest
+    s = Store(name="m", path=str(tmp_path / "m")); s.init_files()
+    k1 = s.gate_key()
+    assert s.gate_key() == k1
+    p = os.path.join(s.still, "gate.key")
+    open(p, "wb").write(b"short")
+    with pytest.raises(RuntimeError):
+        s.gate_key()          # a new key would orphan every mark — refuse loudly
