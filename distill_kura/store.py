@@ -624,7 +624,14 @@ class Store:
             else:
                 have = ()
             new_tags = normalize_tags(tuple(have) + add)
-            new_ann = {**self.annotations(s), **{k: v for k, v in (annotations or {}).items() if v}}
+            # Sign what will ROUND-TRIP, not what arrived: the renderer flattens
+            # newlines and the parser strips the ends, so a sentence with a
+            # trailing space was signed as-written, read back stripped, and the
+            # memory wore `tampered` forever — from one keystroke of whitespace.
+            new_ann = {**self.annotations(s),
+                       **{k: str(v).replace("\n", " ").strip()
+                          for k, v in (annotations or {}).items()
+                          if str(v).replace("\n", " ").strip()}}
             new_meta = {**{k: v for k, v in fm.items()
                            if k not in ("name", "description", "type", "tags", "curation_mark")
                            and k not in ANNOTATION_KEYS},
