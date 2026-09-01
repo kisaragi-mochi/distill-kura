@@ -122,15 +122,20 @@ def recall(store: Store, thinker: Endpoint | None, question: str, hops: int = 1,
     t0 = time.time()
     cfg = fastpath_cfg or {}
     fp_ms, fp_verdict, picked, how = None, "disabled", None, ""
+    fp: dict = {}
     if cfg.get("enabled", True):
         # Tier zero: a gated hit IS the pick and the thinker is never asked — which
         # also means a direct question still finds its memory when the thinker is
-        # down, instead of degrading straight to word overlap.
+        # down, instead of degrading straight to word overlap. The callsign pre-head
+        # answers first when the question contains a verified shared word.
         fp = fastpath.lookup(store, question, top=top,
-                             gate=cfg.get("gate", fastpath.DEFAULT_GATE))
+                             gate=cfg.get("gate", fastpath.DEFAULT_GATE),
+                             cues=cfg.get("cues", True))
         fp_ms, fp_verdict = fp["ms"], fp["verdict"]
         if fp["hits"]:
             picked, how = [h["slug"] for h in fp["hits"]], "fastpath"
+            if fp.get("cue"):
+                how = "fastpath-cue"
     if picked is None:
         picked = pick_by_meaning(store, thinker, question, top) if thinker else None
         if picked is None:
@@ -172,6 +177,7 @@ def recall(store: Store, thinker: Endpoint | None, question: str, hops: int = 1,
     store.note_read(included, "recall")
     return {"store": store.name, "question": question, "how": how, "picked": picked,
             "fastpath_verdict": fp_verdict, "fastpath_ms": fp_ms,
+            "fastpath_cue": fp.get("cue"),
             "walked": order, "included": included,
             "dropped_for_budget": [s for s in order if s not in included],
             "context": ctx, "chars": len(ctx), "chars_per_memory": chars,

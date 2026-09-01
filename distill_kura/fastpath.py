@@ -275,15 +275,29 @@ def _score(idx: _Index, question: str, top: int, gate: float) -> tuple[list[dict
 
 
 def lookup(store: Store, question: str, top: int = 3,
-           gate: float = DEFAULT_GATE) -> dict:
+           gate: float = DEFAULT_GATE, cues: bool = True) -> dict:
     """→ {"hits": [{slug, score, heads}…], "verdict": "ok"|"no-confident-hit", "ms"}.
 
     Empty hits is the honest answer, never a failure: it means "this question needs
-    judgement", and the caller falls through to the thinker."""
+    judgement", and the caller falls through to the thinker.
+
+    Before the five heads run, one exact pre-head: a verified USER callsign the
+    question contains, unique in the store, routes straight to its memory. It is
+    NOT mixed into the scoring (no weights, no gate arithmetic) — the shared word
+    either names one memory or the pre-head is silent, and the five heads run
+    exactly as before."""
     t0 = time.perf_counter()
+    if cues:
+        from .cues import CueLedger
+        cue = CueLedger(store).direct(question)
+        if cue:
+            return {"hits": [{"slug": cue["slug"], "score": "cue",
+                              "heads": {"cue": cue["cue"]}}],
+                    "verdict": "ok", "cue": cue["cue"],
+                    "ms": round((time.perf_counter() - t0) * 1000, 3)}
     idx = index_for(store)
     hits, verdict = _score(idx, question, top, float(gate))
-    return {"hits": hits, "verdict": verdict,
+    return {"hits": hits, "verdict": verdict, "cue": None,
             "ms": round((time.perf_counter() - t0) * 1000, 3)}
 
 

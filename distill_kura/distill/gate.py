@@ -90,11 +90,18 @@ def gate(cands: list[dict], segs: list[Segment], store_text: str = "") -> tuple[
 
         claims_number = bool(re.search(r"\d", f"{c.get('why', '')} {c.get('topic', '')}"))
         grounded = bool(classes & {"TOOL", "ACT"})
-        kept.append({**c,
-                     "evidence": good,
-                     "classes": sorted(classes),
-                     "judgement": judgement,
-                     "unverified_numbers": claims_number and not grounded})
+        entry = {**c,
+                 "evidence": good,
+                 "classes": sorted(classes),
+                 "judgement": judgement,
+                 "unverified_numbers": claims_number and not grounded}
+        # Callsigns are verified against the SURVIVING quotes, not the raw material:
+        # a phrase that only ever appeared in a dropped quote was never evidence.
+        cues, cue_refused = verify_callsigns(c.get("callsigns"), good)
+        if cues or cue_refused:
+            entry["routing_cues"] = cues
+            entry["routing_cues_refused"] = cue_refused
+        kept.append(entry)
     return kept, dropped, ideas
 
 
@@ -265,6 +272,66 @@ def verify_tags(proposed, evidence: list[dict], recurred_ok: bool = False
         else:
             kept.append(t)
     return tuple(kept), basis, refused
+
+
+# ── USER callsigns: the shared vernacular that routes to a memory ─────────
+#
+# A callsign is not content — it is the two-of-us word ("全員野球") that leads
+# BACK to a memory. As a routing word it is worth exactly its provenance, so
+# the floor is the same one quotes stand on: the phrase must exist verbatim
+# inside a SURVIVING [USER] quote. A nickname the agent coined, a string a tool
+# printed, a paraphrase of what the human "meant" — none of it is shared
+# vocabulary, and none of it passes.
+
+CUE_MIN, CUE_MAX, CUE_MAX_N = 3, 40, 2
+
+
+def cue_key(text: str) -> str:
+    """The routing-comparison key: NFKC + casefold + collapsed whitespace. The
+    DISPLAY keeps the human's spelling; only comparison normalises, so '全員野球'
+    and 'ＦＵＬＬ野球' never silently merge but 'FreeToken' and 'freetoken' do."""
+    import unicodedata as _u
+    return " ".join(_u.normalize("NFKC", text).casefold().split())
+
+
+def verify_callsigns(proposed, evidence: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """→ (kept, refused). kept items carry {text, class: USER, quote} — the quote
+    is the surviving [USER] evidence the phrase was found in, so the manifest can
+    always say whose words the callsign is.
+
+    Deterministic, like the rest of this file: the model proposes, the human's
+    surviving words decide. The GATED VALUE is the whitespace-collapsed form —
+    what is returned is exactly what a JSON round-trip gives back."""
+    user_quotes = [e["text"] for e in evidence if e["class"] == "USER"]
+    kept: list[dict] = []
+    refused: dict[str, str] = {}
+    seen_keys: set[str] = set()
+    for raw in (proposed or []):
+        text = " ".join(str(raw).split())            # round-trip shape, see test 7
+        key = cue_key(text)
+        why = None
+        if not text or not any(ch.isalnum() for ch in key):
+            why = "whitespace and punctuation alone do not route anywhere"
+        elif not (CUE_MIN <= len(key) <= CUE_MAX):
+            why = f"a callsign is {CUE_MIN}–{CUE_MAX} codepoints after normalisation"
+        elif key in seen_keys:
+            continue                                  # the same word, proposed twice
+        else:
+            hit = next((q for q in user_quotes if text in q), None)
+            if hit is None:
+                # Not inside a surviving [USER] quote: invented, paraphrased, or a
+                # phrase only the agent or a tool used. All three are the same
+                # refusal — the human never said it.
+                why = "needs the human's own words: an exact substring of a surviving [USER] quote"
+        if why is not None:
+            refused[text or repr(raw)] = why
+            continue
+        if len(kept) >= CUE_MAX_N:
+            refused[text] = f"at most two callsigns per memory (kept {[k['text'] for k in kept]})"
+            continue
+        seen_keys.add(key)
+        kept.append({"text": text, "class": "USER", "quote": hit})
+    return kept, refused
 
 
 def salvage(raw: str) -> list[dict]:

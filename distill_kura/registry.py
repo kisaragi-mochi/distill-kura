@@ -86,7 +86,7 @@ _PREFILL_TYPES = {"window_tokens": int, "budget_fraction": float, "hard_fraction
                   "trail_tokens": int}
 # Tier zero of recall (`fastpath.py`). `gate` is the honesty bar: a hit below it is
 # silence, and silence goes to the thinker.
-_FASTPATH_TYPES = {"enabled": bool, "gate": (int, float)}
+_FASTPATH_TYPES = {"enabled": bool, "gate": (int, float), "cues": bool}
 # One mouth `kura pay-forward` bakes the resident map into (`payforward.py`). `url` is
 # the llama.cpp-compatible server's BASE — the slots API lives beside /v1, not under it
 # — and `store` names whose map the mouth wears.

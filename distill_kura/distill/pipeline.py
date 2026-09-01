@@ -395,6 +395,10 @@ class Distiller:
                 "unverified_numbers": c.get("unverified_numbers", False),
                 "judgement": c.get("judgement", False),
                 "attributed_to_human": attributes_to_human(text, c["classes"]),
+                # routing cues ride to the manifest untouched; they never enter the
+                # body or the index — a callsign is a way BACK, not content
+                "routing_cues": c.get("routing_cues") or [],
+                "routing_cues_refused": c.get("routing_cues_refused") or {},
                 **self._curate(c, out)}
 
     def _curate(self, c: dict, out: str) -> dict:
@@ -472,6 +476,8 @@ class Distiller:
                 "unverified_numbers": c.get("unverified_numbers", False),
                 "judgement": c.get("judgement", False),
                 "attributed_to_human": attributes_to_human(text, c["classes"]),
+                "routing_cues": c.get("routing_cues") or [],
+                "routing_cues_refused": c.get("routing_cues_refused") or {},
                 **self._curate(c, out or "")}
 
     # ── ⑥ stage ──────────────────────────────────────────────────────────
@@ -520,6 +526,17 @@ class Distiller:
             "language": self.language,
             "created_at": datetime.now(timezone.utc).isoformat()[:19] + "Z",
         }
+        # Routing cues are their OWN schema version, never folded into gate_version:
+        # the envelope mark already binds the manifest's digest, and cue plumbing can
+        # evolve without re-touching the gate's number. memory_slug is the slug this
+        # provenance routes TO — set by code (compose/extends/covered), never by the
+        # model's proposal.
+        if d.get("routing_cues"):
+            manifest["memory_slug"] = d.get("slug") or d.get("extends")
+            manifest["routing_cues_version"] = 1
+            manifest["routing_cues"] = d["routing_cues"]
+            if d.get("routing_cues_refused"):
+                manifest["routing_cues_refused"] = d["routing_cues_refused"]
         blob = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=1)
         digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()
         path = os.path.join(self._evidence_dir(), f"{digest}.json")
@@ -1044,6 +1061,21 @@ class Distiller:
                         _log(f"      ↺ recurred: {target}")
                     elif rec != "already":
                         _log(f"      · not marked recurred — {rec}")
+                    if c.get("routing_cues") and target in self.store.slug_set():
+                        # Memory novelty is COVERED; ROUTING novelty may still be NEW:
+                        # the store already says this, but the human just used a word
+                        # for it the store had never heard. The cue and its provenance
+                        # are recorded against the EXISTING slug (code-chosen, never
+                        # the model's) — and nothing else moves: no memory body, no
+                        # index line, not one canonical byte.
+                        self._write_manifest(
+                            {"slug": target, "kind": c.get("kind"),
+                             "evidence": c["evidence"], "classes": c["classes"],
+                             "routing_cues": c["routing_cues"],
+                             "routing_cues_refused": c.get("routing_cues_refused") or {}},
+                            path, key)
+                        _log(f"      ⇢ cue kept for COVERED {target}: "
+                             f"{[x['text'] for x in c['routing_cues']]}")
                     with open(os.path.join(self.still, "dropped.jsonl"), "a", encoding="utf-8") as f:
                         f.write(json.dumps({**{k: v for k, v in c.items() if k != "evidence"},
                                             "why_dropped": f"COVERED by {target}", "reason": why,
