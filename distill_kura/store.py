@@ -6,7 +6,8 @@ Layout of a store directory::
       MEMORY.md        the index: one line per memory, written as a *recognition trigger*
       <slug>.md        one memory = one fact, with YAML-ish frontmatter
       _study/*.md      optional long-form notes (also indexed and walkable)
-      _still/          the distiller's workshop (drafts, watermarks, read log) — never indexed
+      _still/          the distiller's workshop (drafts, watermarks, read log,
+                       the write-ahead log and the revision counter) — never indexed
       persona.json     optional: who the agent *is* when it lives with this store
       charter.md       optional: the text every worker of this store reads first
 
@@ -616,10 +617,12 @@ class Store:
                                     body, new_meta, new_tags, new_ann)
             if rendered == text:
                 return {"ok": True, "slug": s, "changed": False, "tags": list(new_tags)}
-            tmp = self.file_of(s) + f".tmp.{os.getpid()}"
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(rendered)
-            os.replace(tmp, self.file_of(s))
+            # One canonical file: the atomic replace suffices without the WAL (no
+            # second file to fall out of step with). The revision still moves —
+            # bumped first, for the reason `_bump_revision` gives.
+            self._bump_revision()
+            self._replace_file(self.file_of(s), rendered.encode("utf-8"))
+            self._fsync_dir(self.path)
             return {"ok": True, "slug": s, "changed": True, "tags": list(new_tags)}
 
     @staticmethod
@@ -641,29 +644,41 @@ class Store:
         return self.remember_direct(slug, description, body, type_, hook, title)
 
     @contextmanager
-    def _locked(self):
+    def _locked(self, replay: bool = True):
         """One writer at a time, per store.
 
         A memory and its index line are two files. Without a lock, two writers
         interleave and the second one's read-modify-write of `MEMORY.md` drops the
         first's line: the memory exists and nothing points at it, which makes it
         invisible to recall — the failure `doctor()` reports as `not_in_index`, after
-        the fact. Cheap enough to take on every write."""
+        the fact. Cheap enough to take on every write.
+
+        The lock is also where crash replay lives, and the placement is load-bearing:
+        replay applies a leftover transaction's FINAL bytes, so it must run before any
+        new mutation — a write that landed first would be silently overwritten by the
+        older promise. Every mutation goes through here, so replay cannot be forgotten.
+        `replay=False` is for `doctor()` alone, which replays explicitly to report it."""
         os.makedirs(self.still, exist_ok=True)
         with open(os.path.join(self.still, "store.lock"), "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             try:
+                if replay:
+                    self._wal_replay()
                 yield
             finally:
                 fcntl.flock(lk, fcntl.LOCK_UN)
 
     def _write_index(self, text: str) -> None:
         """Replace the index atomically. A crash mid-append used to leave a half-written
-        line in the one file that is read on every single turn."""
-        tmp = self.index_path + f".tmp.{os.getpid()}"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp, self.index_path)
+        line in the one file that is read on every single turn.
+
+        One canonical file changes here (tidy's path), so the atomic replace suffices
+        and the WAL ceremony would buy nothing — a WAL exists to keep TWO files in
+        step, and there is no second file to fall out of step with. The revision still
+        moves: a tidied index is a mutation a consumer must notice."""
+        self._bump_revision()
+        self._replace_file(self.index_path, text.encode("utf-8"))
+        self._fsync_dir(self.path)
 
     def _still_ourselves(self) -> bool:
         """The directory we were constructed against is still that directory.
@@ -674,6 +689,201 @@ class Store:
         policy becomes a writable alias of a protected one. Cheap to re-check, so it is
         re-checked on the way into every write."""
         return os.path.realpath(self.path) == self.path
+
+    # ── durability plumbing ──────────────────────────────────────────────
+    @staticmethod
+    def _fsync_dir(path: str) -> None:
+        """Make a rename in `path` durable. Best-effort: some filesystems (CIFS)
+        cannot fsync a directory, and refusing a write over that would trade a
+        crash window for an outage — the atomic replace itself still holds."""
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    def _replace_file(self, target: str, data: bytes) -> None:
+        """Write-fsync-rename. The fsync BEFORE the rename matters: without it a
+        power loss can leave the new name pointing at unwritten bytes — an empty
+        memory with a correct filename, worse than the old content."""
+        tmp = target + f".tmp.{os.getpid()}"
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+
+    # ── the revision counter ─────────────────────────────────────────────
+    #
+    # `_still/revision`: one integer, moved forward once per committed canonical
+    # mutation — a poured or rewritten memory, an annotation, a tidied index. It
+    # exists so a consumer (the weave, a cache) can ask "did anything change?"
+    # without hashing the store. Monotonic, never wound back. 0 means "no counted
+    # mutation yet", which a store from before the counter also honestly answers.
+    @property
+    def _revision_path(self) -> str:
+        return os.path.join(self.still, "revision")
+
+    def revision(self) -> int:
+        try:
+            return int(open(self._revision_path, encoding="utf-8").read().strip())
+        except (OSError, ValueError):
+            return 0
+
+    def _set_revision(self, n: int) -> None:
+        os.makedirs(self.still, exist_ok=True)
+        self._replace_file(self._revision_path, f"{n}\n".encode("utf-8"))
+        self._fsync_dir(self.still)
+
+    def _bump_revision(self) -> int:
+        """For the single-file changes that do not go through the WAL
+        (`_write_index` from tidy, `_annotate`). Bumped BEFORE the canonical
+        replace: a crash in between over-announces — a consumer re-reads an
+        unchanged file, wasted work — where the other order under-announces, and
+        a changed file behind a stale number keeps serving the old map until an
+        unrelated write happens to bump it."""
+        n = self.revision() + 1
+        self._set_revision(n)
+        return n
+
+    # ── the transaction: promise first, then keep it ─────────────────────
+    #
+    # `_write` changes two canonical files. Each replace was atomic; the PAIR was
+    # not, and the old comment here said so out loud — a crash between them left a
+    # memory nothing pointed at (`not_in_index`, found after the fact). The fix is
+    # a write-ahead log: under the lock, the final bytes of every file the change
+    # will touch land in `_still/wal/<txid>/` and are fsynced BEFORE any canonical
+    # file moves. From that moment the change is a promise that survives power
+    # loss, and replay is idempotent because the payloads ARE the final state, not
+    # diffs. A transaction whose promise is incomplete — missing payload, hash
+    # mismatch, unreadable intent — promised nothing: it is moved to
+    # `_still/wal-quarantine/` and named by `doctor()` as `broken_wal`. Never
+    # rolled back, never guessed at.
+
+    _WAL_TARGET = re.compile(r"^[a-z0-9][a-z0-9-]*\.md$")
+
+    @property
+    def _wal_dir(self) -> str:
+        return os.path.join(self.still, "wal")
+
+    @property
+    def _wal_quarantine(self) -> str:
+        return os.path.join(self.still, "wal-quarantine")
+
+    def _commit(self, slug: str, op: str, targets: dict[str, bytes]) -> int:
+        """Commit one canonical change — the final bytes of each file — through
+        the WAL. Must be called under `_locked()`. Returns the new revision."""
+        rev = self.revision() + 1
+        txid = f"{time.time_ns():020d}-{os.getpid()}"
+        txdir = os.path.join(self._wal_dir, txid)
+        os.makedirs(txdir)
+        files = []
+        for i, target in enumerate(sorted(targets)):
+            pname = f"payload-{i}"
+            with open(os.path.join(txdir, pname), "wb") as f:
+                f.write(targets[target])
+                f.flush()
+                os.fsync(f.fileno())
+            files.append({"payload": pname, "target": target,
+                          "sha256": hashlib.sha256(targets[target]).hexdigest()})
+        intent = {"txid": txid, "slug": slug, "op": op, "next_revision": rev, "files": files}
+        # The intent is written LAST: its presence, with every hash checking out, is
+        # what makes the promise binding. A crash before this point promised nothing
+        # (the leftover is quarantined, loudly, with canonical files untouched).
+        with open(os.path.join(txdir, "intent.json"), "w", encoding="utf-8") as f:
+            json.dump(intent, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        self._fsync_dir(txdir)
+        self._fsync_dir(self._wal_dir)
+        self._apply(txdir, intent)
+        return rev
+
+    def _apply(self, txdir: str, intent: dict) -> None:
+        """Keep the promise: memory file first, index second, revision third, then
+        clear the WAL entry. The same order on commit and on replay, so a crash at
+        ANY point re-runs to the same final state."""
+        for e in sorted(intent["files"], key=lambda e: e["target"] == INDEX):
+            with open(os.path.join(txdir, e["payload"]), "rb") as f:
+                data = f.read()
+            self._replace_file(os.path.join(self.path, e["target"]), data)
+        # max(): a replay of an already-applied transaction must not wind back.
+        self._set_revision(max(self.revision(), int(intent["next_revision"])))
+        self._fsync_dir(self.path)
+        for fn in os.listdir(txdir):
+            os.unlink(os.path.join(txdir, fn))
+        os.rmdir(txdir)
+        self._fsync_dir(self._wal_dir)
+
+    def _wal_intact(self, txdir: str) -> dict | None:
+        """The parsed intent when the transaction is complete and true; None when
+        anything fails to check out. The intent is DATA, not authority: a target
+        `_write` could never have produced — a path, a reserved name — marks the
+        transaction broken rather than being applied."""
+        try:
+            with open(os.path.join(txdir, "intent.json"), encoding="utf-8") as f:
+                intent = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(intent, dict) or not isinstance(intent.get("files"), list) \
+                or not intent["files"]:
+            return None
+        if not isinstance(intent.get("next_revision"), int) or intent["next_revision"] < 1:
+            return None
+        for e in intent["files"]:
+            if not isinstance(e, dict):
+                return None
+            target, payload, sha = e.get("target"), e.get("payload"), e.get("sha256")
+            if not (isinstance(target, str) and isinstance(payload, str) and isinstance(sha, str)):
+                return None
+            if target != INDEX and (not self._WAL_TARGET.match(target) or target in RESERVED):
+                return None
+            if not contained(self.path, os.path.join(self.path, target)):
+                return None
+            if os.path.basename(payload) != payload:
+                return None
+            try:
+                with open(os.path.join(txdir, payload), "rb") as f:
+                    data = f.read()
+            except OSError:
+                return None
+            if hashlib.sha256(data).hexdigest() != sha:
+                return None
+        return intent
+
+    def _wal_replay(self) -> dict:
+        """Finish what a crash interrupted. Must run under the lock, BEFORE any new
+        mutation (see `_locked`). An intact transaction is applied and cleared; a
+        broken one goes to `_still/wal-quarantine/` with its payloads kept for a
+        person to inspect — deleting the debris would delete the only evidence."""
+        wal = self._wal_dir
+        report: dict = {"replayed": [], "quarantined": []}
+        if not os.path.isdir(wal):
+            return report
+        for txid in sorted(os.listdir(wal)):
+            txdir = os.path.join(wal, txid)
+            intent = self._wal_intact(txdir)
+            if intent is None:
+                os.makedirs(self._wal_quarantine, exist_ok=True)
+                dest = os.path.join(self._wal_quarantine, txid)
+                if os.path.exists(dest):     # quarantined before under this name: keep both
+                    dest += f".{time.time_ns()}"
+                os.replace(txdir, dest)
+                self._fsync_dir(self._wal_quarantine)
+                self._fsync_dir(wal)
+                report["quarantined"].append(os.path.basename(dest))
+                continue
+            self._apply(txdir, intent)
+            report["replayed"].append(txid)
+        if report["replayed"]:
+            self._titles = None
+            self._slugs_cache = None
+        return report
 
     def _write(self, slug: str, description: str, body: str, type_: str = "project",
                hook: str | None = None, title: str | None = None,
@@ -707,11 +917,11 @@ class Store:
         # shell, and silently rewriting a body corrupts exactly the memories that carry
         # the most detail. Escaping belongs to whoever renders a template, at render time.
         os.makedirs(self.path, exist_ok=True)
-        # Memory file and index line are one change. Serialise it, and replace each
-        # file atomically: a concurrent writer cannot drop the other's line, and no
-        # reader ever sees a half-written index. What this is NOT: a two-file
-        # transaction — a crash between the two replaces can still leave a memory
-        # that nothing points at, which `doctor()` reports as `not_in_index`.
+        # Memory file and index line are one change. Serialise it, decide BOTH files'
+        # final bytes, and commit them through the WAL (`_commit`): the old pair of
+        # atomic replaces was atomic per file and not per change, and a crash between
+        # them left a memory nothing pointed at — the `not_in_index` wound `doctor()`
+        # could only report after the fact. Now it is repaired on the next write.
         with self._locked():
             path = self.file_of(slug)
             existed = os.path.exists(path)
@@ -740,16 +950,15 @@ class Store:
             all_ann = {**kept_ann, **{k: v for k, v in (annotations or {}).items() if v}}
             if signed and (all_tags or all_ann):
                 merged["curation_mark"] = self._curation_mark(slug, all_tags, all_ann)
-            tmp = path + f".tmp.{os.getpid()}"
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(self._render(slug, description, type_, body, merged, all_tags, all_ann))
-            os.replace(tmp, path)
-            self._titles = None
-            self._slugs_cache = None
+            rendered = self._render(slug, description, type_, body, merged, all_tags, all_ann)
 
+            # The index's final text is decided BEFORE anything on disk moves —
+            # the WAL needs the complete final bytes of every file the change
+            # touches, or replay would have to guess.
             d1 = (hook or description).replace("\n", " ").strip()
             t1 = (title or "").replace("\n", " ").strip()
             cur = self.index_text()
+            new_index: str | None = None
             if existed and d1:
                 out, hit = [], False
                 for l in cur.splitlines():
@@ -761,15 +970,25 @@ class Store:
                     else:
                         out.append(l)
                 if hit:
-                    self._write_index("\n".join(out) + "\n")
-                    return {"ok": True, "slug": slug, "created": False, "indexed": "updated"}
-            if f"({slug}.md)" not in cur:
-                # Title must be a name one can say aloud — never a truncated description.
-                t1 = t1 if 0 < len(t1) <= 40 else (d1 if len(d1) <= 34 else slug)
-                sep = "" if (not cur or cur.endswith("\n")) else "\n"
-                self._write_index(f"{cur}{sep}- [{t1}]({slug}.md) — {d1}\n")
-                return {"ok": True, "slug": slug, "created": not existed, "indexed": True}
-            return {"ok": True, "slug": slug, "created": not existed, "indexed": False}
+                    new_index = "\n".join(out) + "\n"
+                    result = {"ok": True, "slug": slug, "created": False, "indexed": "updated"}
+            if new_index is None:
+                if f"({slug}.md)" not in cur:
+                    # Title must be a name one can say aloud — never a truncated description.
+                    t1 = t1 if 0 < len(t1) <= 40 else (d1 if len(d1) <= 34 else slug)
+                    sep = "" if (not cur or cur.endswith("\n")) else "\n"
+                    new_index = f"{cur}{sep}- [{t1}]({slug}.md) — {d1}\n"
+                    result = {"ok": True, "slug": slug, "created": not existed, "indexed": True}
+                else:
+                    result = {"ok": True, "slug": slug, "created": not existed, "indexed": False}
+
+            targets = {f"{slug}.md": rendered.encode("utf-8")}
+            if new_index is not None:
+                targets[INDEX] = new_index.encode("utf-8")
+            self._commit(slug, "write", targets)
+            self._titles = None
+            self._slugs_cache = None
+            return result
 
     # ── the learned profile (optional; the wide room's growing understanding) ──
     #
@@ -892,6 +1111,18 @@ class Store:
 
     def doctor(self) -> dict:
         from . import fastpath          # local: fastpath is a layer ON TOP of this API
+        # Crash debris first: an intact WAL transaction is a promise the store must
+        # keep before its files are judged, and doctor is often the first thing run
+        # after a bad night — waiting for "the first mutation" to replay would have
+        # doctor describe a store that is about to change under it. Replayed HERE so
+        # it can be reported (`_locked` replays silently); the lock is only taken
+        # when there is something to do, so a healthy doctor stays write-free.
+        wal_report: dict = {"replayed": [], "quarantined": []}
+        if os.path.isdir(self._wal_dir) and os.listdir(self._wal_dir):
+            with self._locked(replay=False):
+                wal_report = self._wal_replay()
+        broken_wal = (sorted(os.listdir(self._wal_quarantine))
+                      if os.path.isdir(self._wal_quarantine) else [])
         files = {s: self.read(s) for s in self.slugs()}
         out: dict[str, set[str]] = {}
         back: dict[str, set[str]] = {}
@@ -956,6 +1187,13 @@ class Store:
             # The fitted estimator, not len//2: chars/2 is biased 8-23% LOW against real
             # tokenizers, and low is the direction that silently overflows a window.
             "index_tokens_est": estimate(idx),
+            # The store's mutation counter, and the crash accounting: what this very
+            # call finished (`wal_replayed`) and what no one may finish (`broken_wal`
+            # — quarantined promises whose payloads failed their hashes; a person
+            # decides what to do with those, the code never guesses).
+            "revision": self.revision(),
+            "wal_replayed": wal_report["replayed"],
+            "broken_wal": broken_wal,
             "invalid_tags": invalid_tags,
             "tampered_manifest": tampered_manifest,
             "invalid_manifest_pointer": invalid_manifest_pointer,

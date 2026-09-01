@@ -205,6 +205,35 @@ And a judge's verdict now binds the exact bytes it judged (`judged_sha`,
 re-checked at apply time) — a draft fixed by a parallel drain while the model
 thought is "moved", and the stale verdict is discarded.
 
+### The store survives power loss (WAL + revision)
+
+`_write` changed two canonical files — the memory, then the index — with two atomic
+replaces. Each was atomic; the pair was not, and the comment in `store.py` said so: a
+crash between them left a memory nothing pointed at, which `doctor` could only report
+as `not_in_index` after the fact. That was the store's last known crash hole, and it
+is closed.
+
+Now, under the store lock, the final bytes of both files are written and fsynced to
+`_still/wal/<txid>/` (payloads plus an `intent.json` carrying their hashes and the
+next revision) BEFORE any canonical file moves. Only then: memory replace → index
+replace → revision replace, each write-fsync-rename, then the WAL entry is cleared.
+A crash anywhere replays to the same final state, because the payloads ARE the final
+state — not diffs. Replay runs on entry to every locked mutation (so it cannot be
+forgotten, and a leftover promise cannot clobber a newer write) and in `doctor`,
+which reports the txids it finished as `wal_replayed`. A transaction that fails its
+own hashes — missing payload, mismatched sha256, unreadable intent — promised
+nothing: it is moved to `_still/wal-quarantine/` with its payloads kept, named by
+`doctor` as `broken_wal`, and never applied, rolled back, or guessed at.
+
+`_still/revision` is new: one integer, bumped once per committed canonical mutation —
+a poured or rewritten memory, an annotation, a tidied index — exposed as
+`Store.revision()` (0 when absent) and in `doctor`. Single-file changes (`tidy`'s
+index replace, `_annotate`) skip the WAL ceremony — there is no second file to fall
+out of step with — and bump the revision before their atomic replace, so a crash in
+between over-announces (a wasted re-read) rather than under-announces (a stale map
+served until an unrelated write). The counter exists for the weave to consume next:
+"did anything change?" without hashing the store.
+
 ## 0.2.0
 
 The first release shaped by outside review: a security/isolation review, an adversarial
