@@ -47,8 +47,9 @@ def worldline(reg: Registry, store: Store, cases_path: str, routing: str = "full
     wears: the woven cloth when current, the canonical index otherwise.
     """
     from . import worldline as wl
-    from .prefill import build, loom_for
-    pf = build(store, loom_for(store, reg.prefill_cfg_for(store)))
+    from .prefill import build, loom_for, trail_for
+    loom = loom_for(store, reg.prefill_cfg_for(store))
+    pf = build(store, loom, trail=trail_for(store, reg.prefill_cfg_for(store), loom=loom))
     return wl.run(store, wl.load_cases(cases_path), routing=routing,
                   thinker=reg.models_for(store).thinker, resident=pf.text,
                   fastpath_cfg=reg.fastpath_cfg_for(store), hops=hops,

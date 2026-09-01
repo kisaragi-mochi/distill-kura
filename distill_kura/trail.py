@@ -126,6 +126,8 @@ class Trail:
                 except OSError:
                     pass
             return {"written": False, "removed": True}
+        if self.text_on_disk() == text and self._state() == self._state_for(stamp, _sha256(text)):
+            return {"written": False, "unchanged": True}   # no churn when nothing moved
         os.makedirs(os.path.dirname(self.out_path) or ".", exist_ok=True)
         tmp = self.out_path + f".tmp.{os.getpid()}"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -138,13 +140,19 @@ class Trail:
                 text.count("\n- ") if "\n- " in text else 0}
 
     def _record(self, stamp: TrailStamp, trail_sha: str) -> None:
-        record = {"version": STATE_VERSION, "source_revision": stamp.source_revision,
-                  "source_sha256": stamp.source_sha256, "trail_sha256": trail_sha}
+        record = self._state_for(stamp, trail_sha)
+        if self._state() == record:
+            return                               # no churn when nothing changed
         os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
         tmp = self.state_path + f".tmp.{os.getpid()}"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(record, f, ensure_ascii=False, indent=1, sort_keys=True)
         os.replace(tmp, self.state_path)
+
+    @staticmethod
+    def _state_for(stamp: TrailStamp, trail_sha: str) -> dict:
+        return {"version": STATE_VERSION, "source_revision": stamp.source_revision,
+                "source_sha256": stamp.source_sha256, "trail_sha256": trail_sha}
 
     # ── reading it back ──────────────────────────────────────────────────
     def text_on_disk(self) -> str | None:

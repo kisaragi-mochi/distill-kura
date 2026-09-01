@@ -141,7 +141,8 @@ def _make_handler(reg: Registry):
                     header=cfg.get("header"),
                     window_tokens=int(q.get("window") or cfg.get("window_tokens", 131072)),
                     fraction=float(q.get("fraction") or cfg.get("budget_fraction", 0.05)),
-                    hard_fraction=float(cfg.get("hard_fraction", 0.20)))
+                    hard_fraction=float(cfg.get("hard_fraction", 0.20)),
+                    trail=prefill_mod.trail_for(st, cfg, loom=loom))
                 # The map is the largest thing this server hands out and it changes a
                 # few times a day, while clients re-read it every couple of minutes.
                 inm = (self.headers.get("If-None-Match") or "").strip('"')

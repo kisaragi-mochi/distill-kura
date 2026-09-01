@@ -10,7 +10,8 @@
     kura tend [-s eq]                 the watcher: in the quiet hours, drain → distil → weave → tidy
     kura doctor [-s eq]               health of a store (--all for every one)
     kura weave [-s eq] [--status]     re-weave the resident index (three-layer cloth)
-    kura prefill [-s eq]              print the standing block a host should inject
+    kura prefill [-s eq]            print the standing block a host should inject
+    kura trail [-s eq]              rebuild the Hot Trail appended after the map
     kura pay-forward [-s eq]          bake the map into each mouth's KV slot, save it to disk
     kura bench compress [-s eq]       what the store cost against the journal it came from
     kura init <name> --path DIR       create a store and print the TOML to paste
@@ -124,6 +125,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-model", action="store_true", help="trim mechanically, call no model")
 
     p = sub.add_parser("prefill", help="print the standing index block")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("trail", help="rebuild the Hot Trail — the recent-path block appended after the map")
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("pay-forward", help="pay the map's cold prefill forward: bake it "
@@ -247,21 +251,30 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if s["runnable"] and not s["wrong_branch"] else 1
         sys.exit("kura bench {compress|retention}")
 
-    if a.cmd in ("weave", "prefill"):
+    if a.cmd in ("weave", "prefill", "trail"):
         from . import prefill as prefill_mod
         cfg = dict(reg.prefill_cfg_for(store))
         if getattr(a, "fresh_days", None) is not None:
             cfg["fresh_days"] = a.fresh_days
         if getattr(a, "trigger_tokens", None) is not None:
             cfg["trigger_tokens"] = a.trigger_tokens
-        scribe = None if (a.cmd == "prefill" or a.no_model) else reg.models_for(store).scribe
+        scribe = (None if (a.cmd in ("prefill", "trail") or getattr(a, "no_model", False))
+                  else reg.models_for(store).scribe)
         loom = prefill_mod.loom_for(store, cfg, scribe=scribe)
+
+        if a.cmd == "trail":
+            t = prefill_mod.trail_for(store, cfg, loom=loom)
+            r = t.write()
+            print(json.dumps(r, ensure_ascii=False))
+            # 2 = nothing fresh to say (the trail was removed or never existed)
+            return 0 if r.get("written") else 2
 
         if a.cmd == "prefill":
             pf = prefill_mod.build(store, loom, header=cfg.get("header"),
                                    window_tokens=int(cfg.get("window_tokens", 131072)),
                                    fraction=float(cfg.get("budget_fraction", 0.05)),
-                                   hard_fraction=float(cfg.get("hard_fraction", 0.20)))
+                                   hard_fraction=float(cfg.get("hard_fraction", 0.20)),
+                                   trail=prefill_mod.trail_for(store, cfg, loom=loom))
             if a.json:
                 print(json.dumps(pf.as_dict(), ensure_ascii=False))
             else:

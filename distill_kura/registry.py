@@ -82,7 +82,8 @@ _DISTILL_TYPES = {"inherit_global_journals": bool, "journals": dict, "language":
                   "idle_min": (int, float), "backoff_min": (int, float), "yield_on_return": bool}
 _PREFILL_TYPES = {"window_tokens": int, "budget_fraction": float, "hard_fraction": float,
                   "fresh_days": (int, float), "pinned_types": list, "trigger_tokens": int,
-                  "verbatim_after": str, "cloth_path": str, "header": str}
+                  "verbatim_after": str, "cloth_path": str, "header": str,
+                  "trail_tokens": int}
 # Tier zero of recall (`fastpath.py`). `gate` is the honesty bar: a hit below it is
 # silence, and silence goes to the thinker.
 _FASTPATH_TYPES = {"enabled": bool, "gate": (int, float)}

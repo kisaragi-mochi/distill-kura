@@ -36,6 +36,7 @@ from dataclasses import dataclass
 
 from .store import Store
 from .tokens import estimate
+from .trail import Trail
 from .weave import Loom
 
 DEFAULT_HEADER = """=== {label} — long-term memory, index ===
@@ -98,12 +99,19 @@ def _escape_braces(text: str) -> tuple[str, int]:
 
 def build(store: Store, loom: Loom | None = None, header: str | None = None,
           window_tokens: int = 131072, fraction: float = 0.05,
-          hard_fraction: float = 0.20, weave: bool = True) -> Prefill:
+          hard_fraction: float = 0.20, weave: bool = True,
+          trail: "Trail | None" = None) -> Prefill:
     """Assemble the resident block for one store.
 
     `weave=True` uses the woven cloth when one is on disk and still current, and falls
     back to the canonical index otherwise — a cloth that is out of date is worse than no
     cloth, because it describes a household that has moved on.
+
+    `trail` appends the Hot Trail AFTER the map (plan §5.5): the trail changes more
+    often than the map, and a prefix cache is lost from the first changed byte — so
+    the mover goes behind the stable thing. An absent or stale trail is simply not
+    appended: the map remains complete on its own, and a stale trail would lie about
+    the present.
     """
     body, source = store.index_text(), "canonical"
     stats: dict = {"store": store.name, "source": source}
@@ -131,6 +139,19 @@ def build(store: Store, loom: Loom | None = None, header: str | None = None,
 
     frame_open, frame_close = BEGIN.format(store=store.name), END
     text = f"{frame_open}\n{head}\n{body.rstrip()}\n{frame_close}\n"
+    if trail is not None:
+        # Appended AFTER the frame: the map's bytes end where the trail begins, so
+        # a trail that changed alone (the fresh window slides with time, no store
+        # write involved) leaves the map's prefix byte-identical for the cache.
+        t = trail.text_on_disk()
+        if t is None:
+            stats["trail"] = "absent (run `kura trail`)"
+        elif trail.is_stale():
+            stats["trail"] = "stale — not appended; one rebuild heals it"
+            stats["trail_stale"] = True
+        else:
+            text = text + t
+            stats["trail"] = "appended"
     tokens = estimate(text)
     truncated = False
     if tokens > ceiling:
@@ -171,3 +192,11 @@ def loom_for(store: Store, cfg: dict | None = None, scribe=None) -> Loom:
         verbatim_after=cfg.get("verbatim_after"),
         out_path=cfg.get("cloth_path") or os.path.join(store.still, "index.woven.md"),
     )
+
+
+def trail_for(store: Store, cfg: dict | None = None,
+              loom: Loom | None = None) -> Trail:
+    """The Hot Trail beside the Loom, from the same `[prefill]` block."""
+    cfg = cfg or {}
+    return Trail(store, loom=loom,
+                 trail_tokens=int(cfg.get("trail_tokens", 200)))
