@@ -3,6 +3,7 @@
     kura serve                        open the mouth (all stores, one port)
     kura stores                       what exists, which mode maps where
     kura recall "question" [-s eq]    recall by hand
+    kura glance <slug> [-s eq]        confirm one exact memory for ~150 tokens
     kura remember slug "desc" [-]     write one fact (body on stdin with `-`)
     kura annotate slug --tag landmine add tags / the three sentences to one memory
     kura profile show|draft|apply     the wide room's learned profile (draft → read → apply by hand)
@@ -28,6 +29,7 @@ import json
 import os
 import sys
 
+from .glance import glance as do_glance
 from .recall import recall as do_recall
 from .registry import Registry
 from .server import serve
@@ -81,6 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("question")
     p.add_argument("--hops", type=int, default=1)
     p.add_argument("--top", type=int, default=3)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("glance", help="confirm one exact memory for ~150 tokens, before a full read")
+    p.add_argument("slug")
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("remember", help="write one fact")
@@ -310,6 +316,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"          walked: {d['walked']}  ({d['chars']} chars)\n")
             print(d["context"])
         return 0 if d["walked"] else 2
+
+    if a.cmd == "glance":
+        g = do_glance(store, a.slug)
+        if not g.get("ok"):
+            # Exact: a misspelling is a refusal in BOTH modes — JSON either way,
+            # so a script never has to parse the human format to see the error.
+            print(json.dumps(g, ensure_ascii=False))
+            return 1
+        if a.json:
+            print(json.dumps(g, ensure_ascii=False))
+        else:
+            print(g["text"])
+        return 0
 
     if a.cmd == "remember":
         body = sys.stdin.read() if a.body == "-" else a.body

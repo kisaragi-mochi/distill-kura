@@ -8,6 +8,7 @@ as you configure and a client can switch modes per request:
     GET  /index             ?store=maker
     GET  /doctor            ?store=maker          (?all=1 → every store at once)
     GET  /memory/<slug>     ?store=maker
+    GET  /glance/<slug>     ?store=maker   the ~150-token confirmation, exact
     GET  /prefill           ?store=eq[&format=text] the resident index block, ready to paste
     GET  /profile           ?store=eq             the store's charter + persona pointer
     GET  /stores            what exists, which mode maps where, which models
@@ -29,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import __version__
 from . import prefill as prefill_mod
+from .glance import glance
 from .recall import recall
 from .tokens import estimate
 from .registry import Registry
@@ -195,6 +197,14 @@ def _make_handler(reg: Registry):
                                    # callers may show them, nothing ranks by them.
                                    "tags": list(st.tags(s_)) if s_ else [],
                                    "annotations": st.annotations(s_) if s_ else {}})
+            if path.startswith("/glance/"):
+                # EXACT, like read_exact: a slug the caller recognised on the map gets
+                # its ~150-token mechanical confirmation, and a misspelling is an
+                # honest 404 — never a neighbour. Exists so the recognition can be
+                # confirmed BEFORE a full read takes its tokens.
+                slug = urllib.parse.unquote(path.split("/glance/", 1)[1])
+                g = glance(st, slug)
+                return self._send(200 if g.get("ok") else 404, g)
             self._send(404, {"error": "not found", "path": path})
 
         # ── POST ─────────────────────────────────────────────────────────
