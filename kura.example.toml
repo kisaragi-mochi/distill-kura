@@ -137,6 +137,22 @@ trigger_tokens = 24         # budget for one compressed line, in tokens, not cha
 # [stores.eq.prefill]
 # fresh_days = 30
 
+# ── the fast path ───────────────────────────────────────────────────────────
+# Tier zero of recall: a deterministic five-head recognizer over the index. A DIRECT
+# question — one that names a memory by slug, title or its own rare words — is answered
+# in well under a millisecond and the thinker is not called at all (so a direct question
+# still finds its memory when the thinker is down). Anything less than a strong, clear
+# winner falls through to the thinker unchanged: silence is the honest answer for a
+# paraphrase, and judging by meaning stays the model's job.
+
+[fastpath]
+enabled = true
+gate = 1.0            # honesty bar for the top hit; raise it to make tier zero shyer
+
+# Per-store overrides work here too:
+# [stores.eq.fastpath]
+# enabled = false
+
 # ── the distiller ───────────────────────────────────────────────────────────
 # Where the raw material comes from. Keys are source adapters:
 #   claude = a directory of Claude Code .jsonl transcripts

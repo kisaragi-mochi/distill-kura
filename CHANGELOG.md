@@ -5,6 +5,23 @@
 The first release shaped by outside review: a security/isolation review, an adversarial
 pass over the fixes it produced, and a third-party reproducibility review.
 
+### Tier zero of recall: the fast path (new)
+
+A deterministic five-head recognizer (slug/title containment, word IDF, character
+3-grams with stop-grams, character 2-grams, the opening of the body) answers a DIRECT
+question — one that names a memory — in well under a millisecond, skipping the
+thinker's ~17k-token index prefill entirely. An honesty gate (top1 >= `gate`,
+top1/top2 >= 1.15) keeps every paraphrase with the thinker: blind-tested against it
+before porting — 14/14 agreement on direct questions, zero wrong answers, silent on
+everything semantic. Its index is built lazily from the store's own data and cached
+in-process, keyed on the canonical index's mtime and the memory count.
+
+`[fastpath]` in the config (`enabled`, `gate`; per-store overridable), a
+`fastpath_verdict` / `fastpath_ms` pair in every recall reply beside `how = "fastpath"`,
+and a `fastpath` block in `doctor`. A side effect worth naming: a direct question now
+still finds its memory when the thinker is down, instead of degrading straight to
+word overlap.
+
 ### The resident map (new)
 
 The index is now *worn*, not merely queried: a standing block in the system prompt so an

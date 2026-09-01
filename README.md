@@ -11,8 +11,9 @@ library only; no vector database, no embeddings, no framework.
 
 ```
         ┌── recall ──────────────────────────────────────────────┐
-        │  question → whole index in one prompt → picked slugs   │
-        │           → walk [[links]] → the neighbourhood         │  ~0.4 s
+        │  question → names a memory? → deterministic hit   ~2 ms│
+        │      else → whole index in one prompt → picked slugs   │
+        │           → walk [[links]] → the neighbourhood   ~0.4 s│
         └────────────────────────────────────────────────────────┘
         ┌── distil ──────────────────────────────────────────────┐
         │  journal → classed evidence → candidates → GATE        │
@@ -53,6 +54,61 @@ thrown away. A number with no `[TOOL]` behind it is stripped. Text crediting the
 with a decision, when no `[USER]` quote survived, is refused at the last gate. Ideas are
 welcome — they go to a seed file, never to the store, and graduate only when later
 evidence confirms them.
+
+---
+
+## Tier zero: recognition before intelligence
+
+The recall above is the right tool for a question that shares no words with its
+memory. It is the wrong tool for a question that *names* what it wants — and in a
+working session, most questions do. A blind 40-question benchmark on a live
+317-memory store split exactly along that line: the direct questions needed no
+intelligence at all, and everything else needed all of it.
+
+So before the thinker runs, a deterministic recognizer gets one look. The design is
+transposed from the n-gram embedding table inside Qwen3.8-Flash-Next — many hash
+heads voting over one table, behind a gate — onto the index:
+
+- **Five heads**, each an independent recognition channel: exact name; IDF-weighted
+  word tokens (identifiers, ports, katakana runs); character 3-grams with
+  **stop-grams** (a gram present in over a fifth of the store drowns in its own
+  collisions, so it is dropped); character 2-grams; and the head of each body.
+- **Coverage scoring** — each head's vote is normalized by what it could possibly
+  have reached for *this* question, so one lucky rare gram cannot fake confidence.
+- **An honesty gate** — a hit is returned only when the top score clears an absolute
+  bar *and* beats the runner-up by margin. Anything less and the fast path says
+  nothing; the question falls through to the thinker, unchanged.
+
+Blind-tested — the examiner wrote the 40 questions from the index alone, never
+seeing the implementation — against the live store over HTTP:
+
+| question type | tier zero | thinker tier |
+|---|---|---|
+| direct (14) | **14/14, median 2.3 ms** | 14/14, ~900 ms |
+| paraphrase (10) | silent → falls through | 10/10 |
+| semantic bridge (10) | silent → falls through | 10/10 |
+| not in the store (6) | **6/6 refused** | 0/6 refused |
+| wrong answers, whole set | **0** | — |
+
+What that buys:
+
+- **The everyday case stops paying the intelligent price for a lookup.** Direct
+  recall drops from ~900 ms to ~2 ms, and the fall-through tax on every other
+  question is about 2 ms.
+- **It knows what it does not know.** Zero wrong answers across the set is the
+  gate working, not the heads being clever — everything uncertain goes to the
+  model. On the six questions whose answers were *not* in the store, tier zero
+  refused all six; the thinker tier answered something every time. Refusal is a
+  feature this project keeps having to buy back.
+- **A direct question now survives the thinker being down.** Recall used to
+  degrade straight to word overlap; the named memory comes back regardless.
+- **Every reply says which tier answered** — `how: "fastpath"`,
+  `fastpath_verdict`, `fastpath_ms` — so a slow answer is never a mystery.
+
+Configured under `[fastpath]` (`enabled`, on by default; `gate`), per-store
+overridable like everything else. The row it will never win: a question that
+shares no surface with its memory. That is the thinker's job, and the gate exists
+to hand it over rather than guess.
 
 ---
 
@@ -350,7 +406,11 @@ that wait an hour (`timeout=3600`) on purpose.
 
 **If the thinker is down, recall does not go silent** — it falls back to word overlap
 and labels the answer `how=words`, which the tools surface as `⚠ degraded`. Quiet
-degradation is worse than degradation.
+degradation is worse than degradation. And before either tier runs, a deterministic
+recognizer (`[fastpath]`, on by default) answers DIRECT questions — ones that name a
+memory — in under a millisecond with `how=fastpath`, thinker up or not; anything it is
+not sure of falls through unchanged, and every reply says what it did in
+`fastpath_verdict` / `fastpath_ms`.
 
 ### Unattended: `kura tend`
 
@@ -565,7 +625,7 @@ rather than collapsing every cause into a silent `None`.
 ## Tests
 
 ```bash
-python3 -m pytest tests -q                              # 145 tests, no model required
+python3 -m pytest tests -q                              # 255 tests, no model required
 cd dsh-plugin && npm test                               # 24 more for the plugin
 ```
 

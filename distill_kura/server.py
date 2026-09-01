@@ -185,7 +185,8 @@ def _make_handler(reg: Registry):
                                               p.get("question", ""),
                                               int(p.get("hops", 1)), int(p.get("top", 3)),
                                               int(p.get("chars", 6000)),
-                                              int(tot) if tot else None))
+                                              int(tot) if tot else None,
+                                              fastpath_cfg=reg.fastpath_cfg_for(st)))
             if path.startswith("/remember"):
                 # A tool call or a script: a DIRECT write, refused unless the store's
                 # policy allows one. The distiller's verified pour is a different door.

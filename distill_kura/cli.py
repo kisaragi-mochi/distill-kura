@@ -248,7 +248,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if a.cmd == "recall":
-        d = do_recall(store, reg.models_for(store).thinker, a.question, a.hops, a.top)
+        d = do_recall(store, reg.models_for(store).thinker, a.question, a.hops, a.top,
+                      fastpath_cfg=reg.fastpath_cfg_for(store))
         if a.json:
             print(json.dumps(d, ensure_ascii=False))
         else:

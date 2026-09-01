@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "distill-kura"
-version = "0.1.0"
+version = "0.2.0"
 description = "Distilled long-term memory for agents: recall by meaning, write only what evidence supports"
 readme = "README.md"
 requires-python = ">=3.11"

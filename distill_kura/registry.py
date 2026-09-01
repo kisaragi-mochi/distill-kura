@@ -64,10 +64,10 @@ CONFIG_CANDIDATES = ("kura.toml", os.path.expanduser("~/.config/distill-kura/kur
 # otherwise; extensions use an `x_` prefix so they are visibly not ours.
 STORE_KEYS = {"path", "label", "readonly", "write_policy", "persona", "charter",
               "model_profile"}
-NESTED_KEYS = {"distill", "prefill"}
+NESTED_KEYS = {"distill", "prefill", "fastpath"}
 _TYPES = {"path": str, "label": str, "readonly": bool, "write_policy": str,
           "persona": str, "charter": str, "model_profile": str,
-          "distill": dict, "prefill": dict}
+          "distill": dict, "prefill": dict, "fastpath": dict}
 # The nested tables need checking too: `inherit_global_journals = "false"` is a STRING,
 # therefore truthy, so a store inherited the global intake it had explicitly declined.
 _DISTILL_TYPES = {"inherit_global_journals": bool, "journals": dict, "language": str,
@@ -78,6 +78,9 @@ _DISTILL_TYPES = {"inherit_global_journals": bool, "journals": dict, "language":
 _PREFILL_TYPES = {"window_tokens": int, "budget_fraction": float, "hard_fraction": float,
                   "fresh_days": (int, float), "pinned_types": list, "trigger_tokens": int,
                   "verbatim_after": str, "cloth_path": str, "header": str}
+# Tier zero of recall (`fastpath.py`). `gate` is the honesty bar: a hit below it is
+# silence, and silence goes to the thinker.
+_FASTPATH_TYPES = {"enabled": bool, "gate": (int, float)}
 
 
 def _check_table(where: str, table: dict, types: dict) -> None:
@@ -100,6 +103,7 @@ def _check_types(name: str, sc: dict) -> None:
     _check_table(f"stores.{name}", sc, _TYPES)
     _check_table(f"stores.{name}.distill", sc.get("distill") or {}, _DISTILL_TYPES)
     _check_table(f"stores.{name}.prefill", sc.get("prefill") or {}, _PREFILL_TYPES)
+    _check_table(f"stores.{name}.fastpath", sc.get("fastpath") or {}, _FASTPATH_TYPES)
 
 
 def _real(path: str) -> str:
@@ -218,6 +222,7 @@ class Registry:
             stores["main"] = Store(name="main", path=d, label=os.environ.get("KURA_LABEL", "kura"))
         _check_table("distill", raw.get("distill") or {}, _DISTILL_TYPES)
         _check_table("prefill", raw.get("prefill") or {}, _PREFILL_TYPES)
+        _check_table("fastpath", raw.get("fastpath") or {}, _FASTPATH_TYPES)
         srv = raw.get("server") or {}
         default = srv.get("default") or next(iter(stores))
         if default not in stores:
@@ -314,6 +319,16 @@ class Registry:
         own = store.extra.get("prefill")
         return {**cfg, **own} if isinstance(own, dict) else cfg
 
+    @property
+    def fastpath_cfg(self) -> dict:
+        return dict(self.raw.get("fastpath") or {})
+
+    def fastpath_cfg_for(self, store: Store) -> dict:
+        """Global `[fastpath]`, overridden per store by `[stores.<name>.fastpath]`."""
+        cfg = self.fastpath_cfg
+        own = store.extra.get("fastpath")
+        return {**cfg, **own} if isinstance(own, dict) else cfg
+
     def describe(self) -> dict:
         return {
             "default": self.default,
@@ -325,5 +340,6 @@ class Registry:
             "models": self.models.describe(),
             "model_profiles": sorted(self.profiles),
             "prefill": self.prefill_cfg,
+            "fastpath": self.fastpath_cfg,
             "config": self.config_path,
         }

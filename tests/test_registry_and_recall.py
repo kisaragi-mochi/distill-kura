@@ -321,8 +321,12 @@ def test_recall_salvages_a_slug_from_prose(tmp_path):
 
 
 def test_recall_degrades_to_words_and_says_so(tmp_path):
+    """Tier zero is switched off here on purpose: this question names a memory, so
+    the fastpath would answer it first (its own tests cover that). What is under
+    test is the tier BELOW — the thinker being unreachable must degrade visibly."""
     s = a_store(tmp_path)
-    d = recall(s, StubThinker(None), "tell me about cooling", hops=0)
+    d = recall(s, StubThinker(None), "tell me about cooling", hops=0,
+               fastpath_cfg={"enabled": False})
     assert d["how"].startswith("words")            # visible degradation, not silence
     assert d["walked"] == ["cooling"]
 

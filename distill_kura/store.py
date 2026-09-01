@@ -849,6 +849,7 @@ class Store:
 
     # ── health ───────────────────────────────────────────────────────────
     def doctor(self) -> dict:
+        from . import fastpath          # local: fastpath is a layer ON TOP of this API
         files = {s: self.read(s) for s in self.slugs()}
         out: dict[str, set[str]] = {}
         back: dict[str, set[str]] = {}
@@ -922,6 +923,9 @@ class Store:
                 "unit": None, "limit": None, "pressure": None,
             },
             "learned_profile": self.profile_state(),
+            # Tier zero of recall: built-or-not, how fresh, and how big its heads are.
+            # `built: false` before the first recall is the normal lazy state.
+            "fastpath": fastpath.doctor_info(self),
             "tending": self.tend_state(),
             "write_policy": self.write_policy,
             "model_profile": self.model_profile,
