@@ -8,6 +8,9 @@
 host = "127.0.0.1"     # no auth: keep it on loopback unless you add one in front
 port = 8085
 default = "main"       # which kura answers when a request names none
+# Launch with KURA_BUILD_ID=<commit> and GET /health echoes it (plus pid, start time,
+# and the code path actually imported) — the deploy postcondition. A restart command
+# is not evidence the new build is serving; docs/OPERATING.md "Deploying means proving it".
 
 
 # ── models ──────────────────────────────────────────────────────────────────

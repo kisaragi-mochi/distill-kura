@@ -34,6 +34,16 @@ Two bugs from the original implementation are fixed here, both of which failed s
 2. **The cloth does not live in the store.** Written next to the memories it was picked
    up as a memory itself (it appeared in `doctor` as an unindexed one). It belongs in
    `_still/`, which is the workshop and is never walked.
+
+A third failure is guarded against by construction rather than fixed after the fact:
+**the source may move while the loom is busy.** `weave()` reads the index once, then
+spends model time on triggers; a memory poured meanwhile is missing from the cloth, yet
+the cloth's mtime ends up NEWER than the index — so any mtime-based staleness test calls
+the stale cloth fresh, and pay-forward bakes the stale map into KV. So the weave records
+the sha256 of the index text it read, `persist()` re-hashes the index under the store's
+write lock and refuses a cloth whose source has moved, and `is_stale()` compares hashes,
+never mtimes. The hash lives in a sidecar (`<cloth>.state.json`), not in the cloth text:
+the injected map must stay byte-stable and free of anything volatile.
 """
 from __future__ import annotations
 
@@ -67,7 +77,7 @@ DEFAULT_TRIGGER_TOKENS = 24
 # code that wrote it", so without a version the trimmer can be improved and nothing
 # happens. Observed exactly that: a fix for dropped ★ markers changed nothing until the
 # ledger was invalidated.
-LEDGER_VERSION = 6   # 6: triggers pass the numeric floor; older hooks must re-earn their place
+LEDGER_VERSION = 7   # 7: triggers may not newly credit the human (6: the numeric floor)
 
 # Markers that carry the point of a line. A trimmer that drops them keeps the words and
 # loses the meaning: ⚠️ says "this will bite you again", ★ says "this is the important
@@ -106,6 +116,10 @@ Write it in the same language as the input."""
 
 def _sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+
+def _sha256(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
 class WeaveError(RuntimeError):
@@ -151,6 +165,9 @@ class Loom:
         self.verbatim_after = verbatim_after
         self.backups = int(backups)
         self.out_path = out_path or os.path.join(store.still, "index.woven.md")
+        # Which canonical index the cloth on disk was verified against — a sidecar,
+        # because nothing volatile may ride inside the injected map itself.
+        self.state_path = self.out_path + ".state.json"
         self.hooks_path = os.path.join(store.still, "hooks.json")
         self.bulk_touch_share = float(bulk_touch_share)
         self._bulk: set[str] | None = None
@@ -393,8 +410,15 @@ class Loom:
         # over the overlap floor, so numbers get the same deterministic floor as
         # every other model-written surface. Canonical memory right, worn memory
         # wrong is a failure mode of its own.
-        from .distill.gate import composed_number_violations
+        from .distill.gate import attributes_to_human, composed_number_violations
         if composed_number_violations(t, [{"text": f"{title} {desc}"}]):
+            return False
+        # The same floor for attribution: a trigger that credits the human with a
+        # decision the source line never credited manufactures authority out of
+        # compression — and is then worn on every turn. Rejected exactly like an
+        # invented number, and the mechanical trimmer takes over. A source that
+        # already credits the human may keep a crediting trigger.
+        if attributes_to_human(t, []) and not attributes_to_human(f"{title} {desc}", []):
             return False
         if desc:
             return self._grounded(t, desc)
@@ -439,9 +463,13 @@ class Loom:
         raw = self.store.index_text()
         hooks = self._hooks()
         now = time.time()
+        # The hash of the exact index text this cloth is woven from. `persist()`
+        # verifies it against the index again, under the store lock, before writing:
+        # a memory poured while the loom is busy on triggers must not vanish under a
+        # cloth that then looks fresher than the index.
         stats = {"pinned": 0, "fresh": 0, "trigger": 0, "passthrough": 0, "grouped": 0,
                  "hooks_reused": 0, "hooks_written": 0, "hooks_mechanical": 0,
-                 "llm_calls": 0}
+                 "llm_calls": 0, "source_sha256": _sha256(raw)}
         dirty = False
         verbatim = False
         out: list[str] = []
@@ -582,13 +610,41 @@ class Loom:
 
     def persist(self, cloth: Cloth) -> dict:
         """Put an already-woven cloth on disk, atomically, keeping a few generations.
+
+        Compare-and-swap on the SOURCE, never on mtimes: the canonical index is re-read
+        and re-hashed under the store's write lock, and the cloth lands only if the
+        index is still the exact text it was woven from. Without this, a memory poured
+        while the loom was busy on triggers is missing from the cloth, yet the cloth
+        ends up NEWER than the index — an mtime test calls that fresh, and pay-forward
+        bakes the stale map into KV. On a mismatch nothing is written, the old cloth
+        stands, and the caller is told distinctly (`refused`); whether to re-weave is
+        the caller's decision — retrying here could chase a busy store forever.
+
         Writing nothing when nothing changed is the point: a cloth that is rewritten on
         every tick looks changed to every cache downstream."""
+        if self.store.write_policy == FROZEN:
+            # Nothing may write inside a frozen store — including its lock file. And
+            # nothing can move its index either, so the unlocked check is the truth.
+            return self._persist_checked(cloth)
+        with self.store._locked():
+            return self._persist_checked(cloth)
+
+    def _persist_checked(self, cloth: Cloth) -> dict:
+        current = _sha256(self.store.index_text())
+        expected = cloth.stats.get("source_sha256")
+        if expected is not None and current != expected:
+            cloth.stats["written"] = False
+            cloth.stats["refused"] = "source moved while weaving"
+            return cloth.stats
         os.makedirs(os.path.dirname(self.out_path), exist_ok=True)
         if os.path.exists(self.out_path):
             prev = open(self.out_path, encoding="utf-8", errors="ignore").read()
             if prev == cloth.text:
-                cloth.stats["written"] = False        # idempotent: no churn, no backup
+                # Idempotent: no churn, no backup. The source record is still brought
+                # up to date — a cloth written before the record existed is
+                # byte-identical yet unprovable, and one no-op weave must heal that.
+                self._record_source(current)
+                cloth.stats["written"] = False
                 return cloth.stats
             bdir = os.path.join(self.store.still, "index-backups")
             os.makedirs(bdir, exist_ok=True)
@@ -605,9 +661,23 @@ class Loom:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(cloth.text)
         os.replace(tmp, self.out_path)
+        # The cloth first, its source record second: a crash between the two leaves an
+        # unprovable cloth (served as stale — safe), never a fresh stamp on old text.
+        self._record_source(current)
         cloth.stats["written"] = True
         cloth.stats["path"] = self.out_path
         return cloth.stats
+
+    def _record_source(self, sha: str) -> None:
+        """Remember which canonical index the cloth on disk was verified against."""
+        if self.source_sha256() == sha:
+            return                               # no churn when nothing changed
+        os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
+        tmp = self.state_path + f".tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"source_sha256": sha}, f, ensure_ascii=False, indent=1,
+                      sort_keys=True)
+        os.replace(tmp, self.state_path)
 
     # ── reading it back ──────────────────────────────────────────────────
     def cloth_on_disk(self) -> str | None:
@@ -616,9 +686,28 @@ class Loom:
         except OSError:
             return None
 
-    def is_stale(self) -> bool:
-        """True when the canonical index has moved on since the cloth was woven."""
+    def source_sha256(self) -> str | None:
+        """The recorded hash of the index the cloth on disk was woven from, if any."""
         try:
-            return os.path.getmtime(self.store.index_path) > os.path.getmtime(self.out_path)
-        except OSError:
+            with open(self.state_path, encoding="utf-8") as f:
+                d = json.load(f)
+            v = d.get("source_sha256") if isinstance(d, dict) else None
+            return v if isinstance(v, str) and v else None
+        except (OSError, ValueError):
+            return None
+
+    def is_stale(self) -> bool:
+        """True when the canonical index has moved on since the cloth was woven.
+
+        By HASH, not by mtime. A memory poured while the loom was busy leaves the
+        cloth NEWER than the index — mtime calls exactly that state fresh, which is
+        the one lie pay-forward would then bake into KV. The recorded hash is the
+        index `persist()` verified under the store lock; no record means the cloth
+        cannot be proven current, which is treated the same as stale — the canonical
+        index is always the safe fallback, and one re-weave heals the record."""
+        if not os.path.exists(self.out_path):
             return True
+        recorded = self.source_sha256()
+        if recorded is None:
+            return True
+        return _sha256(self.store.index_text()) != recorded

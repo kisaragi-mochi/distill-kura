@@ -401,3 +401,54 @@ def test_recall_respects_an_explicit_nothing(tmp_path):
     d = recall(s, t, "cooling ssd", hops=0, fastpath_cfg={"enabled": False})
     assert d["how"] == "meaning→none"
     assert d["picked"] == [] and d["walked"] == []
+
+
+# ── /health names its build ─────────────────────────────────────────────────
+
+def _health_server(store):
+    """The e2e convention: the real handler on a real socket."""
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from distill_kura.server import _make_handler
+    from distill_kura.thinker import Models
+    reg = Registry(stores={store.name: store}, modes={},
+                   models=Models.from_config(None), default=store.name,
+                   config_path=os.path.join(store.path, "kura.toml"))
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(reg))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/health"
+    fetch = lambda: __import__("json").load(urllib.request.urlopen(url))  # noqa: E731
+    return srv, reg, fetch
+
+
+def test_health_names_the_build_actually_serving(tmp_path, monkeypatch):
+    """A restart once "succeeded" while an old 0.0.0.0-bound survivor kept the port
+    and served three deploys' worth of stale code — and /health could not show it.
+    Now "is the new build serving?" is one request: build id, pid, start time, the
+    code path actually imported, the config actually loaded."""
+    import distill_kura
+    import distill_kura.server as server_mod
+    monkeypatch.setenv("KURA_BUILD_ID", "abc1234")
+    srv, reg, fetch = _health_server(a_store(tmp_path))
+    try:
+        h = fetch()
+        assert h["ok"] is True and h["stores"] == {"s": 2}      # the old contract stands
+        assert h["build_id"] == "abc1234"                       # stamped at launch
+        assert h["version"] == distill_kura.__version__
+        assert h["pid"] == os.getpid()                          # a survivor's differs
+        assert h["started_at"]                                  # ISO, set at import
+        assert h["module_path"] == os.path.dirname(os.path.abspath(server_mod.__file__))
+        assert os.path.isfile(os.path.join(h["module_path"], "server.py"))
+        assert h["config_path"] == reg.config_path
+    finally:
+        srv.shutdown()
+
+
+def test_health_build_id_is_unknown_when_nothing_stamped_it(tmp_path, monkeypatch):
+    """"unknown" is honest and greppable; an empty string would read as a build."""
+    monkeypatch.delenv("KURA_BUILD_ID", raising=False)
+    srv, reg, fetch = _health_server(a_store(tmp_path))
+    try:
+        assert fetch()["build_id"] == "unknown"
+    finally:
+        srv.shutdown()

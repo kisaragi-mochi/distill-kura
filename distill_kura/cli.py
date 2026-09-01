@@ -262,6 +262,14 @@ def main(argv: list[str] | None = None) -> int:
         # `fit` already wove with the model; persist exactly that text.
         stats = loom.persist(cloth)
         print(json.dumps(stats, ensure_ascii=False))
+        if stats.get("refused"):
+            # A memory was poured while the loom was working; the old cloth stands.
+            # Exit 2 (the same "re-weave" signal `prefill` uses) so a scheduler sees
+            # this as "run me again", not as "worked" — one retry is the caller's
+            # job, looping is nobody's.
+            print("⚠ the canonical index moved while weaving; nothing was written. "
+                  "Run `kura weave` again.", file=sys.stderr)
+            return 2
         if stats.get("over_budget"):
             w = stats.get("weight", {})
             print(f"⚠ the index is {stats['tokens_est']} tokens, over the "

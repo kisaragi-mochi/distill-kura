@@ -245,11 +245,8 @@ class Distiller:
         ref = fm.get("origin_manifest") or fm.get("evidence_manifest", "")
         if not ref.startswith("sha256:"):
             return None
-        try:
-            with open(os.path.join(self._evidence_dir(), ref[7:] + ".json"), encoding="utf-8") as f:
-                return str(json.load(f).get("source_key") or "")
-        except (OSError, ValueError):
-            return None
+        man = self.store.load_manifest_verified(ref[7:])
+        return str(man.get("source_key") or "") if man is not None else None
 
     def recur(self, c: dict, target: str, key: str, source: str) -> str:
         """→ 'tagged' | 'already' | a reason it was not. Never raises, never counts."""
@@ -373,7 +370,7 @@ class Distiller:
             # saved under the curation mark — all of it is model-written surface.
             _, s_ann, _ = _curation_of(out)
             cand_ann = " ".join(str(c.get(k) or "") for k in ANNOTATION_KEYS)
-            surface = "\n".join([(title.group(1) if title else ""), text,
+            surface = "\n".join([slug.group(1), (title.group(1) if title else ""), text,
                                  " ".join(s_ann.values()), cand_ann])
             bad = final_surface_violations(surface, c["evidence"], c["classes"])
             if not bad:
@@ -490,9 +487,11 @@ class Distiller:
             # are re-verified against the evidence before staging. 4: the floor
             # covers the whole model-written surface (title, trigger, section,
             # curation sentences, and a judge's FIX before it is re-signed), with
-            # Unicode-normalised tokens and single digits verified. Additive — a
-            # v1 manifest is still read by everything that reads manifests.
-            "gate_version": 4,
+            # Unicode-normalised tokens and single digits verified. 5: the slug is
+            # part of the gated surface and the mark signs slug+body — identity,
+            # not just content. Additive — a v1 manifest is still read by
+            # everything that reads manifests.
+            "gate_version": 5,
             "source_key": key,
             "source_file": os.path.basename(source),
             "source_sha256": self._source_digest(source),
@@ -562,7 +561,7 @@ class Distiller:
             f.write(f"<!-- distilled {datetime.now(timezone.utc).isoformat()[:19]}Z\n"
                     f"     source: {os.path.basename(source)}\n"
                     f"     kind: {d['kind']}   evidence classes: {','.join(d['classes'])}{flags}\n"
-                    f"     gate: {self._mark(body)}\n"
+                    f"     gate: {self._mark(d['slug'], body)}\n"
                     f"     evidence_manifest: sha256:{manifest}\n"
                     f"     evidence:\n{ev}\n-->\n" + body)
         return p
@@ -586,8 +585,11 @@ class Distiller:
     def _draft_body(raw: str) -> str:
         return re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S).strip()
 
-    def _mark(self, body: str) -> str:
-        return hmac.new(self._gate_key(), body.strip().encode("utf-8"),
+    def _mark(self, slug: str, body: str) -> str:
+        # v5: the mark binds the NAME as well as the text. A signed draft renamed
+        # from 12-gpu-rig.md to 99-gpu-rig.md used to keep a valid mark and pour
+        # under the new identity — "what memory this is" was never signed.
+        return hmac.new(self._gate_key(), f"{slug}\n{body.strip()}".encode("utf-8"),
                         hashlib.sha256).hexdigest()[:32]
 
     def pour(self, slug: str) -> dict:
@@ -602,7 +604,7 @@ class Distiller:
         if "🚫" in raw.split("-->")[0]:
             return {"ok": False, "why": "credits the human with no [USER] evidence; not poured"}
         m = re.search(r"gate:\s*([0-9a-f]{32})", raw.split("-->")[0])
-        if not m or not hmac.compare_digest(m.group(1), self._mark(self._draft_body(raw))):
+        if not m or not hmac.compare_digest(m.group(1), self._mark(slug, self._draft_body(raw))):
             return {"ok": False,
                     "why": "this draft carries no valid gate mark — it was not staged by "
                            "the distiller, or its body was edited afterwards"}
@@ -725,7 +727,7 @@ class Distiller:
                     if bad:
                         _log(f"  ⚠ fix refused {j['slug']} — {'; '.join(bad)[:90]}")
                         continue
-                    keep = re.sub(r"gate:\s*[0-9a-f]{32}", f"gate: {self._mark(body)}",
+                    keep = re.sub(r"gate:\s*[0-9a-f]{32}", f"gate: {self._mark(j['slug'], body)}",
                                   raw.split("-->")[0]) + "-->\n"
                     open(p, "w", encoding="utf-8").write(keep + body)
                     fixed.append(j["slug"])
@@ -774,7 +776,7 @@ class Distiller:
         if not targets:
             return {"ok": True, "why": "no ragged index lines"}
         _log(f"tidy: {len(targets)} ragged lines (fixing up to {limit})")
-        fixed = 0
+        repl: list[tuple[str, str, str, str]] = []
         for i, slug, why in targets[:limit]:
             body = self.store.read(slug)[:6000]
             if not body:
@@ -790,21 +792,39 @@ class Distiller:
             # and the index feeds recall AND the resident map — so it wears the same
             # numeric floor as every other model-written surface. The memory itself
             # (plus the line being replaced) is the evidence.
-            bad = composed_number_violations(mt.group(1) + "\n" + md.group(1),
-                                             [{"text": body}, {"text": lines[i]}])
+            derived = mt.group(1) + "\n" + md.group(1)
+            bad = composed_number_violations(derived, [{"text": body}, {"text": lines[i]}])
+            if attributes_to_human(derived, []) and not attributes_to_human(
+                    body + " " + lines[i], []):
+                bad = bad + ["credits the human where the memory does not"]
             if bad:
-                _log(f"  ⚠ tidy refused {slug} — invented numbers: {bad}")
+                _log(f"  ⚠ tidy refused {slug} — {bad}")
                 continue
-            lines[i] = f"- [{mt.group(1).strip()[:40]}]({slug}.md) — {md.group(1).strip()[:200]}"
-            fixed += 1
-            _log(f"  ✎ {slug} — {why}")
-        if fixed:
-            # Under the store lock and through the atomic replace, like every other
-            # index write: a bare open() here could interleave with a pour and drop
-            # the line it was adding, or leave a half-written index after a crash.
+            repl.append((lines[i],
+                         f"- [{mt.group(1).strip()[:40]}]({slug}.md) — {md.group(1).strip()[:200]}",
+                         slug, why))
+        fixed = skipped_stale = 0
+        if repl:
+            # The model calls above ran on a SNAPSHOT, and a pour may have landed
+            # meanwhile — writing the snapshot back would erase its line (the exact
+            # `not_in_index` wound doctor keeps finding). So: re-read under the
+            # lock and merge line by line; a target line that no longer exists as
+            # read is stale and is skipped, never guessed at.
             with self.store._locked():
-                self.store._write_index("\n".join(lines) + "\n")
-        return {"ok": True, "fixed": fixed, "still_ragged": len(targets) - fixed}
+                cur = self.store.index_text().splitlines()
+                for old_line, new_line, slug, why in repl:
+                    try:
+                        cur[cur.index(old_line)] = new_line
+                    except ValueError:
+                        skipped_stale += 1
+                        _log(f"  ⚠ tidy skipped {slug} — the line moved while the model wrote")
+                        continue
+                    fixed += 1
+                    _log(f"  ✎ {slug} — {why}")
+                if fixed:
+                    self.store._write_index("\n".join(cur) + "\n")
+        return {"ok": True, "fixed": fixed, "skipped_stale": skipped_stale,
+                "still_ragged": len(targets) - fixed}
 
     # ── the pass ─────────────────────────────────────────────────────────
     def files(self, session: str | None = None) -> list[str]:

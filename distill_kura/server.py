@@ -11,7 +11,7 @@ as you configure and a client can switch modes per request:
     GET  /prefill           ?store=eq[&format=text] the resident index block, ready to paste
     GET  /profile           ?store=eq             the store's charter + persona pointer
     GET  /stores            what exists, which mode maps where, which models
-    GET  /health
+    GET  /health            liveness — and which build/pid/config is actually serving
 
 Path-prefixed forms work too — `POST /s/eq/recall`, `GET /s/eq/index` — which is
 handy for clients that can only vary a base URL per mode.
@@ -24,13 +24,20 @@ import json
 import os
 import re
 import urllib.parse
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import __version__
 from . import prefill as prefill_mod
 from .recall import recall
 from .tokens import estimate
 from .registry import Registry
 from .store import ANNOTATION_KEYS
+
+# Captured at import: the module rides in with the process, so this is when THIS code
+# began serving — the one field a stale survivor of an earlier deploy cannot fake.
+STARTED_AT = datetime.now().astimezone().isoformat(timespec="seconds")
+MODULE_PATH = os.path.dirname(os.path.abspath(__file__))
 
 
 def _annotations(p: dict) -> dict:
@@ -87,7 +94,19 @@ def _make_handler(reg: Registry):
                     "stores": {n: len(s.slugs()) for n, s in reg.stores.items()},
                     # `memories` and `dir` describe the DEFAULT store, so a client
                     # written against a single-kura service keeps working unchanged.
-                    "memories": len(d.slugs()), "dir": d.path})
+                    "memories": len(d.slugs()), "dir": d.path,
+                    # Which BUILD is actually serving. A restart once "succeeded"
+                    # while an old 0.0.0.0-bound process kept the port and served
+                    # three deploys' worth of stale code — and nothing in this reply
+                    # could show it. The package version does not move between
+                    # commits; KURA_BUILD_ID (stamped at launch) does. Volatile
+                    # fields are safe HERE: /health is never a prefix-cached surface.
+                    "build_id": os.environ.get("KURA_BUILD_ID", "unknown"),
+                    "version": __version__,
+                    "pid": os.getpid(),
+                    "started_at": STARTED_AT,
+                    "module_path": MODULE_PATH,
+                    "config_path": reg.config_path})
             if path.startswith("/stores"):
                 return self._send(200, reg.describe())
             if path.startswith("/doctor"):

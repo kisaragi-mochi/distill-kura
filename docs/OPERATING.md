@@ -57,6 +57,41 @@ changes (unless `yield_on_return = false` — an editor on its own seat), and ke
 track's output in `_still/tend.log`. `distill night` still exists for a bare
 one-pass-when-quiet loop, but `tend` is the one to run.
 
+## Deploying means proving it
+
+**Issuing a restart command is not evidence the new build is serving.** The night this
+section was written, a restart "succeeded" — and an old process, bound to `0.0.0.0`,
+kept the port and served three deploys' worth of stale code while `/health` answered
+`ok: true` the whole time. Two habits close that hole:
+
+**Stamp the build at launch, and make `/health` the postcondition.**
+
+```ini
+# in kura.service, [Service]
+Environment=KURA_BUILD_ID=<commit>     # else /health says "unknown", which is honest
+```
+
+```bash
+systemctl --user restart kura
+curl -s localhost:8085/health | python3 -c \
+  'import json,sys; h=json.load(sys.stdin); print(h["build_id"], h["pid"], h["started_at"])'
+```
+
+The deploy is done when `build_id` matches the commit you just shipped — not before.
+`/health` also names the package `version`, the `pid`, `started_at`, the `module_path`
+actually imported and the `config_path` actually loaded: enough to tell "the process I
+just started" from "a survivor of three deploys ago". These fields are volatile on
+purpose, and safe where they are — `/health` is never part of a prefix-cached surface.
+
+**Kill by port, not by interface.** The survivor lived because it was bound to
+`0.0.0.0` while the kill was filtered on `127.0.0.1` — the filter matched nothing, the
+restart started a second process, and the old one kept winning the port:
+
+```bash
+ss -ltnp 'sport = :8085'    # see WHO holds the port, however it bound
+fuser -k 8085/tcp           # reap the holder by port, not by address match
+```
+
 ## Keeping the resident map current
 
 The map the agent wears is only as good as its last weave.

@@ -855,6 +855,8 @@ class Store:
         every read. A manifest that fails the re-hash is corruption (or worse) and
         is treated as absent: fail closed, never trust a valid-looking JSON on the
         strength of its filename alone."""
+        if not re.fullmatch(r"[0-9a-f]{64}", hexdigest or ""):
+            return None          # the verified loader defines what a digest IS
         path = os.path.join(self.path, "_evidence", hexdigest + ".json")
         try:
             with open(path, "rb") as f:
@@ -892,13 +894,20 @@ class Store:
         tampered_manifest = []
         for n in files:
             fm = self.frontmatter(n)
-            ref = fm.get("evidence_manifest", "")
-            if not ref.startswith("sha256:"):
-                continue
-            if not os.path.exists(os.path.join(self.path, "_evidence", ref[7:] + ".json")):
-                missing_manifest.append(n)
-            elif self.load_manifest_verified(ref[7:]) is None:
-                tampered_manifest.append(n)   # exists, but the bytes no longer hash to the name
+            # Every provenance pointer is audited, not just the newest one:
+            # evidence_manifest moves with each EXTENDS, origin_manifest is pinned,
+            # recurred_manifest marks another occasion — any of them broken is a
+            # hole in the story of why this memory exists.
+            for key, val in fm.items():
+                if not (key.endswith("_manifest") and str(val).startswith("sha256:")):
+                    continue
+                hexd = str(val)[7:]
+                if not os.path.exists(os.path.join(self.path, "_evidence", hexd + ".json")):
+                    if n not in missing_manifest:
+                        missing_manifest.append(n)
+                elif self.load_manifest_verified(hexd) is None:
+                    if n not in tampered_manifest:
+                        tampered_manifest.append(n)
         body_tokens = sum(estimate(self._split(t)[1]) for t in files.values())
         cur = {n: self.curation_state(n) for n in files}
         unsigned = sorted(n for n, c in cur.items() if c == "unsigned")

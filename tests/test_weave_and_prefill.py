@@ -353,3 +353,84 @@ def test_a_trigger_that_swaps_a_digit_is_not_grounded(tmp_path):
     desc = "SAZANAMI runs 12 GPUs with NVFP4 and local inference"
     assert not loom._acceptable("SAZANAMI runs 99 GPUs with NVFP4 and local inference", title, desc)
     assert loom._acceptable("SAZANAMI runs 12 GPUs with NVFP4 and local inference", title, desc)
+
+
+# ── the source-hash CAS: a pour during the weave must not vanish ────────────
+
+def test_persist_refuses_when_the_source_moved_while_weaving(tmp_path):
+    """weave() reads the index, then spends model time on triggers. A memory poured
+    meanwhile is missing from the cloth — yet the cloth would land NEWER than the
+    index, so an mtime test would call the stale cloth fresh and pay-forward would
+    bake it into KV. persist() re-hashes the index under the store lock and refuses
+    a cloth whose source has moved: old cloth intact, distinct outcome, no retry
+    loop of its own — re-weaving is the caller's decision."""
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    before = loom.cloth_on_disk()
+    cloth = loom.weave()                        # a snapshot of the index as it was
+    s.remember("poured-meanwhile", "a memory poured between weave and persist", "body")
+    stats = loom.persist(cloth)
+    assert stats["written"] is False
+    assert stats["refused"] == "source moved while weaving"
+    assert loom.cloth_on_disk() == before       # the old cloth is intact
+    assert loom.is_stale() is True              # and nothing pretends it is current
+    # The caller re-weaves; the fresh weave sees the poured memory and lands.
+    again = loom.write()
+    assert again["written"] is True and "refused" not in again
+    assert "poured-meanwhile" in loom.cloth_on_disk()
+    assert loom.is_stale() is False
+
+
+def test_staleness_is_judged_by_hash_not_mtime(tmp_path):
+    """A cloth NEWER than the index proves nothing — that is exactly the state a
+    mid-weave pour leaves behind. Staleness is: current index hash != the hash
+    persist() verified. The serving side must fall back to the canonical index."""
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    assert loom.is_stale() is False             # steady state: weave → not stale
+    s.remember("brand-new", "poured after the weave", "body")
+    ahead = time.time() + 3600
+    os.utime(loom.out_path, (ahead, ahead))     # cloth mtime NEWER than the index
+    assert loom.is_stale() is True
+    pf = build(s, loom)
+    assert pf.stats.get("stale") is True and pf.stats["source"] == "canonical"
+
+
+def test_a_cloth_without_a_source_record_is_not_trusted(tmp_path):
+    """A cloth written before the source record existed cannot be proven current.
+    Unprovable is served the same as stale — the canonical index is the safe
+    fallback — and one no-op re-weave heals the record."""
+    s = a_store(tmp_path, n_old=1)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    os.remove(loom.state_path)
+    assert loom.is_stale() is True
+    again = loom.write()                        # byte-identical cloth, no churn…
+    assert again["written"] is False
+    assert loom.is_stale() is False             # …but the record is healed
+
+
+# ── the attribution floor ───────────────────────────────────────────────────
+
+def test_a_trigger_may_not_newly_credit_the_human(tmp_path):
+    """A trigger is worn on every turn. Compression that adds 「ケンが決めた」 to a
+    line that never credited anyone manufactures authority — rejected exactly like
+    an invented number, and the mechanical trimmer takes over."""
+    s = Store(name="w", path=str(tmp_path / "w")); s.init_files()
+    loom = Loom(s, scribe=None)
+    title = "storage doctrine"
+    desc = "資産と正典はDATA2、作業の釜はDATA1に置く"
+    assert loom._acceptable(desc, title, desc)                        # the line is fine
+    assert not loom._acceptable(desc + "とケンが決めた", title, desc)   # the credit is not
+
+
+def test_a_source_that_credits_the_human_may_keep_a_crediting_trigger(tmp_path):
+    """The floor forbids NEW attribution only: when the index line itself says the
+    human decided, the trigger repeating that is compression, not invention."""
+    s = Store(name="w", path=str(tmp_path / "w")); s.init_files()
+    loom = Loom(s, scribe=None)
+    title = "storage doctrine"
+    desc = "ケンの決裁: 資産と正典はDATA2、作業はDATA1"
+    assert loom._acceptable("ケンの決裁: 資産と正典はDATA2", title, desc)

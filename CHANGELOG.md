@@ -103,6 +103,66 @@ word overlap remains the fallback only when the thinker is unreachable.
 `allowSwitch` in the README now matches the code: it follows `store` (naming a store
 binds the preset, fail-closed) rather than defaulting open.
 
+### Identity is signed too (gate_version 5)
+
+The slug was the one model-written surface outside the floor, and the one thing
+the mark never signed: a draft staged as `12-gpu-rig.md` could be renamed to
+`99-gpu-rig.md` and poured under the new identity with its mark still valid.
+Now the slug is part of the gated surface, and the mark signs `slug + body` —
+what a memory SAYS and what it IS CALLED are one signed claim. Drafts staged
+before this release fail their mark check; re-stage them (drafts are transient
+by design). Manifests say `gate_version: 5`.
+
+### tidy merges under the lock, weave compare-and-swaps its source
+
+Both rewriters of resident truth had a TOCTOU: they read a snapshot, spent
+model time, and wrote the snapshot back — a memory poured meanwhile lost its
+index line (tidy) or was missing from a cloth whose mtime called itself fresh
+(weave). tidy now re-reads the index inside the store lock and merges line by
+line, skipping any line that moved (`skipped_stale`, loudly). The weave fix is
+below, from its own hands.
+
+### Provenance readers are one door now
+
+`_origin_key` read manifests with a bare `json.load`; now everything —
+recurrence, FIX, doctor — goes through `load_manifest_verified`, which also
+defines what a digest is (64 hex chars, refused otherwise, so the loader can
+never be steered by a path-shaped reference). doctor audits EVERY
+`*_manifest` pointer in frontmatter — `origin_manifest` and
+`recurred_manifest` too, not just the newest — reporting `missing_manifest`
+and `tampered_manifest` per memory.
+
+### The server names its build
+
+- `GET /health` names the build actually serving: `build_id` (from `KURA_BUILD_ID`
+  stamped at launch, else `"unknown"`), package `version`, `pid`, `started_at`, the
+  `module_path` actually imported, and the `config_path` actually loaded. Motive: a
+  restart "succeeded" while an old 0.0.0.0-bound process kept the port and served
+  three deploys' worth of stale code, and `/health` had no way to show it. The deploy
+  postcondition (compare `build_id`) and the kill-by-port-not-by-interface caveat are
+  in docs/OPERATING.md, "Deploying means proving it". `/health` is never part of a
+  prefix-cached surface, so its volatile fields are safe.
+
+### The weave, in its own hands
+
+- The woven cloth is now compare-and-swapped on its SOURCE: `weave()` records the
+  sha256 of the canonical index text it read, and `persist()` re-hashes the index
+  under the store's write lock, refusing distinctly (`refused: "source moved while
+  weaving"`, `kura weave` exits 2) when a memory was poured mid-weave — the old cloth
+  stands and the caller re-weaves. Motive: the poured memory was missing from the
+  cloth, yet the cloth's mtime was NEWER than the index, so the mtime staleness test
+  called it fresh and pay-forward baked the stale map into KV.
+- Staleness (`Loom.is_stale()`, and through it the serving-side check in
+  `prefill.build`) is now judged by hash, never mtime: stale ⇔ current index hash ≠
+  the hash `persist()` verified. The hash lives in a sidecar (`<cloth>.state.json`),
+  never in the injected map — the cloth text stays byte-stable. A cloth with no
+  record (pre-upgrade) is served as stale; one re-weave heals it.
+- Triggers get the same deterministic floor for attribution as for numbers: a trigger
+  that credits the human with a decision its source line never credited is rejected
+  in `_acceptable` (via `gate.attributes_to_human`) and the mechanical trimmer takes
+  over. A source that already credits the human may keep a crediting trigger.
+  `LEDGER_VERSION` → 7 so cached hooks re-earn their place.
+
 ## 0.2.0
 
 The first release shaped by outside review: a security/isolation review, an adversarial

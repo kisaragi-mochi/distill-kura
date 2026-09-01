@@ -143,7 +143,7 @@ def test_tags_and_sentences_travel_from_candidate_to_store(tmp_path):
     # the manifest says why each claiming tag exists, and why one does not
     ref = [l for l in draft.splitlines() if "evidence_manifest:" in l][0].split("sha256:")[1].strip()
     man = json.load(open(os.path.join(store.path, "_evidence", ref + ".json")))
-    assert man["gate_version"] == 4
+    assert man["gate_version"] == 5
     assert man["tags"] == ["decision", "emotion-carried", "entrusted"]
     assert man["tag_evidence"]["entrusted"]["quote"].endswith("remember that")
     assert man["tags_refused"]["expired"] == "reserved for the forgetting pass; a model may not assign it"
@@ -448,3 +448,34 @@ def test_doctor_reports_a_tampered_manifest(tmp_path):
     assert store.doctor()["tampered_manifest"] == []
     _corrupt_manifest(store, "archive-on-slow-disk")
     assert store.doctor()["tampered_manifest"] == ["archive-on-slow-disk"]
+
+
+# ── round five: identity is signed too ──────────────────────────────────────
+
+def test_a_renamed_draft_loses_its_mark(tmp_path):
+    # A signed 12-gpu draft renamed to another slug used to pour under the new
+    # identity — the mark signed the text but never the name.
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE, "draw the last line": "POUR\nreason: fine"})
+    r = d.run(chunks=1)
+    assert r["drafts"] == ["archive-on-slow-disk"]
+    os.rename(os.path.join(d.drafts_dir, "archive-on-slow-disk.md"),
+              os.path.join(d.drafts_dir, "stolen-name.md"))
+    out = d.pour("stolen-name")
+    assert not out["ok"] and "gate mark" in out["why"]
+    assert not store.read("stolen-name")
+
+
+def test_a_slug_with_an_invented_number_is_refused(tmp_path):
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    bad_scribe = ("SLUG: 99-gpu-archive\nTITLE: Archive disk\nDESC: the archive on the slow disk\n"
+                  "BODY:\nthe archive lives on the slow disk\n")
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": bad_scribe, "draw the last line": "POUR\nreason: fine"})
+    r = d.run(chunks=1)
+    assert not r.get("drafts")        # the slug is surface; the floor refused it
