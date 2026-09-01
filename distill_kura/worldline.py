@@ -66,31 +66,41 @@ def _clean(name: str) -> str:
     return n[:-3] if n.endswith(".md") else n
 
 
-def _answer_slugs(raw: str, store: Store) -> list[str]:
-    """The model's answer, snapped to real memories. Whatever the format, only a
-    name that lands inside this store counts as `opened` — an invented slug is
-    not a landing, it is nothing (and `resolve()` cannot leave the store)."""
-    names: list[str] | None = None
+def _agent_answer(raw: str, store: Store) -> dict:
+    """The conversation model's reply, read STRICTLY — no resolve(), no fuzzy
+    anything. Only a JSON array of strings counts as a well-formed answer, and
+    only a cleaned name that is EXACTLY in slug_set() is `opened`. The old
+    resolve() snap rescued thinker picks, not this mode: it turned a misspelt
+    slug into a hit, and on an unknown case it let a hallucinated
+    ["kyoto-house"] resolve to nothing, vanish, and score as a correct refusal."""
+    def bad() -> dict:
+        return {"proposed_slugs": [], "invalid_slugs": [], "opened": [],
+                "format_error": True}
+
     m = re.search(r"\[.*?\]", raw, re.S)
-    if m:
-        try:
-            got = json.loads(m.group(0))
-            names = [_clean(x) for x in got if isinstance(x, str)]
-        except ValueError:
-            names = None
-    if not names:
-        names = [_clean(x) for x in (raw or "").splitlines() if x.strip()]
-    out: list[str] = []
-    for n in names:
-        s = store.resolve(n)
-        if s and s not in out:
-            out.append(s)
-    return out
+    if not m:
+        return bad()
+    try:
+        got = json.loads(m.group(0))
+    except ValueError:
+        return bad()
+    if not isinstance(got, list) or not all(isinstance(x, str) for x in got):
+        return bad()
+    proposed: list[str] = []
+    for x in got:
+        c = _clean(x)
+        if c and c not in proposed:
+            proposed.append(c)
+    known = store.slug_set()
+    return {"proposed_slugs": proposed,
+            "invalid_slugs": [n for n in proposed if n not in known],
+            "opened": [n for n in proposed if n in known],
+            "format_error": False}
 
 
 def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = None,
              resident: str | None = None, fastpath_cfg: dict | None = None,
-             hops: int = 1) -> dict:
+             hops: int = 1, agent: dict | None = None) -> dict:
     """One utterance, one routing mode, one honest trace row."""
     t0 = time.perf_counter()
     resident = store.index_text() if resident is None else resident
@@ -98,7 +108,9 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
           "routing": routing, "resident_tokens": estimate(resident),
           "first_tool": "", "opened": [], "related_reached": [],
           "thinker_calls": 0, "fastpath_used": False, "recall_context_tokens": 0,
-          "target_reached": False, "wrong_branch": False, "skipped": None}
+          "target_reached": False, "wrong_branch": False, "skipped": None,
+          "proposed_slugs": [], "invalid_slugs": [], "format_error": False,
+          "agent": agent if routing == "agent-only" else None}
 
     known = store.slug_set()
     want = [s for s in (case.get("target_slugs") or []) if s]
@@ -120,7 +132,11 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
                 # recording it as target_reached would reward the dead endpoint.
                 tr["skipped"] = "model unreachable"
             else:
-                tr["opened"] = _answer_slugs(raw, store)
+                a = _agent_answer(raw, store)
+                tr["opened"] = a["opened"]
+                tr["proposed_slugs"] = a["proposed_slugs"]
+                tr["invalid_slugs"] = a["invalid_slugs"]
+                tr["format_error"] = a["format_error"]
     elif routing == "fastpath":
         tr["first_tool"] = "fastpath"
         cfg = fastpath_cfg or {}
@@ -144,6 +160,12 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
     if tr["skipped"] is None:
         if want:
             tr["target_reached"] = any(s in tr["opened"] for s in want)
+        elif routing == "agent-only":
+            # The unknown category, measured against the MODEL: only a valid empty
+            # array is the honest "not remembered". A hallucinated slug is the
+            # failure the prompt names, not a refusal — resolve() used to drop it
+            # to nothing and pay the guess as a correct refusal.
+            tr["target_reached"] = not tr["format_error"] and not tr["proposed_slugs"]
         else:
             # The unknown category: the honest answer is opening NOTHING. A store
             # that hands back look-alikes for a question it knows nothing about
@@ -182,14 +204,18 @@ def summarize(traces: list[dict]) -> dict:
 def run(store: Store, cases: list[dict], routing: str = "full",
         thinker: Endpoint | None = None, resident: str | None = None,
         fastpath_cfg: dict | None = None, hops: int = 1,
-        trace_path: str | None = None) -> dict:
+        trace_path: str | None = None, agent: dict | None = None) -> dict:
     if routing not in ROUTES:
         raise ValueError(f"routing must be one of {ROUTES}, got {routing!r}")
     traces = [run_case(store, c, routing, thinker=thinker, resident=resident,
-                       fastpath_cfg=fastpath_cfg, hops=hops) for c in cases]
+                       fastpath_cfg=fastpath_cfg, hops=hops, agent=agent) for c in cases]
     if trace_path:
         with open(trace_path, "a", encoding="utf-8") as f:
             for t in traces:
                 f.write(json.dumps(t, ensure_ascii=False) + "\n")
-    return {"store": store.name, "routing": routing, "cases": len(traces),
-            "summary": summarize(traces), "traces": traces}
+    result = {"store": store.name, "routing": routing, "cases": len(traces),
+              "summary": summarize(traces), "traces": traces}
+    if routing == "agent-only":
+        # Bookkeeping only: who was measured must be on record with the numbers.
+        result["agent"] = agent
+    return result

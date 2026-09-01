@@ -89,10 +89,59 @@ def test_agent_only_never_calls_fastpath_or_recall(tmp_path):
 
 
 def test_agent_only_invented_slugs_are_not_landings(tmp_path):
+    """Invented slugs no longer silently vanish: the real memory counts as opened,
+    the invention is recorded as invalid, and it must not sink the case."""
     s = build(tmp_path)
     stub = StubModel('["freetoken-hybrid", "a-slug-that-does-not-exist"]')
     tr = wl.run_case(s, CASES[0], "agent-only", thinker=stub)
     assert tr["opened"] == ["freetoken-hybrid"], "only real memories count as opened"
+    assert tr["invalid_slugs"] == ["a-slug-that-does-not-exist"]
+    assert tr["proposed_slugs"] == ["freetoken-hybrid", "a-slug-that-does-not-exist"]
+    assert tr["format_error"] is False and tr["target_reached"] is True
+
+
+def test_agent_only_near_miss_is_not_snapped(tmp_path):
+    """A misspelt slug stays a miss. resolve()'s fuzzy snap is a rescue for
+    thinker picks; agent-only measures the model's EXACT recognition, so
+    'freetoken-hyrbid' must not become freetoken-hybrid."""
+    s = build(tmp_path)
+    stub = StubModel('["freetoken-hyrbid"]')
+    tr = wl.run_case(s, CASES[0], "agent-only", thinker=stub)
+    assert tr["opened"] == []
+    assert tr["invalid_slugs"] == ["freetoken-hyrbid"]
+    assert tr["format_error"] is False and tr["target_reached"] is False
+
+
+def test_agent_only_hallucination_on_unknown_is_not_a_refusal(tmp_path):
+    """A confident guess on the unknown case is the one failure the prompt names;
+    it must score as a miss, not vanish into a 'correct' refusal."""
+    s = build(tmp_path)
+    stub = StubModel('["kyoto-house"]')
+    tr = wl.run_case(s, CASES[2], "agent-only", thinker=stub)
+    assert tr["target_reached"] is False
+    assert tr["invalid_slugs"] == ["kyoto-house"]
+    assert tr["format_error"] is False
+
+
+def test_agent_only_valid_empty_array_on_unknown_is_a_refusal(tmp_path):
+    """'[]' is the only honest shape for an unknown: no format error, no proposal,
+    so it is a correct refusal — not a degraded non-answer."""
+    s = build(tmp_path)
+    stub = StubModel("[]")
+    tr = wl.run_case(s, CASES[2], "agent-only", thinker=stub)
+    assert tr["format_error"] is False
+    assert tr["proposed_slugs"] == [] and tr["target_reached"] is True
+
+
+def test_agent_only_shapeless_reply_is_a_format_error(tmp_path):
+    """No JSON array means no answer at all: recorded as a format error, never
+    scored as a refusal, and never a crash."""
+    s = build(tmp_path)
+    stub = StubModel("I don't remember anything matching that.")
+    tr = wl.run_case(s, CASES[2], "agent-only", thinker=stub)
+    assert tr["format_error"] is True
+    assert tr["proposed_slugs"] == [] and tr["invalid_slugs"] == []
+    assert tr["target_reached"] is False
 
 
 def test_agent_only_unreachable_model_is_an_outage_not_an_answer(tmp_path):
@@ -197,3 +246,45 @@ def test_bench_worldline_through_the_registry(tmp_path):
     assert r["routing"] == "fastpath" and len(r["traces"]) == len(CASES)
     assert r["traces"][0]["resident_tokens"] > 0, \
         "the resident map (woven or canonical) is what the agent wears"
+
+
+def test_run_stamps_the_agent_identity_on_every_trace(tmp_path):
+    s = build(tmp_path)
+    agent = {"url": "http://x/v1", "model": "big"}
+    stub = StubModel("[]")
+    out = wl.run(s, CASES, "agent-only", thinker=stub, agent=agent)
+    assert out["agent"] == agent
+    assert all(t["agent"] == agent for t in out["traces"]), \
+        "who was measured must be on record with every trace, skipped or not"
+
+
+def test_bench_worldline_default_records_the_configured_thinker(tmp_path):
+    """Without --agent-url the configured thinker plays the agent, and the trace
+    must say so — an unrecorded substitute model is an unmeasurable result."""
+    from distill_kura import bench
+    s = build(tmp_path)
+    reg = reg_of(s)
+    cfg = tmp_path / "cases.json"
+    cfg.write_text(json.dumps({"cases": CASES}), encoding="utf-8")
+    r = bench.worldline(reg, s, str(cfg), routing="agent-only",
+                        trace_path=str(tmp_path / "t.jsonl"))
+    assert r["agent"] == {"url": "http://127.0.0.1:9/v1", "model": "none"}
+    assert all(t["agent"] == r["agent"] for t in r["traces"])
+    assert "model unreachable" in {t["skipped"] for t in r["traces"]}, \
+        "the dead configured endpoint is an honest skip, not an answer"
+
+
+def test_bench_worldline_agent_url_records_that_identity(tmp_path):
+    """--agent-url names the measured model; the recorded identity must match the
+    endpoint actually asked, even when that endpoint is unreachable."""
+    from distill_kura import bench
+    s = build(tmp_path)
+    reg = reg_of(s)
+    cfg = tmp_path / "cases.json"
+    cfg.write_text(json.dumps({"cases": CASES}), encoding="utf-8")
+    r = bench.worldline(reg, s, str(cfg), routing="agent-only",
+                        agent_url="http://127.0.0.1:9/v1", agent_model="probe",
+                        trace_path=str(tmp_path / "t.jsonl"))
+    assert r["agent"] == {"url": "http://127.0.0.1:9/v1", "model": "probe"}
+    assert all(t["agent"] == r["agent"] for t in r["traces"])
+    assert "model unreachable" in {t["skipped"] for t in r["traces"]}

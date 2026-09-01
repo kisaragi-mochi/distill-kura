@@ -39,22 +39,36 @@ from .tokens import estimate
 
 
 def worldline(reg: Registry, store: Store, cases_path: str, routing: str = "full",
-              hops: int = 1, trace_path: str | None = None) -> dict:
+              hops: int = 1, trace_path: str | None = None,
+              agent_url: str | None = None, agent_model: str | None = None) -> dict:
     """Can the house return to the right shared world from a small breadcrumb?
 
     Raw traces, no composite score — see `distill_kura/worldline.py` and
     `bench/worldline/README.md`. The resident context is what the agent actually
     wears: the woven cloth when current, the canonical index otherwise.
+
+    `agent_url` names the conversation model that plays the agent in agent-only
+    mode (agent-only measures the MODEL's recognition, and the recorded identity
+    must always be the endpoint actually asked). Without it the configured
+    thinker plays the agent and is recorded as such.
     """
     from . import worldline as wl
     from .prefill import build, loom_for, trail_for
+    from .thinker import Endpoint
     loom = loom_for(store, reg.prefill_cfg_for(store))
     pf = build(store, loom, trail=trail_for(store, reg.prefill_cfg_for(store), loom=loom))
+    if agent_url:
+        agent = Endpoint(url=agent_url, model=agent_model or "agent")
+        identity = {"url": agent.url, "model": agent.model}
+    else:
+        agent = reg.models_for(store).thinker
+        identity = {"url": agent.url, "model": agent.model}
     return wl.run(store, wl.load_cases(cases_path), routing=routing,
-                  thinker=reg.models_for(store).thinker, resident=pf.text,
+                  thinker=agent, resident=pf.text,
                   fastpath_cfg=reg.fastpath_cfg_for(store), hops=hops,
                   trace_path=trace_path
-                  or os.path.join(store.still, "worldline-traces.jsonl"))
+                  or os.path.join(store.still, "worldline-traces.jsonl"),
+                  agent=identity)
 
 
 def counter(command: str | None):

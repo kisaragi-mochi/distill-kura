@@ -153,6 +153,9 @@ def main(argv: list[str] | None = None) -> int:
                         "only, silence is silence; full: the production path")
     b.add_argument("--hops", type=int, default=1)
     b.add_argument("--trace", help="append JSONL traces here (default: <store>/_still/worldline-traces.jsonl)")
+    b.add_argument("--agent-url", help="agent-only measures THIS model reading the map "
+                   "alone; without it the configured thinker plays the agent")
+    b.add_argument("--agent-model", help="model name for --agent-url (default: 'agent')")
 
     p = sub.add_parser("init", help="create a new store")
     p.add_argument("name")
@@ -243,7 +246,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if r["score"] >= 0.9 else 1
         if a.bcmd == "worldline":
             r = bench.worldline(reg, store, a.cases, routing=a.routing,
-                                hops=a.hops, trace_path=a.trace)
+                                hops=a.hops, trace_path=a.trace,
+                                agent_url=a.agent_url, agent_model=a.agent_model)
             print(json.dumps(r, ensure_ascii=False, indent=1))
             # A wrong branch (an abandoned plan anchoring a case) is the one result
             # that must never read as a passing run; nothing runnable is the other.
