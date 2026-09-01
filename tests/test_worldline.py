@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from distill_kura.store import Store                       # noqa: E402
 from distill_kura.thinker import Models                    # noqa: E402
 from distill_kura.registry import Registry                 # noqa: E402
+from distill_kura.distill.pipeline import Distiller        # noqa: E402
 from distill_kura import worldline as wl                   # noqa: E402
 
 
@@ -49,6 +50,18 @@ def build(tmp_path):
 def reg_of(store):
     models = Models.from_config({"thinker": {"url": "http://127.0.0.1:9/v1", "model": "none"}})
     return Registry(stores={"m": store}, modes={}, models=models, default="m", raw={})
+
+
+def _cue_manifest(tmp_path, store, cue_text="全員野球", quote="例の全員野球でいこう"):
+    """One verified cue on freetoken-hybrid, written straight to the evidence dir —
+    the test_callsigns pattern: provenance only, no model."""
+    src = tmp_path / "journal.jsonl"
+    src.write_text("{}\n", encoding="utf-8")
+    return Distiller(reg_of(store), store)._write_manifest(
+        {"slug": "freetoken-hybrid", "kind": "project",
+         "evidence": [{"class": "USER", "text": quote}], "classes": ["USER"],
+         "routing_cues": [{"text": cue_text, "class": "USER", "quote": quote}]},
+        str(src), "test:cue")
 
 
 CASES = [
@@ -316,3 +329,53 @@ def test_bench_worldline_agent_url_records_that_identity(tmp_path):
     assert r["agent"] == {"url": "http://127.0.0.1:9/v1", "model": "probe"}
     assert all(t["agent"] == r["agent"] for t in r["traces"])
     assert "model unreachable" in {t["skipped"] for t in r["traces"]}
+
+
+# ── cues: the callsign pre-head, threaded through the runner ───────────────
+
+CUE_CASE = {"id": "cue", "utterance": "あの全員野球の続きなんだけど",
+            "target_slugs": ["freetoken-hybrid"], "acceptable_related": [],
+            "must_not_anchor": [], "category": "shared-callsign"}
+
+
+def test_fastpath_with_cues_routes_via_the_callsign_pre_head(tmp_path):
+    s = build(tmp_path)
+    _cue_manifest(tmp_path, s)
+    tr = wl.run_case(s, CUE_CASE, "fastpath", use_cues=True)
+    assert tr["cue_hit"] == "全員野球" and tr["cue_ambiguous"] is False
+    assert tr["opened"] == ["freetoken-hybrid"] and tr["target_reached"] is True
+    assert wl.summarize([tr])["cue_direct_total"] >= 1
+
+
+def test_fastpath_without_cues_is_silent_on_the_shared_word(tmp_path):
+    """cues off = tier zero of before: the five heads alone stay silent on a
+    callsign, and cue_hit must be None, not a guess."""
+    s = build(tmp_path)
+    _cue_manifest(tmp_path, s)
+    tr = wl.run_case(s, CUE_CASE, "fastpath", use_cues=False)
+    assert tr["cue_hit"] is None and tr["cue_ambiguous"] is False
+    assert tr["opened"] == [] and tr["fastpath_used"] is False
+    assert tr["target_reached"] is False, "the callsign case's target was not reached"
+
+
+def test_full_with_a_dead_thinker_and_cues_threaded_does_not_crash(tmp_path):
+    s = build(tmp_path)
+    _cue_manifest(tmp_path, s)
+    tr = wl.run_case(s, CUE_CASE, "full", thinker=None, use_cues=True)
+    assert tr["skipped"] is None and "cue_hit" in tr
+    assert tr["cue_hit"] == "全員野球", \
+        "the cue answers before the thinker is even asked — a dead thinker is fine"
+    assert tr["opened"] == ["freetoken-hybrid"] and tr["target_reached"] is True
+
+
+def test_bench_worldline_no_cues_counts_no_cue_direct_hits(tmp_path):
+    from distill_kura import bench
+    s = build(tmp_path)
+    _cue_manifest(tmp_path, s)
+    reg = reg_of(s)
+    cfg = tmp_path / "cases.json"
+    cfg.write_text(json.dumps({"cases": [CUE_CASE] + CASES}), encoding="utf-8")
+    r = bench.worldline(reg, s, str(cfg), routing="fastpath",
+                        trace_path=str(tmp_path / "t.jsonl"), use_cues=False)
+    assert r["summary"]["cue_direct_total"] == 0
+    assert all(t["cue_hit"] is None for t in r["traces"])

@@ -40,7 +40,8 @@ from .tokens import estimate
 
 def worldline(reg: Registry, store: Store, cases_path: str, routing: str = "full",
               hops: int = 1, trace_path: str | None = None,
-              agent_url: str | None = None, agent_model: str | None = None) -> dict:
+              agent_url: str | None = None, agent_model: str | None = None,
+              use_cues: bool = True) -> dict:
     """Can the house return to the right shared world from a small breadcrumb?
 
     Raw traces, no composite score — see `distill_kura/worldline.py` and
@@ -73,7 +74,7 @@ def worldline(reg: Registry, store: Store, cases_path: str, routing: str = "full
                   fastpath_cfg=reg.fastpath_cfg_for(store), hops=hops,
                   trace_path=trace_path
                   or os.path.join(store.still, "worldline-traces.jsonl"),
-                  agent=identity)
+                  agent=identity, use_cues=use_cues)
 
 
 def counter(command: str | None):

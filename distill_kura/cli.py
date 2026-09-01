@@ -156,6 +156,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--agent-url", help="agent-only measures THIS model reading the map "
                    "alone; without it the configured thinker plays the agent")
     b.add_argument("--agent-model", help="model name for --agent-url (default: 'agent')")
+    b.add_argument("--no-cues", action="store_true",
+                   help="run the fastpath tier without the callsign pre-head — the "
+                        "comparison that isolates what the shared vocabulary buys")
 
     p = sub.add_parser("init", help="create a new store")
     p.add_argument("name")
@@ -248,7 +251,8 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 r = bench.worldline(reg, store, a.cases, routing=a.routing,
                                     hops=a.hops, trace_path=a.trace,
-                                    agent_url=a.agent_url, agent_model=a.agent_model)
+                                    agent_url=a.agent_url, agent_model=a.agent_model,
+                                    use_cues=not a.no_cues)
             except ValueError as e:
                 sys.exit(str(e))            # a mode conflict, named, not a traceback
             print(json.dumps(r, ensure_ascii=False, indent=1))

@@ -62,6 +62,10 @@ kura bench worldline --cases bench/worldline/cases.json --routing agent-only
 `agent-only` needs a model endpoint (the configured thinker plays the conversation
 model); the other two modes run without one.
 
+`--no-cues` runs tier zero without the callsign pre-head so `fastpath` with and
+without it can be compared on the same cases (cue_hit / cue_direct_total in the
+trace and summary say which answered).
+
 ## What a run prints
 
 A JSON object: per-case `traces`, and a `summary` of raw aggregates — runnable and

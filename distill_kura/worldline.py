@@ -100,7 +100,8 @@ def _agent_answer(raw: str, store: Store) -> dict:
 
 def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = None,
              resident: str | None = None, fastpath_cfg: dict | None = None,
-             hops: int = 1, agent: dict | None = None) -> dict:
+             hops: int = 1, agent: dict | None = None,
+             use_cues: bool = True) -> dict:
     """One utterance, one routing mode, one honest trace row."""
     t0 = time.perf_counter()
     resident = store.index_text() if resident is None else resident
@@ -110,6 +111,7 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
           "thinker_calls": 0, "fastpath_used": False, "recall_context_tokens": 0,
           "target_reached": False, "wrong_branch": False, "skipped": None,
           "proposed_slugs": [], "invalid_slugs": [], "format_error": False,
+          "cue_hit": None, "cue_ambiguous": False,
           "agent": agent if routing == "agent-only" else None}
 
     known = store.slug_set()
@@ -141,19 +143,26 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
         tr["first_tool"] = "fastpath"
         cfg = fastpath_cfg or {}
         fp = fastpath.lookup(store, case["utterance"], top=3,
-                             gate=cfg.get("gate", fastpath.DEFAULT_GATE))
+                             gate=cfg.get("gate", fastpath.DEFAULT_GATE),
+                             cues=use_cues)
         tr["fastpath_used"] = bool(fp["hits"])
         tr["opened"] = [h["slug"] for h in fp["hits"]]
+        # cue_ambiguous stays False on purpose: the pre-head is silent on
+        # ambiguity, indistinguishable from absence — that IS the honest reading.
+        tr["cue_hit"] = fp.get("cue")
         # Deliberately no thinker here: tier zero's silence IS the measurement.
         # The rescue path belongs to `full`.
     elif routing == "full":
-        d = recall(store, thinker, case["utterance"], hops=hops, fastpath_cfg=fastpath_cfg)
+        cfg = dict(fastpath_cfg or {})   # copies: recall must not mutate the caller's table
+        cfg["cues"] = use_cues
+        d = recall(store, thinker, case["utterance"], hops=hops, fastpath_cfg=cfg)
         tr["opened"] = list(d.get("included") or [])
         how = d.get("how", "")
         tr["first_tool"] = how
         tr["fastpath_used"] = how == "fastpath"
         tr["thinker_calls"] = 1 if how in ("meaning", "meaning→none") else 0
         tr["recall_context_tokens"] = estimate(d.get("context", ""))
+        tr["cue_hit"] = d.get("fastpath_cue")
     else:
         raise ValueError(f"routing must be one of {ROUTES}, got {routing!r}")
 
@@ -196,6 +205,7 @@ def summarize(traces: list[dict]) -> dict:
                 1 for t in ran if t["category"] == "unknown" and t["target_reached"]),
             "thinker_calls_total": sum(t["thinker_calls"] for t in ran),
             "fastpath_direct_total": sum(1 for t in ran if t["fastpath_used"]),
+            "cue_direct_total": sum(1 for t in ran if t.get("cue_hit") is not None),
             "resident_tokens_mean": mean([t["resident_tokens"] for t in ran]),
             "opened_mean": mean([len(t["opened"]) for t in ran]),
             "elapsed_ms_mean": mean([t["elapsed_ms"] for t in ran])}
@@ -204,11 +214,13 @@ def summarize(traces: list[dict]) -> dict:
 def run(store: Store, cases: list[dict], routing: str = "full",
         thinker: Endpoint | None = None, resident: str | None = None,
         fastpath_cfg: dict | None = None, hops: int = 1,
-        trace_path: str | None = None, agent: dict | None = None) -> dict:
+        trace_path: str | None = None, agent: dict | None = None,
+        use_cues: bool = True) -> dict:
     if routing not in ROUTES:
         raise ValueError(f"routing must be one of {ROUTES}, got {routing!r}")
     traces = [run_case(store, c, routing, thinker=thinker, resident=resident,
-                       fastpath_cfg=fastpath_cfg, hops=hops, agent=agent) for c in cases]
+                       fastpath_cfg=fastpath_cfg, hops=hops, agent=agent,
+                       use_cues=use_cues) for c in cases]
     if trace_path:
         with open(trace_path, "a", encoding="utf-8") as f:
             for t in traces:
