@@ -176,7 +176,10 @@ def composed_number_violations(text: str, evidence: list[dict], allowed: str = "
     spellings) and nothing else. An unsigned token in the text may cite a signed
     one in the evidence (the magnitude is the evidence's); a signed token must
     match sign and all. `allowed` is extra text whose numbers are legitimate —
-    the caller decides what that is, and today the pipeline passes nothing.
+    the caller decides what that is; today the only such text is an extension
+    heading's mechanically stamped date, which reaches here through
+    final_surface_violations (pipeline._compose_extension). Every direct caller
+    passes nothing.
     """
     hay = _num_normalize(norm(" ".join(str(e.get("text", "")) for e in evidence)) + " " + allowed)
     exact: set[str] = set()
