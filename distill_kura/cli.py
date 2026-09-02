@@ -75,6 +75,10 @@ def _distiller(reg: Registry, store: Store):
 
 _WL_COLS = ("runnable", "target_reached", "wrong_branch", "obsolete_branch",
             "honest_unknown", "remembered_but_unreachable", "unnecessary_opens",
+            # Why the format errors happened, beside how many: a run cut by the
+            # token cap and a run that thought instead of answering need opposite
+            # repairs, and one count cannot tell them apart.
+            "truncated", "reasoning_only",
             "thinker_calls_total", "opened_mean")
 
 

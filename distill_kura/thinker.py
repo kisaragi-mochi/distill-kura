@@ -93,13 +93,13 @@ class Endpoint:
             body.update(self.extra)
         return body                     # generic: the minimum, extras included nowhere
 
-    def ask(self, system: str, user: str, max_tokens: int = 400,
-            timeout: float | None = None, temperature: float | None = None) -> str | None:
-        """The answer text, or None when the call did not produce one.
-
-        None means "degrade gracefully", never "the model said nothing" — the reason is
-        left in `last_error` so an operator can tell a wrong key from a wrong URL from a
-        rejected field."""
+    def _choice(self, system: str, user: str, max_tokens: int,
+                timeout: float | None, temperature: float | None) -> dict | None:
+        """The raw `choices[0]` of one request, or None when the call did not produce
+        one. Every caller of this endpoint goes through here, so the retry ladder, the
+        `last_error` wording and the "unconfigured is unreachable" rule exist once —
+        `ask()` and `ask_full()` differ only in what they read off the reply, never in
+        how the call is made."""
         if not self.url:
             self.last_error = "no url configured"
             return None                 # unconfigured is unreachable, not "somewhere else"
@@ -119,11 +119,10 @@ class Endpoint:
                     headers=headers)
                 with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
                     d = json.load(r)
-                m = d["choices"][0]["message"]
+                choice = d["choices"][0]
+                choice["message"]           # the shape ask() has always demanded
                 self.last_error = ""
-                # some servers put thinking in `reasoning`/`reasoning_content`; content wins
-                return (m.get("content") or m.get("reasoning_content")
-                        or m.get("reasoning") or "").strip()
+                return choice
             except urllib.error.HTTPError as e:
                 detail = ""
                 try:
@@ -142,6 +141,41 @@ class Endpoint:
                 self.last_error = f"unexpected reply shape: {type(e).__name__}: {e}"
                 return None
         return None
+
+    def ask(self, system: str, user: str, max_tokens: int = 400,
+            timeout: float | None = None, temperature: float | None = None) -> str | None:
+        """The answer text, or None when the call did not produce one.
+
+        None means "degrade gracefully", never "the model said nothing" — the reason is
+        left in `last_error` so an operator can tell a wrong key from a wrong URL from a
+        rejected field."""
+        choice = self._choice(system, user, max_tokens, timeout, temperature)
+        if choice is None:
+            return None
+        m = choice["message"]
+        # some servers put thinking in `reasoning`/`reasoning_content`; content wins
+        return (m.get("content") or m.get("reasoning_content")
+                or m.get("reasoning") or "").strip()
+
+    def ask_full(self, system: str, user: str, max_tokens: int = 400,
+                 timeout: float | None = None,
+                 temperature: float | None = None) -> dict | None:
+        """The same one request, taken apart instead of flattened: `content` (what a
+        user would actually see), `reasoning` (whatever the server put in
+        `reasoning_content`/`reasoning`) and `finish_reason`.
+
+        `ask()` falls back to the reasoning when the content is empty; that is a
+        thinker-side kindness — recall wants the best text going. A measurement wants
+        the opposite: a model that spent its whole budget thinking and said nothing
+        answered nothing, and a reply cut at the token cap must be visible as cut.
+        Keeping the two apart is why this is a separate method rather than a flag."""
+        choice = self._choice(system, user, max_tokens, timeout, temperature)
+        if choice is None:
+            return None
+        m = choice["message"]
+        return {"content": (m.get("content") or "").strip(),
+                "reasoning": (m.get("reasoning_content") or m.get("reasoning") or "").strip(),
+                "finish_reason": choice.get("finish_reason")}
 
     def alive(self) -> bool:
         if not self.url:

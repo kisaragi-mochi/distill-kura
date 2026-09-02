@@ -35,6 +35,12 @@ class StubModel:
         self.seen.append(system)
         return self.replies.get(user, self.default)
 
+    def ask_full(self, system, user, max_tokens=400, timeout=None, temperature=None):
+        raw = self.ask(system, user, max_tokens, timeout, temperature)
+        if raw is None:
+            return None
+        return {"content": raw, "reasoning": "", "finish_reason": "stop"}
+
 
 def build(tmp_path) -> Store:
     s = Store(name="m", path=str(tmp_path / "m"), label="k")
@@ -290,3 +296,95 @@ def test_a_format_error_keeps_the_head_of_the_reply_as_its_witness(tmp_path):
     t = out["traces"][0]
     assert t["format_error"] and t["reply_head"].startswith("Looking at the map") \
         and t["reply_chars"] == len(stub.default)
+
+
+# ── the visible answer, and the two ways it goes missing ────────────────────
+
+class SplitStub:
+    """Duck-types Endpoint.ask_full: a server that answers on two channels. The
+    benchmark must read `content` alone — the reasoning is a witness, never an
+    answer."""
+    def __init__(self, content="", reasoning="", finish_reason="stop"):
+        self.content, self.reasoning, self.finish_reason = content, reasoning, finish_reason
+        self.ask_calls = 0
+
+    def ask(self, system, user, max_tokens=400, timeout=None, temperature=None):
+        # Present so a mistaken caller is caught by the assertions, not by AttributeError.
+        self.ask_calls += 1
+        return self.content or self.reasoning
+
+    def ask_full(self, system, user, max_tokens=400, timeout=None, temperature=None):
+        return {"content": self.content, "reasoning": self.reasoning,
+                "finish_reason": self.finish_reason}
+
+
+def _row(store, stub):
+    return wl.run(store, [case("wf-direct-1")], "agent-only", thinker=stub)["traces"][0]
+
+
+def test_a_clean_answer_is_neither_truncated_nor_reasoning_only(tmp_path):
+    s = build(tmp_path)
+    t = _row(s, SplitStub(content='["freetoken-hybrid"]'))
+    assert t["target_reached"] and not t["format_error"]
+    assert not t["truncated"] and not t["reasoning_only"]
+
+
+def test_the_reasoning_channel_is_never_read_as_the_answer(tmp_path):
+    """ask() would hand back the reasoning when the content is empty. That fallback
+    is a thinker-side kindness; here it would score a model that said nothing."""
+    s = build(tmp_path)
+    stub = SplitStub(content="", reasoning='The map has it: ["freetoken-hybrid"]')
+    t = _row(s, stub)
+    assert stub.ask_calls == 0                  # ask_full, not ask
+    assert t["reasoning_only"] and t["format_error"] and not t["target_reached"]
+    assert t["opened"] == [] and t["reply_chars"] == 0
+    assert t["reply_head"].startswith("[reasoning] The map has it")
+
+
+def test_a_truncated_reply_is_still_a_format_error(tmp_path):
+    """Both flags can be true at once: the cap explains the failure, it does not
+    excuse it — an excused row would hide 'raise max_tokens' behind a healthy count."""
+    s = build(tmp_path)
+    t = _row(s, SplitStub(content='["freetoken-hyb', finish_reason="length"))
+    assert t["truncated"] and t["format_error"] and not t["reasoning_only"]
+
+
+def test_a_complete_valid_answer_can_still_be_marked_truncated(tmp_path):
+    """finish_reason is an observation about the call, not a verdict on the parse."""
+    s = build(tmp_path)
+    t = _row(s, SplitStub(content='["freetoken-hybrid"]', finish_reason="length"))
+    assert t["truncated"] and not t["format_error"] and t["target_reached"]
+
+
+def test_reasoning_only_and_truncated_can_both_be_true(tmp_path):
+    """The house's own failure: the whole budget went into thinking and the cap hit."""
+    s = build(tmp_path)
+    t = _row(s, SplitStub(content="   ", reasoning="thinking..." * 40,
+                          finish_reason="length"))
+    assert t["truncated"] and t["reasoning_only"] and t["format_error"]
+
+
+def test_content_present_beside_reasoning_keeps_the_content_as_the_head(tmp_path):
+    s = build(tmp_path)
+    t = _row(s, SplitStub(content="I think so", reasoning="long private thought"))
+    assert not t["reasoning_only"] and t["format_error"]
+    assert t["reply_head"] == "I think so"
+
+
+def test_an_unreachable_model_is_still_a_skip(tmp_path):
+    """Unchanged by the split: an outage is not an honest 'nothing matched'."""
+    class Dead:
+        def ask_full(self, *a, **k):
+            return None
+    t = _row(build(tmp_path), Dead())
+    assert t["skipped"] == "model unreachable" and not t["truncated"]
+
+
+def test_the_two_counts_reach_the_summary_and_the_table(tmp_path):
+    s = build(tmp_path)
+    out = wl.run(s, [case("wf-direct-1")], "agent-only",
+                 thinker=SplitStub(content="", reasoning="thought", finish_reason="length"))
+    assert out["summary"]["truncated"] == 1 and out["summary"]["reasoning_only"] == 1
+    from distill_kura.cli import _worldline_table
+    head = _worldline_table(out).splitlines()[1]
+    assert "truncated" in head and "reasoning_only" in head

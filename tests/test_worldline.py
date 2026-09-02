@@ -32,6 +32,14 @@ class StubModel:
         self.calls += 1
         return self.reply
 
+    def ask_full(self, system, user, max_tokens=400, timeout=None, temperature=None):
+        """The benchmark asks for the split reply; a plain stub answers with all of
+        it as visible content, which is what a well-behaved model does."""
+        self.calls += 1
+        if self.reply is None:
+            return None
+        return {"content": self.reply, "reasoning": "", "finish_reason": "stop"}
+
 
 def build(tmp_path):
     s = Store(name="m", path=str(tmp_path / "m"), label="k")

@@ -187,6 +187,7 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
           "skipped": None,
           "proposed_slugs": [], "invalid_slugs": [], "format_error": False,
           "reply_head": None, "reply_chars": 0,
+          "truncated": False, "reasoning_only": False,
           "cue_hit": None, "cue_ambiguous": False,
           "agent": agent if routing == "agent-only" else None}
 
@@ -204,19 +205,40 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
             tr["skipped"] = "agent-only needs a model endpoint (the conversation model)"
         else:
             tr["first_tool"] = "model"          # the agent's own cognition, not a helper
-            raw = thinker.ask(AGENT_SYS + resident, case["utterance"], max_tokens=300)
-            if raw is None:
+            # ask_full, not ask: what is measured here is the answer a USER would
+            # have seen. ask() falls back to the reasoning channel when the content
+            # is empty, which is right for recall and wrong for a benchmark — it
+            # would score a model that thought until the cap and said nothing as
+            # though it had answered.
+            full = thinker.ask_full(AGENT_SYS + resident, case["utterance"],
+                                    max_tokens=300)
+            if full is None:
                 # An unreachable model is an outage, not an honest "nothing matched";
                 # recording it as target_reached would reward the dead endpoint.
                 tr["skipped"] = "model unreachable"
             else:
-                a = _agent_answer(raw, store)
+                content = full.get("content") or ""
+                reasoning = full.get("reasoning") or ""
+                # Two observations, never excuses. `truncated` says the cap was hit;
+                # it does NOT exempt the row from format_error — a reply cut in half
+                # is still not the array that was asked for, and forgiving it would
+                # hide "raise the cap" behind a healthy-looking number.
+                tr["truncated"] = full.get("finish_reason") == "length"
+                # `reasoning_only` says the visible answer was empty while the model
+                # thought at length. No answer was given, so it is a format_error
+                # too — the flag only says WHICH way the row failed.
+                tr["reasoning_only"] = not content.strip() and bool(reasoning.strip())
+                a = _agent_answer(content, store)
                 # What the model actually said, in part: a format_error is
                 # otherwise a verdict with no witness (prose? a fenced array?
                 # reasoning cut by the output cap?). The head is kept, not the
                 # whole reply — a trace row is a measurement, not a transcript.
-                tr["reply_head"] = raw[:240]
-                tr["reply_chars"] = len(raw)
+                # With nothing visible said, the reasoning is the only witness there
+                # is, and it is labelled so no reader mistakes it for the answer.
+                tr["reply_head"] = (content[:240] if content.strip()
+                                    else ("[reasoning] " + reasoning[:240] if reasoning
+                                          else content[:240]))
+                tr["reply_chars"] = len(content)
                 tr["opened"] = a["opened"]
                 tr["proposed_slugs"] = a["proposed_slugs"]
                 tr["invalid_slugs"] = a["invalid_slugs"]
@@ -319,6 +341,12 @@ def summarize(traces: list[dict]) -> dict:
             "remembered_but_unreachable": sum(
                 1 for t in ran if t.get("remembered_but_unreachable")),
             "unnecessary_opens": sum(len(t.get("unnecessary_opens") or []) for t in ran),
+            # Two ways an agent-only row can fail that a bare format_error count
+            # cannot tell apart: the cap cut the reply, or the whole budget went
+            # into reasoning and nothing was said. Both are already counted as
+            # format_error; these say which repair is the one worth making.
+            "truncated": sum(1 for t in ran if t.get("truncated")),
+            "reasoning_only": sum(1 for t in ran if t.get("reasoning_only")),
             "thinker_calls_total": sum(t["thinker_calls"] for t in ran),
             "fastpath_direct_total": sum(1 for t in ran if t["fastpath_used"]),
             "cue_direct_total": sum(1 for t in ran if t.get("cue_hit") is not None),
