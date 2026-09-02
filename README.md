@@ -481,7 +481,8 @@ the server keep its slots warm (`--slot-save-path`). The editor's calls are the 
 that wait an hour (`timeout=3600`) on purpose.
 
 **If the thinker is down, recall does not go silent** — it falls back to word overlap
-and labels the answer `how=words`, which the tools surface as `⚠ degraded`. Quiet
+and labels the answer `how=words(thinker unreachable)`, which the tools surface as
+`⚠ degraded`. Quiet
 degradation is worse than degradation. And before either tier runs, a deterministic
 recognizer (`[fastpath]`, on by default) answers DIRECT questions — ones that name a
 memory — in under a millisecond with `how=fastpath`, thinker up or not; anything it is

@@ -31,9 +31,20 @@ Around 500 memories on a 131k window, at which point the answer is not a vector 
 but a two-level index (sections, then lines) or a second kura — which is one reason
 stores are cheap to create.
 
-**What happens when the model is down.** Recall falls back to word overlap and labels
-the result `how=words`. It never returns silence and never pretends the answer came
-from meaning.
+**What `how` says.** Every recall reply names the tier that picked, in one of five
+exact words (`recall.py`):
+
+- `fastpath` — tier zero recognised the memory by name; the thinker was never asked,
+  so a direct question survives the model being down.
+- `fastpath-cue` — the same, answered first by the callsign pre-head.
+- `meaning` — the thinker read the index and picked.
+- `meaning→none` — the thinker read the whole index and named nothing. That is an
+  answer, not a failure: word overlap is deliberately NOT applied over it, or a
+  question this store knows nothing about would come back with look-alikes.
+- `words(thinker unreachable)` — the thinker is down and the answer came from word
+  overlap. The only degraded tier, and it says so.
+
+It never returns silence and never pretends the answer came from meaning.
 
 ---
 
