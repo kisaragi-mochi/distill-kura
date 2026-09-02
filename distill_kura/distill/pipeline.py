@@ -415,19 +415,33 @@ class Distiller:
                      "(do not compute new ones); never credit the human without their "
                      "own quoted words.\n")
         _, plain = _split_draft(body.group(1))
-        return {"slug": _safe_slug(slug.group(1)),
-                "title": (title.group(1).strip()[:40] if title else ""),
-                "description": desc.group(1).strip()[:200],
-                "body": plain,
-                "kind": c.get("kind", "project"),
-                "evidence": c["evidence"], "classes": c["classes"],
-                "unverified_numbers": c.get("unverified_numbers", False),
-                "judgement": c.get("judgement", False),
-                # routing cues ride to the manifest untouched; they never enter the
-                # body or the index — a callsign is a way BACK, not content
-                "routing_cues": c.get("routing_cues") or [],
-                "routing_cues_refused": c.get("routing_cues_refused") or {},
-                **self._curate(c, out)}
+        return self._draft_record(c, out, slug=_safe_slug(slug.group(1)),
+                                  title=(title.group(1).strip()[:40] if title else ""),
+                                  description=desc.group(1).strip()[:200], body=plain)
+
+    def _draft_record(self, c: dict, out: str, *, slug: str, title: str, description: str,
+                      body: str, extends: str | None = None) -> dict:
+        """The record stage() writes, from a candidate and the scribe's answer.
+
+        A new memory and an extension differ only in their first four keys; everything
+        after them — what kind it is, the evidence it stands on, the gate's flags, the
+        routing cues, the curation — must be identical, or a draft would carry one set
+        of provenance down one path and another set down the other."""
+        rec = {"slug": slug, "title": title, "description": description}
+        if extends is not None:
+            rec["extends"] = extends
+        rec.update({
+            "body": body,
+            "kind": c.get("kind", "project"),
+            "evidence": c["evidence"], "classes": c["classes"],
+            "unverified_numbers": c.get("unverified_numbers", False),
+            "judgement": c.get("judgement", False),
+            # routing cues ride to the manifest untouched; they never enter the
+            # body or the index — a callsign is a way BACK, not content
+            "routing_cues": c.get("routing_cues") or [],
+            "routing_cues_refused": c.get("routing_cues_refused") or {},
+            **self._curate(c, out)})
+        return rec
 
     def _curate(self, c: dict, out: str) -> dict:
         """Tags and the three sentences, from the brain's candidate and the scribe's
@@ -498,14 +512,8 @@ class Distiller:
             _log(f"      ✗ extension surface fails the floor: {bad}")
             return None
         text = head + "\n" + plain
-        return {"slug": target, "title": "", "description": "", "extends": target,
-                "body": text.strip(), "kind": c.get("kind", "project"),
-                "evidence": c["evidence"], "classes": c["classes"],
-                "unverified_numbers": c.get("unverified_numbers", False),
-                "judgement": c.get("judgement", False),
-                "routing_cues": c.get("routing_cues") or [],
-                "routing_cues_refused": c.get("routing_cues_refused") or {},
-                **self._curate(c, out or "")}
+        return self._draft_record(c, out or "", slug=target, title="", description="",
+                                  body=text.strip(), extends=target)
 
     # ── ⑥ stage ──────────────────────────────────────────────────────────
     # ── provenance that outlives the draft ───────────────────────────────
