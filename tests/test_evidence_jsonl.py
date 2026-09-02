@@ -6,6 +6,8 @@ import os
 import sys
 import threading
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from distill_kura.distill.pipeline import Distiller, MIN_DRINK   # noqa: E402
@@ -52,6 +54,69 @@ def _write(path, *events, trailing_partial: str | None = None):
         if trailing_partial is not None:
             f.write(trailing_partial)
 
+
+# One irreversibly-oversized line: MAX_LINE+1 detection read + at most SCAN_LIMIT scan.
+_PER_ATTEMPT_BYTE_CAP = SCAN_LIMIT + MAX_LINE + 1
+# Resumed scan continues from saved cursor — no second detection read.
+_PER_RESUME_BYTE_CAP = SCAN_LIMIT
+
+
+def _track_readline_bytes(path, monkeypatch) -> list[int]:
+    """Bytes consumed via readline() per open/close, for one target file."""
+    consumed: list[int] = []
+    real_open = open
+    abspath = os.path.abspath(str(path))
+
+    def open_wrapper(open_path, mode="r", *args, **kwargs):
+        fh = real_open(open_path, mode, *args, **kwargs)
+        if os.path.abspath(str(open_path)) == abspath and "b" in mode:
+            total = 0
+            base_readline = fh.readline
+
+            def readline(size=-1):
+                nonlocal total
+                chunk = base_readline(size)
+                if chunk:
+                    total += len(chunk)
+                return chunk
+
+            fh.readline = readline
+            base_close = fh.close
+
+            def close():
+                consumed.append(total)
+                return base_close()
+
+            fh.close = close
+        return fh
+
+    monkeypatch.setattr("builtins.open", open_wrapper)
+    return consumed
+
+
+def _sip_past_huge_prefix(src, path, start, limit, *, bound_end=None, max_rounds=200):
+    """Repeat sip until segments appear (progressive oversized-line discard)."""
+    pos = start
+    for _ in range(max_rounds):
+        kwargs: dict = {}
+        if bound_end is not None:
+            kwargs["bound_end"] = bound_end
+        segs, pos = src.sip(path, pos, limit, **kwargs)
+        if segs:
+            return segs, pos
+    raise AssertionError("sip stuck scanning an oversized prefix")
+
+
+def _clear_discard_state():
+    EvidenceJsonlSource._discard_scan.clear()
+    EvidenceJsonlSource._discard_done.clear()
+
+
+@pytest.fixture(autouse=True)
+def _evidence_discard_state_isolation():
+    _clear_discard_state()
+    yield
+    _clear_discard_state()
 
 # ── classification ──────────────────────────────────────────────────────────
 
@@ -623,40 +688,14 @@ def test_first_sip_respects_reserved_end_after_second_claim(tmp_path):
 def test_unterminated_oversized_tail_stays_bounded_per_attempt(tmp_path, monkeypatch):
     p = tmp_path / "tail.evidence.jsonl"
     p.write_bytes(b"x" * (MAX_LINE * 10))
-    consumed: list[int] = []
-    real_open = open
-
-    def open_wrapper(path, mode="r", *args, **kwargs):
-        fh = real_open(path, mode, *args, **kwargs)
-        if os.path.abspath(str(path)) == os.path.abspath(str(p)) and "b" in mode:
-            total = 0
-            base_readline = fh.readline
-
-            def readline(size=-1):
-                nonlocal total
-                chunk = base_readline(size)
-                if chunk:
-                    total += len(chunk)
-                return chunk
-
-            fh.readline = readline
-            base_close = fh.close
-
-            def close():
-                consumed.append(total)
-                return base_close()
-
-            fh.close = close
-        return fh
-
-    monkeypatch.setattr("builtins.open", open_wrapper)
+    consumed = _track_readline_bytes(p, monkeypatch)
     src = EvidenceJsonlSource()
     segs, pos = src.sip(str(p), 0, 10_000)
     assert segs == [] and pos == 0
-    assert consumed and consumed[0] <= MAX_LINE * 10 + MAX_LINE
+    assert consumed and consumed[0] <= _PER_ATTEMPT_BYTE_CAP
     segs2, pos2 = src.sip(str(p), 0, 10_000)
     assert segs2 == [] and pos2 == 0
-    assert len(consumed) == 2 and consumed[1] <= MAX_LINE * 10 + MAX_LINE
+    assert len(consumed) == 2 and consumed[1] <= _PER_RESUME_BYTE_CAP
 
 
 def test_completed_oversized_line_then_valid_event(tmp_path):
@@ -672,115 +711,118 @@ def test_completed_oversized_line_then_valid_event(tmp_path):
     assert len(segs) == 1 and segs[0].text == "after"
     assert end == p.stat().st_size
 
+
 def test_unterminated_tail_larger_than_scan_limit_stays_bounded(tmp_path, monkeypatch):
     """Garbage tail with no newline: capped per attempt, watermark unchanged."""
     p = tmp_path / "tail.evidence.jsonl"
     p.write_bytes(b"x" * (SCAN_LIMIT + 50_000))
-    consumed: list[int] = []
-    real_open = open
-
-    def open_wrapper(path, mode="r", *args, **kwargs):
-        fh = real_open(path, mode, *args, **kwargs)
-        if os.path.abspath(str(path)) == os.path.abspath(str(p)) and "b" in mode:
-            total = 0
-            base_readline = fh.readline
-
-            def readline(size=-1):
-                nonlocal total
-                chunk = base_readline(size)
-                if chunk:
-                    total += len(chunk)
-                return chunk
-
-            fh.readline = readline
-            base_close = fh.close
-
-            def close():
-                consumed.append(total)
-                return base_close()
-
-            fh.close = close
-        return fh
-
-    monkeypatch.setattr("builtins.open", open_wrapper)
+    consumed = _track_readline_bytes(p, monkeypatch)
     src = EvidenceJsonlSource()
     segs, pos = src.sip(str(p), 0, 10_000)
     assert segs == [] and pos == 0
-    assert consumed and consumed[0] <= SCAN_LIMIT + MAX_LINE
+    assert consumed and consumed[0] <= _PER_ATTEMPT_BYTE_CAP
     segs2, pos2 = src.sip(str(p), 0, 10_000)
     assert segs2 == [] and pos2 == 0
-    assert len(consumed) == 2 and consumed[1] <= SCAN_LIMIT + MAX_LINE
+    assert len(consumed) == 2 and consumed[1] <= _PER_RESUME_BYTE_CAP
 
 
 def test_unterminated_json_tail_larger_than_scan_limit_stays_bounded(tmp_path, monkeypatch):
-    """Unterminated JSON-shaped tail: same bounded cap, no { prefix escape hatch."""
+    """Unterminated JSON-shaped tail: same bounded cap, no prefix escape hatch."""
     p = tmp_path / "json-tail.evidence.jsonl"
     p.write_bytes(b'{"schema_version": 1, "event_id": "e"' + b"x" * (SCAN_LIMIT + 50_000))
-    consumed: list[int] = []
-    real_open = open
-
-    def open_wrapper(path, mode="r", *args, **kwargs):
-        fh = real_open(path, mode, *args, **kwargs)
-        if os.path.abspath(str(path)) == os.path.abspath(str(p)) and "b" in mode:
-            total = 0
-            base_readline = fh.readline
-
-            def readline(size=-1):
-                nonlocal total
-                chunk = base_readline(size)
-                if chunk:
-                    total += len(chunk)
-                return chunk
-
-            fh.readline = readline
-            base_close = fh.close
-
-            def close():
-                consumed.append(total)
-                return base_close()
-
-            fh.close = close
-        return fh
-
-    monkeypatch.setattr("builtins.open", open_wrapper)
+    consumed = _track_readline_bytes(p, monkeypatch)
     src = EvidenceJsonlSource()
     segs, pos = src.sip(str(p), 0, 10_000)
     assert segs == [] and pos == 0
-    assert consumed and consumed[0] <= SCAN_LIMIT + MAX_LINE
+    assert consumed and consumed[0] <= _PER_ATTEMPT_BYTE_CAP
     segs2, pos2 = src.sip(str(p), 0, 10_000)
     assert segs2 == [] and pos2 == 0
-    assert len(consumed) == 2 and consumed[1] <= SCAN_LIMIT + MAX_LINE
+    assert len(consumed) == 2 and consumed[1] <= _PER_RESUME_BYTE_CAP
+
+
+def test_oversized_discard_resumes_from_cursor_not_byte_zero(tmp_path, monkeypatch):
+    """Second sip continues the saved scan cursor instead of rereading from pos 0."""
+    p = tmp_path / "resume-scan.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 50_000))
+    consumed = _track_readline_bytes(p, monkeypatch)
+    src = EvidenceJsonlSource()
+    src.sip(str(p), 0, 10_000)
+    src.sip(str(p), 0, 10_000)
+    assert len(consumed) == 2
+    assert consumed[0] <= _PER_ATTEMPT_BYTE_CAP
+    assert consumed[1] <= _PER_RESUME_BYTE_CAP
+    assert consumed[0] > consumed[1]
 
 
 def test_completed_nonjson_oversized_line_past_scan_limit_then_valid_event(tmp_path):
-    """Completed non-JSON line longer than SCAN_LIMIT must not block later evidence."""
+    """Completed non-JSON line longer than 2×SCAN_LIMIT must not block later evidence."""
     p = tmp_path / "xline.evidence.jsonl"
-    huge = b"x" * (SCAN_LIMIT + 50_000) + b"\n"
+    huge = b"x" * (2 * SCAN_LIMIT + 50_000) + b"\n"
     good = (json.dumps(_event("USER", "after", event_id="ok")) + "\n").encode()
     with open(p, "wb") as f:
         f.write(huge)
         f.write(good)
-    segs, end = EvidenceJsonlSource().sip(str(p), 0, 10_000)
+    src = EvidenceJsonlSource()
+    segs, end = _sip_past_huge_prefix(src, str(p), 0, 10_000)
     assert len(segs) == 1 and segs[0].text == "after"
     assert end == p.stat().st_size
 
 
 def test_completed_oversized_line_past_scan_limit_then_valid_event(tmp_path):
-    """Completed invalid line longer than SCAN_LIMIT must not block later evidence."""
+    """Completed invalid line longer than 2×SCAN_LIMIT must not block later evidence."""
     p = tmp_path / "past-scan.evidence.jsonl"
     prefix = (b'{"schema_version": 1, "event_id": "e", "session_id": "s", "turn_id": "t", '
               b'"class": "USER", "text": "')
     suffix = b'", "timestamp": "2026-08-27T00:00:00Z"}\n'
-    text_len = SCAN_LIMIT - len(prefix) - len(suffix) + 50_000
+    text_len = 2 * SCAN_LIMIT - len(prefix) - len(suffix) + 50_000
     huge = prefix + (b"A" * text_len) + suffix
-    assert len(huge) > SCAN_LIMIT and huge.endswith(b"\n")
+    assert len(huge) > 2 * SCAN_LIMIT and huge.endswith(b"\n")
     good = (json.dumps(_event("USER", "after", event_id="ok")) + "\n").encode()
     with open(p, "wb") as f:
         f.write(huge)
         f.write(good)
-    segs, end = EvidenceJsonlSource().sip(str(p), 0, 10_000)
+    src = EvidenceJsonlSource()
+    segs, end = _sip_past_huge_prefix(src, str(p), 0, 10_000)
     assert len(segs) == 1 and segs[0].text == "after"
     assert end == p.stat().st_size
+
+
+def test_claim_bound_eventually_passes_min_drink_past_huge_prefix(tmp_path):
+    """Skipped-byte span from progressive discard must satisfy MIN_DRINK."""
+    p = tmp_path / "claim-past.evidence.jsonl"
+    huge = b"x" * (2 * SCAN_LIMIT + 50_000) + b"\n"
+    good = (json.dumps(_event("USER", _blob("enough"), event_id="ok")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(good)
+    src = EvidenceJsonlSource()
+    claimed = None
+    for _ in range(30):
+        end, approx = src.claim_bound(str(p), 0, 4000)
+        if end > 0 and approx >= MIN_DRINK:
+            claimed = (end, approx)
+            break
+        src.sip(str(p), 0, 4000)
+    assert claimed is not None
+    end, approx = claimed
+    segs, sip_end = src.sip(str(p), 0, 4000, bound_end=end)
+    assert len(segs) == 1 and segs[0].text.startswith("enough")
+    assert sip_end == end == p.stat().st_size
+
+
+def test_completed_oversized_valid_event_then_unterminated_tail(tmp_path):
+    """Luna composite: skip huge line, drink valid event, stop before open tail."""
+    p = tmp_path / "luna.evidence.jsonl"
+    huge = b"x" * (MAX_LINE + 100) + b"\n"
+    good = (json.dumps(_event("USER", "middle", event_id="mid")) + "\n").encode()
+    tail = b"x" * (SCAN_LIMIT + 50_000)
+    p.write_bytes(huge + good + tail)
+    src = EvidenceJsonlSource()
+    segs, pos = _sip_past_huge_prefix(src, str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "middle"
+    assert pos == len(huge) + len(good)
+    segs2, pos2 = src.sip(str(p), pos, 10_000)
+    assert segs2 == [] and pos2 == pos
 
 
 def test_completed_oversized_past_scan_limit_respects_bound_end(tmp_path):
@@ -789,7 +831,7 @@ def test_completed_oversized_past_scan_limit_respects_bound_end(tmp_path):
     prefix = (b'{"schema_version": 1, "event_id": "e", "session_id": "s", "turn_id": "t", '
               b'"class": "USER", "text": "')
     suffix = b'", "timestamp": "2026-08-27T00:00:00Z"}\n'
-    text_len = SCAN_LIMIT - len(prefix) - len(suffix) + 50_000
+    text_len = 2 * SCAN_LIMIT - len(prefix) - len(suffix) + 50_000
     huge = prefix + (b"A" * text_len) + suffix
     in_bound = (json.dumps(_event("USER", "inside", event_id="in")) + "\n").encode()
     outside = (json.dumps(_event("USER", "outside", event_id="out")) + "\n").encode()
@@ -798,9 +840,28 @@ def test_completed_oversized_past_scan_limit_respects_bound_end(tmp_path):
         f.write(in_bound)
         f.write(outside)
     bound_end = len(huge) + len(in_bound)
-    segs, end = EvidenceJsonlSource().sip(str(p), 0, 10_000, bound_end=bound_end)
+    src = EvidenceJsonlSource()
+    segs, end = _sip_past_huge_prefix(src, str(p), 0, 10_000, bound_end=bound_end)
     assert len(segs) == 1 and segs[0].text == "inside"
     assert end == bound_end
-    segs2, end2 = EvidenceJsonlSource().sip(str(p), bound_end, 10_000)
+    segs2, end2 = src.sip(str(p), bound_end, 10_000)
     assert len(segs2) == 1 and segs2[0].text == "outside"
     assert end2 == p.stat().st_size
+
+
+def test_discard_scan_state_resets_on_truncation(tmp_path):
+    """Truncation/replacement clears cached scan cursors keyed on stale file size."""
+    p = tmp_path / "trunc.evidence.jsonl"
+    old_size = SCAN_LIMIT + 5000
+    p.write_bytes(b"x" * old_size)
+    src = EvidenceJsonlSource()
+    _, pos1 = src.sip(str(p), 0, 10_000)
+    assert pos1 == 0
+    stale_key = EvidenceJsonlSource._discard_key(str(p), 0, old_size)
+    assert stale_key in EvidenceJsonlSource._discard_scan
+    good = (json.dumps(_event("USER", "fresh", event_id="f")) + "\n").encode()
+    p.write_bytes(good)
+    segs, end = src.sip(str(p), 0, 10_000)
+    assert stale_key not in EvidenceJsonlSource._discard_scan
+    assert len(segs) == 1 and segs[0].text == "fresh"
+    assert end == len(good)

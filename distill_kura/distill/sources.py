@@ -401,6 +401,12 @@ class DshSource(Source):
 # ── Classified evidence JSONL (append-only → byte watermark) ───────────────
 
 class EvidenceJsonlSource(Source):
+    # In-memory scan/skip cursors for irreversibly oversized lines only. Not
+    # persisted — a restart may rescan bounded chunks but must not skip valid
+    # suffixes. Keyed by (abspath, line_start, file_size); size change clears.
+    _discard_scan: dict[tuple[str, int, int], int] = {}
+    _discard_done: dict[tuple[str, int, int], int] = {}
+
     """`*.evidence.jsonl` — one versioned, class-tagged event per line.
 
     Writers append complete JSON objects; a crash may leave a partial final line.
@@ -441,8 +447,67 @@ class EvidenceJsonlSource(Source):
         if report is not None:
             report.note(reason, at, size)
 
-    @staticmethod
-    def _read_record(h, bound_end: int | None = None) -> tuple[bytes | None, str]:
+    @classmethod
+    def _discard_key(cls, path: str, line_start: int, file_size: int) -> tuple[str, int, int]:
+        return (os.path.abspath(path), line_start, file_size)
+
+    @classmethod
+    def _discard_invalidate_path(cls, path: str, file_size: int) -> None:
+        abspath = os.path.abspath(path)
+        for store in (cls._discard_scan, cls._discard_done):
+            for key in [k for k in store if k[0] == abspath and k[2] != file_size]:
+                store.pop(key, None)
+
+    @classmethod
+    def _discard_clear(cls, key: tuple[str, int, int]) -> None:
+        cls._discard_scan.pop(key, None)
+        cls._discard_done.pop(key, None)
+
+    def _scan_oversized_discard(
+        self,
+        h,
+        path: str,
+        line_start: int,
+        key: tuple[str, int, int],
+        visible_end: int,
+    ) -> str:
+        """Scan at most SCAN_LIMIT bytes of one irreversibly oversized line.
+
+        Never parse from the middle — only hunt for a newline to skip or stop.
+        Public watermark stays at line_start until the line is consumed or EOF.
+        """
+        scanned = 0
+        while scanned < SCAN_LIMIT:
+            pos = h.tell()
+            if pos >= visible_end:
+                self._discard_scan[key] = pos
+                h.seek(line_start)
+                return "partial"
+            limit = min(MAX_LINE, visible_end - pos)
+            if limit <= 0:
+                h.seek(line_start)
+                return "partial"
+            more = h.readline(limit)
+            if not more:
+                self._discard_scan[key] = h.tell()
+                h.seek(line_start)
+                return "partial"
+            scanned += len(more)
+            if more.endswith(b"\n"):
+                line_end = h.tell()
+                self._discard_scan.pop(key, None)
+                self._discard_done[key] = line_end
+                return "oversized"
+        self._discard_scan[key] = h.tell()
+        h.seek(line_start)
+        return "partial"
+
+    def _read_record(
+        self,
+        h,
+        path: str,
+        bound_end: int | None = None,
+    ) -> tuple[bytes | None, str]:
         """Bounded read of one JSONL record. Never readline()s the rest of the file.
 
         Status: 'eof' | 'ok' | 'partial' | 'oversized'.
@@ -451,6 +516,26 @@ class EvidenceJsonlSource(Source):
         line_start = h.tell()
         if bound_end is not None and line_start >= bound_end:
             return None, "eof"
+        file_size = os.path.getsize(path)
+        visible_end = bound_end if bound_end is not None else file_size
+        self._discard_invalidate_path(path, file_size)
+        key = self._discard_key(path, line_start, file_size)
+
+        done_end = self._discard_done.get(key)
+        if done_end is not None:
+            if done_end > visible_end:
+                h.seek(line_start)
+                return None, "partial"
+            h.seek(done_end)
+            self._discard_clear(key)
+            return None, "oversized"
+
+        scan_cursor = self._discard_scan.get(key)
+        if scan_cursor is not None:
+            h.seek(scan_cursor)
+            return None, self._scan_oversized_discard(
+                h, path, line_start, key, visible_end)
+
         first_limit = MAX_LINE + 1
         if bound_end is not None:
             first_limit = min(first_limit, max(0, bound_end - line_start))
@@ -465,50 +550,8 @@ class EvidenceJsonlSource(Source):
             return chunk, "ok"
         if len(chunk) <= MAX_LINE:
             return chunk, "partial"
-        total = len(chunk)
-        while total < SCAN_LIMIT:
-            pos = h.tell()
-            if bound_end is not None and pos >= bound_end:
-                return None, "partial"
-            limit = MAX_LINE
-            if bound_end is not None:
-                limit = min(limit, max(0, bound_end - pos))
-                if limit <= 0:
-                    return None, "partial"
-            more = h.readline(limit)
-            if not more:
-                return None, "partial"
-            total += len(more)
-            if more.endswith(b"\n"):
-                return None, "oversized"
-        # Bounded scan exhausted without a newline. Peek only a fixed tail window
-        # at the visible end — never scan the whole suffix. No newline there means
-        # the line is still open; a newline means a completed oversized record.
-        pos_after_scan = h.tell()
-        h.seek(0, os.SEEK_END)
-        visible_end = bound_end if bound_end is not None else h.tell()
-        tail_start = max(line_start, visible_end - SCAN_LIMIT)
-        h.seek(tail_start)
-        tail = h.read(max(0, visible_end - tail_start))
-        if b"\n" not in tail:
-            h.seek(line_start)
-            return None, "partial"
-        h.seek(pos_after_scan)
-        while True:
-            pos = h.tell()
-            if pos >= visible_end:
-                h.seek(line_start)
-                return None, "partial"
-            limit = min(MAX_LINE, visible_end - pos)
-            if limit <= 0:
-                h.seek(line_start)
-                return None, "partial"
-            more = h.readline(limit)
-            if not more:
-                h.seek(line_start)
-                return None, "partial"
-            if more.endswith(b"\n"):
-                return None, "oversized"
+        return None, self._scan_oversized_discard(
+            h, path, line_start, key, visible_end)
 
     @staticmethod
     def _parse(raw: bytes) -> tuple[str | None, Segment | None]:
@@ -577,7 +620,7 @@ class EvidenceJsonlSource(Source):
                 line_start = h.tell()
                 if bound_end is not None and line_start >= bound_end:
                     return segs, line_start
-                raw, status = self._read_record(h, bound_end=bound_end)
+                raw, status = self._read_record(h, path, bound_end=bound_end)
                 if status == "eof":
                     return segs, line_start
                 if status == "partial":
@@ -608,9 +651,11 @@ class EvidenceJsonlSource(Source):
         # Same walk sip uses, same budget Distiller will pass to sip.
         segs, end = self._drink(path, start, budget_chars)
         text = sum(len(s.text) for s in segs)
+        walked = max(0, end - start)
         # Junk-only stretches still have to move: approx=0 would refuse the claim
-        # and never report the skips. Bytes walked let the watermark advance.
-        return end, text if text else max(0, end - start)
+        # and never report the skips. A short valid event after a huge discarded
+        # prefix must count the walked span, not just kept characters.
+        return end, max(text, walked)
 
 
 # ── Plain text / markdown notes (append-only → byte watermark) ──────────────
