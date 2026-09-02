@@ -354,6 +354,22 @@ def test_fit_keeps_the_head_and_the_relevant_paragraph(tmp_path):
     assert "42 tokens per second" in out
 
 
+def test_fit_pins_the_frontmatter_block_and_nothing_more(tmp_path):
+    """The docstring used to promise "frontmatter + opening". It is the frontmatter
+    block only — the opening paragraph competes for budget like any other, and a
+    memory whose opening is irrelevant loses it. Pinned so the promise cannot drift
+    back without someone choosing to change the behaviour."""
+    opening = "an irrelevant opening " * 12
+    text = ("---\nname: x\ndescription: d\n---\n\n" + opening + "\n\n"
+            + "\n\n".join(f"filler paragraph {i}" for i in range(60))
+            + "\n\nthe measured answer was 42 tokens per second")
+    out = fit(text, "how many tokens per second?", 200)
+    # the head ends at the blank line after the closing `---`, nothing more
+    assert out.startswith("---\nname: x\ndescription: d\n---\n\n")
+    assert "an irrelevant opening" not in out
+    assert "42 tokens per second" in out
+
+
 
 def test_the_degraded_word_path_never_recalls_the_comment_s_example(tmp_path):
     """The index header comment carries the format hint, and the hint contains an

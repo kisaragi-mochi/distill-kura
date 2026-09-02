@@ -89,8 +89,14 @@ def pick_by_words(store: Store, question: str, top: int) -> list[str]:
 
 def fit(text: str, question: str, budget: int) -> str:
     """Trim a memory to `budget` chars WITHOUT cutting from the top: keep the
-    frontmatter + opening, then prefer paragraphs that mention the question's words.
-    (Long memories keep their conclusions at the bottom; head-truncation loses them.)"""
+    frontmatter block whole (capped at 600 chars), then prefer paragraphs that mention
+    the question's words. (Long memories keep their conclusions at the bottom;
+    head-truncation loses them.)
+
+    The opening paragraph is NOT pinned: the store's template always leaves a blank
+    line after the closing `---`, so the head ends there and the opening competes for
+    budget like every other paragraph. Pinning it would change which paragraphs
+    survive, so it would be a behaviour change with its own test, not a docstring."""
     if len(text) <= budget:
         return text
     head_end = text.find("\n\n", text.find("---", 4) + 3)
