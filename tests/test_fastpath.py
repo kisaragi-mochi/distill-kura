@@ -111,6 +111,29 @@ def test_the_index_follows_the_store(tmp_path):
     assert [h["slug"] for h in fp["hits"]] == ["quantization-bake"]
 
 
+def test_a_rewrite_that_leaves_the_index_alone_still_refreshes_tier_zero(tmp_path):
+    """A memory whose index line is a grouped family line (`- topic — [A](a.md)/[B](b.md)`)
+    is rewritten: `_write` cannot refresh that line, so it reports `indexed: False`, the
+    index bytes and the memory count both stand still, and a stamp made of those two
+    alone would keep serving the old description while `doctor` called itself fresh.
+    The store revision is the third number that cannot miss the write.
+
+    The rewrite changes the DESCRIPTION, not the body: the body head weighs 0.5 against
+    a gate of 1.0, so a body-only edit could never gate through and the test would pass
+    or fail for the wrong reason."""
+    s = a_store(tmp_path)
+    s.remember("alpha-one", "first thing", "body one")
+    s.remember("beta-two", "second thing", "body two")
+    with open(s.index_path, "w", encoding="utf-8") as f:
+        f.write("- greek letters — [Alpha](alpha-one.md)/[Beta](beta-two.md)\n")
+    assert fastpath.lookup(s, "axolotl narwhal")["hits"] == []      # prime the cache
+
+    r = s.remember("alpha-one", "axolotl narwhal is the new description", "body")
+    assert r["indexed"] is False        # the precondition: the index line stayed put
+    assert s.doctor()["fastpath"]["fresh"] is False
+    assert [h["slug"] for h in fastpath.lookup(s, "axolotl narwhal")["hits"]] == ["alpha-one"]
+
+
 def test_doctor_reports_the_fastpath_block(tmp_path):
     s = a_store(tmp_path)
     assert s.doctor()["fastpath"] == {"built": False}    # lazy: nothing until a recall
