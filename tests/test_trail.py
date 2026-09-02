@@ -84,7 +84,7 @@ def test_the_header_carries_nothing_volatile(tmp_path):
     s = build(tmp_path)
     t = Trail(s, loom=Loom(s, scribe=None, fresh_days=14))
     text, _ = t.build()
-    head = (text or "").splitlines()[:2]           # BEGIN + HEADER
+    head = (text or "").splitlines()[:1]           # BEGIN carries the note
     import re
     assert not re.search(r"\d{4}-\d{2}-\d{2}|\d{2}:\d{2}|\brev", " ".join(head), re.I)
 

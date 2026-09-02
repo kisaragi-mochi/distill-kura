@@ -207,7 +207,7 @@ def test_the_trail_rides_after_the_constellation(tmp_path):
     trail.write()
     pf = build(s, loom, trail=trail, resident_mode="constellation")
     assert pf.stats["trail"] == "appended"
-    assert pf.text.index("<<<END KURA-MAP>>>") < pf.text.index("<<<KURA-TRAIL>>>")
+    assert pf.text.index("<<<END KURA-MAP>>>") < pf.text.index("<<<KURA-TRAIL")
 
 
 def test_byte_stable_across_renders(tmp_path):

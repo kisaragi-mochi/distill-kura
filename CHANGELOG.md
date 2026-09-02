@@ -176,6 +176,13 @@ calls obsolete — as a raw metric with no scoring change. `kura edges [--json] 
 S]` prints the derived table; `kura doctor` carries the edge counts. Recall's BFS is
 untouched: edges are routing hints for trail/glance/bench, not a new way into recall.
 
+*Trail header, measured and moved (2026-09-02):* the prose line under the trail marker
+("CURRENT PATH — these are recent breadcrumbs, not the whole memory:") made the reading
+model start narrating — on the house store, 42 cases, one reader: format errors 13→19
+and recovery 22→17 with the trail appended, back to 22 with the sentence removed, 25
+with the same words folded into the marker. The note now rides inside `TRAIL_BEGIN`;
+the block is index lines and markers only. Trail state version 3 (a trail on disk rebuilds).
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the

@@ -29,12 +29,18 @@ from .store import Store, contained
 from .tokens import estimate
 from .weave import Loom
 
-TRAIL_BEGIN = "<<<KURA-TRAIL>>>"
+# The honesty note rides INSIDE the marker. It used to be a prose line under the
+# marker ("CURRENT PATH — these are recent breadcrumbs, not the whole memory:"),
+# and measured on the house store (2026-09-02, 42 cases, one reader) that one
+# sentence made the agent start narrating: format errors 13→19, recovery 22→17,
+# while the same words folded into the marker cost nothing (25/42, 15). A prose
+# line in a block of index lines reads as an invitation to write prose.
+TRAIL_BEGIN = "<<<KURA-TRAIL — recent breadcrumbs, not the whole memory>>>"
 TRAIL_END = "<<<END KURA-TRAIL>>>"
 # Constant on purpose: a header that carried a date or a revision number would
 # re-price the prefix cache every time the trail was rebuilt.
-HEADER = "CURRENT PATH — these are recent breadcrumbs, not the whole memory:"
-STATE_VERSION = 2
+HEADER = ""   # kept for importers; the note lives in TRAIL_BEGIN now
+STATE_VERSION = 3   # 3: the prose header moved into the marker (a trail on disk rebuilds)
 
 
 def _sha256(text: str) -> str:
@@ -143,7 +149,7 @@ class Trail:
         onward = self._onward_lines(included)
         if onward:
             body += "\n" + "\n".join(onward)
-        text = f"{TRAIL_BEGIN}\n{HEADER}\n{body}\n{TRAIL_END}\n"
+        text = f"{TRAIL_BEGIN}\n{body}\n{TRAIL_END}\n"
         return text, stamp
 
     def _onward_lines(self, slugs: list[str]) -> list[str]:

@@ -44,8 +44,8 @@ def test_the_trail_is_appended_after_the_map(tmp_path):
     assert t.write()["written"] is True
     pf = prefill.build(s, _loom(s), trail=t)
     assert pf.stats["trail"] == "appended"
-    assert "<<<END KURA-MAP>>>" in pf.text and "<<<KURA-TRAIL>>>" in pf.text
-    assert pf.text.index("<<<END KURA-MAP>>>") < pf.text.index("<<<KURA-TRAIL>>>")
+    assert "<<<END KURA-MAP>>>" in pf.text and "<<<KURA-TRAIL" in pf.text
+    assert pf.text.index("<<<END KURA-MAP>>>") < pf.text.index("<<<KURA-TRAIL")
 
 
 def test_a_trail_only_change_leaves_the_map_bytes_identical(tmp_path):
@@ -80,7 +80,7 @@ def test_a_stale_trail_is_not_appended(tmp_path):
     s.remember_direct("landed-after", "poured after the trail was built", "body")
     pf = prefill.build(s, _loom(s), trail=t)
     assert pf.stats.get("trail_stale") is True
-    assert "<<<KURA-TRAIL>>>" not in pf.text, \
+    assert "<<<KURA-TRAIL" not in pf.text, \
         "a stale trail would lie about the present; the map stands alone"
 
 
@@ -129,7 +129,7 @@ def test_a_ceiling_crossing_trail_steps_aside_not_the_map(tmp_path):
                        hard_fraction=ceiling_just_above_map, trail=t)
     assert pf.stats["map_tokens"] <= pf.stats["ceiling_tokens"]
     assert pf.stats["trail"] == "omitted: ceiling — the map stands alone"
-    assert "<<<END KURA-MAP>>>" in pf.text and "<<<KURA-TRAIL>>>" not in pf.text
+    assert "<<<END KURA-MAP>>>" in pf.text and "<<<KURA-TRAIL" not in pf.text
     assert pf.stats.get("over_ceiling") is not True, "the map was NOT stubbed"
 
 
