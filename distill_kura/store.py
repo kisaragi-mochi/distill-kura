@@ -851,15 +851,24 @@ class Store:
         finally:
             os.close(fd)
 
-    def _replace_file(self, target: str, data: bytes) -> None:
-        """Write-fsync-rename. The fsync BEFORE the rename matters: without it a
-        power loss can leave the new name pointing at unwritten bytes — an empty
-        memory with a correct filename, worse than the old content."""
-        tmp = target + f".tmp.{os.getpid()}"
-        with open(tmp, "wb") as f:
+    @staticmethod
+    def _write_synced(path: str, data: bytes) -> None:
+        """Write and fsync. The fsync BEFORE any rename matters: without it a power
+        loss can leave the new name pointing at unwritten bytes — an empty memory with
+        a correct filename, worse than the old content. Three copies of this lived in
+        this file; a durability primitive is exactly the thing that drifts."""
+        with open(path, "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
+
+    def _replace_file(self, target: str, data: bytes) -> None:
+        """Write-fsync-rename through a pid-suffixed sibling; see `_write_synced`.
+
+        Stays an instance method although it uses no state: tests monkeypatch it per
+        instance and rebind the real one with `__get__`, which a staticmethod breaks."""
+        tmp = target + f".tmp.{os.getpid()}"
+        self._write_synced(tmp, data)
         os.replace(tmp, target)
 
     # ── the revision counter ─────────────────────────────────────────────
@@ -927,20 +936,15 @@ class Store:
         files = []
         for i, target in enumerate(sorted(targets)):
             pname = f"payload-{i}"
-            with open(os.path.join(txdir, pname), "wb") as f:
-                f.write(targets[target])
-                f.flush()
-                os.fsync(f.fileno())
+            self._write_synced(os.path.join(txdir, pname), targets[target])
             files.append({"payload": pname, "target": target,
                           "sha256": hashlib.sha256(targets[target]).hexdigest()})
         intent = {"txid": txid, "slug": slug, "op": op, "next_revision": rev, "files": files}
         # The intent is written LAST: its presence, with every hash checking out, is
         # what makes the promise binding. A crash before this point promised nothing
         # (the leftover is quarantined, loudly, with canonical files untouched).
-        with open(os.path.join(txdir, "intent.json"), "w", encoding="utf-8") as f:
-            json.dump(intent, f, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
+        self._write_synced(os.path.join(txdir, "intent.json"),
+                           json.dumps(intent, ensure_ascii=False).encode("utf-8"))
         self._fsync_dir(txdir)
         self._fsync_dir(self._wal_dir)
         self._apply(txdir, intent)
