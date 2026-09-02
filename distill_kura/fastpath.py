@@ -51,7 +51,7 @@ DEFAULT_GATE = 1.0
 # Bumped whenever heads, weights, stop-gram rules or the gate change: the adaptive
 # trigger shadow keys its cache on it, so a cue judged "distinguishable" by an
 # older recognizer is re-judged rather than trusted across an algorithm change.
-RECOGNIZER_VERSION = 1
+RECOGNIZER_VERSION = 2   # 2: 'untestable' (no scoreable gram) is told apart from a sub-gate hit
 BODY_CHARS = 500
 
 _TOKEN = re.compile(
@@ -276,7 +276,11 @@ def _score(idx: _Index, question: str, top: int, gate: float) -> tuple[list[dict
     # The honesty gate: strong AND clear, or nothing. Silence is the correct answer
     # for a paraphrase — that question belongs to the thinker.
     if not ranked:
-        return [], "no-confident-hit"
+        # Nothing voted: every gram of the question is a stop-gram or unknown to the
+        # store. That is not "the store said no" — it is "the store could not be
+        # asked". The two must not share a name (a cue made only of stop-grams
+        # would otherwise read as merely ambiguous).
+        return [], "untestable"
     top1 = ranked[0][1]
     top2 = ranked[1][1] if len(ranked) > 1 else 0.0
     if top1 < gate or (top2 > 0 and top1 / top2 < GATE_RATIO):
@@ -292,7 +296,7 @@ def _score(idx: _Index, question: str, top: int, gate: float) -> tuple[list[dict
 
 def lookup(store: Store, question: str, top: int = 3,
            gate: float = DEFAULT_GATE, cues: bool = True, body: bool = True) -> dict:
-    """→ {"hits": [{slug, score, heads}…], "verdict": "ok"|"no-confident-hit", "ms"}.
+    """→ {"hits": [{slug, score, heads}…], "verdict": "ok"|"no-confident-hit"|"untestable", "ms"}.
 
     Empty hits is the honest answer, never a failure: it means "this question needs
     judgement", and the caller falls through to the thinker.
