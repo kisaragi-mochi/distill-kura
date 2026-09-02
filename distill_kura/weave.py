@@ -48,7 +48,13 @@ than the index text — `layer_of()` reads memory types and body dates too — t
 revision counter is captured beside the hash: a body-only change leaves the index
 byte-identical and slips any hash, but it bumps the revision. The record lives in a
 sidecar (`<cloth>.state.json`), not in the cloth text: the injected map must stay
-byte-stable and free of anything volatile.
+byte-stable and free of anything volatile. A missing or half-written sidecar means the
+cloth cannot be PROVEN current, which is treated exactly as stale: the canonical index
+is always the safe fallback, and one re-weave heals the record. Honesty about revision
+0: with no counter file `revision()` answers 0 — "no counted mutation yet" — so a store
+upgraded mid-life weaves at 0, stays as blind to out-of-band body edits as it was
+before the counter existed, and heals on its first weave after its first counted
+mutation.
 """
 from __future__ import annotations
 
@@ -572,12 +578,9 @@ class Loom:
         raw = self.store.index_text()
         hooks = self._hooks()
         now = time.time()
-        # The hash of the exact index text this cloth is woven from, and the store
-        # revision it was woven at. `persist()` verifies both again, under the store
-        # lock, before writing: a memory poured while the loom is busy on triggers
-        # must not vanish under a cloth that then looks fresher than the index — and
-        # a body or type change (which `layer_of` reads) leaves the index text
-        # byte-identical, so only the revision can see it.
+        # The CAS anchors: the hash of the exact index text this cloth is woven from,
+        # and the store revision it was woven at. `persist()` re-verifies both under
+        # the store lock. Why hash and revision rather than mtime: module docstring.
         stats = {"pinned": 0, "fresh": 0, "trigger": 0, "passthrough": 0, "grouped": 0,
                  "hooks_reused": 0, "hooks_written": 0, "hooks_mechanical": 0,
                  "llm_calls": 0, "source_sha256": _sha256(raw),
@@ -743,12 +746,10 @@ class Loom:
     def persist(self, cloth: Cloth) -> dict:
         """Put an already-woven cloth on disk, atomically, keeping a few generations.
 
-        Compare-and-swap on the SOURCE, never on mtimes: the canonical index is re-read
-        and re-hashed under the store's write lock, and the cloth lands only if the
-        index is still the exact text it was woven from. Without this, a memory poured
-        while the loom was busy on triggers is missing from the cloth, yet the cloth
-        ends up NEWER than the index — an mtime test calls that fresh, and pay-forward
-        bakes the stale map into KV. On a mismatch nothing is written, the old cloth
+        Compare-and-swap on the SOURCE — index hash plus store revision — never on
+        mtimes (why: module docstring). The index is re-read and re-hashed under the
+        store's write lock, and the cloth lands only if the source is still exactly
+        what it was woven from. On a mismatch nothing is written, the old cloth
         stands, and the caller is told distinctly (`refused`); whether to re-weave is
         the caller's decision — retrying here could chase a busy store forever.
 
@@ -810,12 +811,9 @@ class Loom:
         return cloth.stats
 
     def _record_state(self, source_sha: str, cloth_sha: str, revision: int) -> None:
-        """Remember which canonical index the cloth on disk was verified against, which
-        cloth bytes were actually written, and which store revision it all happened at.
-        The stamp proves the PRODUCT too: without `cloth_sha256`, a cloth corrupted or
-        hand-edited while the index sat unchanged would still wear a valid freshness
-        stamp. And the revision sees what no index hash can: a body or type change
-        (read by `layer_of`) that leaves the index text byte-identical."""
+        """Write the sidecar — `{cloth_sha256, source_revision, source_sha256}` —
+        atomically; a no-op when nothing changed. What each of the three fields guards
+        against: module docstring."""
         record = {"cloth_sha256": cloth_sha, "source_revision": revision,
                   "source_sha256": source_sha}
         if self._state() == record:
@@ -848,23 +846,11 @@ class Loom:
         """True when the canonical index has moved on since the cloth was woven —
         or when the cloth itself is no longer the text that was written.
 
-        By HASH, not by mtime. A memory poured while the loom was busy leaves the
-        cloth NEWER than the index — mtime calls exactly that state fresh, which is
-        the one lie pay-forward would then bake into KV. The record `persist()`
-        wrote under the store lock proves both ends: the SOURCE (the current index
-        hashes to `source_sha256`) and the PRODUCT (the cloth on disk hashes to
-        `cloth_sha256`) — a corrupted or hand-edited cloth must not wear a valid
-        freshness stamp. The store REVISION guards what neither hash can see: the
-        weave's real input includes memory types and body dates (`layer_of`), and a
-        body-only change leaves the index text byte-identical while bumping the
-        counter. No record, or half a record, means the cloth cannot be proven
-        current, which is treated the same as stale — the canonical index is always
-        the safe fallback, and one re-weave heals the record.
-
-        Honesty about revision 0: with no counter file, `revision()` answers 0 —
-        "no counted mutation yet" — so a store upgraded mid-life weaves at 0, sits
-        as blind to out-of-band body edits as it was before the counter existed,
-        and heals on its first weave after its first counted mutation."""
+        By HASH, not by mtime (why: module docstring). Checked in order against the
+        record `persist()` wrote under the store lock: the sidecar is present and
+        well-typed, then the store REVISION, then the SOURCE hash (the current index),
+        then the PRODUCT hash (the cloth on disk). A missing or half record is stale,
+        and revision 0 is honest but blind to out-of-band body edits."""
         cloth = self.cloth_on_disk()
         if cloth is None:
             return True
