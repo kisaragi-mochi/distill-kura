@@ -299,12 +299,13 @@ def a_distiller(tmp_path, store):
     return Distiller(reg, store)
 
 
-def stage_and_pour(tmp_path, dis, evidence, classes, slug="newer-way"):
+def stage_and_pour(tmp_path, dis, evidence, classes, slug="newer-way",
+                   title="the newer way", description="what we do instead now"):
     src = tmp_path / "journal.jsonl"
     src.write_text("{}\n", encoding="utf-8")
     dis._current_key = "test:retire"
-    d = {"slug": slug, "kind": "project", "title": "the newer way",
-         "description": "what we do instead now", "body": "BODY",
+    d = {"slug": slug, "kind": "project", "title": title,
+         "description": description, "body": "BODY",
          "evidence": evidence, "classes": classes,
          "tags": [], "tag_basis": {},
          # exactly what the gate leaves behind: `superseded` is proposed and REFUSED
@@ -347,21 +348,80 @@ def test_a_pour_that_names_no_existing_memory_retires_nothing(tmp_path):
     assert not Store.is_faced(hook_of(s, "old-way"))
 
 
-def test_a_pour_with_no_supersede_claim_retires_nothing(tmp_path):
-    """The [USER] quote names the old memory — people talk about their memories all
-    the time. Without the reader's supersede claim, nothing on the map moves."""
+def test_a_quote_that_merely_names_the_old_memory_retires_nothing(tmp_path):
+    """People talk about their memories all the time. Naming one is not retiring it,
+    with or without a `superseded` tag anywhere near the draft."""
     s = a_store(tmp_path, policy="distiller-only")
     dis = a_distiller(tmp_path, s)
-    src = tmp_path / "journal.jsonl"
-    src.write_text("{}\n", encoding="utf-8")
-    dis._current_key = "test:retire"
-    d = {"slug": "newer-way", "kind": "project", "title": "the newer way",
-         "description": "what we do instead now", "body": "BODY",
-         "evidence": [{"class": "USER", "text": "old-way is what got us here, remember"}],
-         "classes": ["USER"], "tags": [], "tag_basis": {}, "tags_refused": {}}
-    dis.stage(d, str(src))
-    assert dis.pour(d["slug"])["ok"]
+    r = stage_and_pour(tmp_path, dis,
+                       [{"class": "USER", "text": "old-way is what got us here, remember"}],
+                       ["USER"])
+    assert r["ok"] and not r.get("retired")
     assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_a_proposed_supersede_plus_a_by_the_way_quote_writes_no_successor(tmp_path):
+    """THE attack. The human retires old-way and then, in a `ところで` clause, starts
+    an unrelated subject; the model wrongly proposes `superseded` on the memory that
+    grew out of that clause. Reading the refused proposal as a signal wrote
+    `退役: …／現在は [[gpu-temperature]]` into canonical — a successor nobody chose."""
+    s = a_store(tmp_path, policy="distiller-only")
+    dis = a_distiller(tmp_path, s)
+    before = next(l for l in s.index_text().splitlines() if "(old-way.md)" in l)
+    r = stage_and_pour(
+        tmp_path, dis,
+        [{"class": "USER",
+          "text": "old-way はもうやめよう。ところで別件で GPU 温度の記録を取ろう"}],
+        ["USER"], slug="gpu-temperature", title="GPU 温度の記録",
+        description="GPU の温度を毎分記録して残す")
+    assert r["ok"] and not r.get("retired")
+    assert next(l for l in s.index_text().splitlines()
+                if "(old-way.md)" in l) == before, "canonical's line must be untouched"
+    assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_a_retirement_without_a_successor_writes_no_face(tmp_path):
+    """`old-way はもうやめる` proves retirement, not succession. A successor-less face
+    is not implemented, so the distiller writes nothing at all rather than guess."""
+    s = a_store(tmp_path, policy="distiller-only")
+    dis = a_distiller(tmp_path, s)
+    r = stage_and_pour(tmp_path, dis,
+                       [{"class": "USER", "text": "old-way はもうやめる"}], ["USER"])
+    assert r["ok"] and not r.get("retired")
+    assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_the_distiller_retires_on_an_explicit_japanese_sentence(tmp_path):
+    s = a_store(tmp_path, policy="distiller-only")
+    dis = a_distiller(tmp_path, s)
+    r = stage_and_pour(tmp_path, dis,
+                       [{"class": "USER", "text": "old-way はやめて、今後は newer-way で行く"}],
+                       ["USER"])
+    assert r["ok"] and r["retired"] == "old-way"
+    assert "／現在は [[newer-way]]" in hook_of(s, "old-way") or \
+           "[[newer-way]]" in hook_of(s, "old-way")
+
+
+def test_a_transition_split_across_two_quotes_retires_nothing(tmp_path):
+    """One quote names the old memory, another names the new one. Stitching them
+    would let two unrelated sentences become a ruling neither of them made."""
+    s = a_store(tmp_path, policy="distiller-only")
+    dis = a_distiller(tmp_path, s)
+    r = stage_and_pour(tmp_path, dis,
+                       [{"class": "USER", "text": "old-way はもうやめる"},
+                        {"class": "USER", "text": "今後は newer-way で行く"}], ["USER"])
+    assert r["ok"] and not r.get("retired")
+    assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_the_pour_prompt_still_demands_a_verified_transition(tmp_path):
+    """The doctrine the writer is shown is unchanged by this fix: the face is worn
+    only when the transition is VERIFIED from the human's own words."""
+    from distill_kura.distill import prompts
+
+    p = prompts.INDEX_CRAFT
+    assert "Retired things wear it" in p
+    assert "VERIFIED" in p and "never a guess from prose" in p
 
 
 def test_the_drain_counts_the_transition_in_its_metrics_row(tmp_path):

@@ -36,7 +36,7 @@ from ..recall import recall as kura_recall
 from ..tokens import estimate
 from ..registry import Registry
 from ..store import ANNOTATION_KEYS, FROZEN, Store, normalize_tags
-from . import prompts
+from . import prompts, transition
 from .gate import (attributes_to_human, composed_number_violations,
                    final_surface_violations, gate, norm, salvage, verify_tags)
 from .seeds import Seeds
@@ -837,41 +837,43 @@ class Distiller:
     # ── the retirement face: a poured memory can retire the one it replaces ──
     #
     # The gate refuses `superseded` as a TAG — it is reserved for a forgetting pass
-    # nobody has designed, and a model may not assign it. That refusal is recorded,
-    # and the record is the signal: the reader saw a supersede and was not allowed to
-    # act on it. What may act on it is evidence — a surviving [USER] quote that names
-    # a memory the store actually holds. Both halves must be there, and `Store.retire`
-    # re-verifies the second one from the manifest itself; nothing here is trusted.
-    @staticmethod
-    def _claims_supersede(man: dict) -> bool:
-        return "superseded" in (list(man.get("tags") or [])
-                                + list((man.get("tags_refused") or {}).keys()))
+    # nobody has designed, and a model may not assign it. That refusal is NOT a signal
+    # and is not read here: "the model proposed it" is not "the human said it", and
+    # treating the gate's correct refusal as evidence resurrected exactly what the
+    # gate threw away. The only trigger is `find_transition`: ONE surviving [USER]
+    # quote that retires a memory this store holds AND names this new one as its
+    # successor. `Store.retire` runs the same relation again; nothing here is trusted.
+    def _retirement_target(self, man: dict, new_slug: str) -> dict | None:
+        """The proof that a [USER] quote in this manifest retires an existing memory
+        in favour of `new_slug`, or None.
 
-    def _retirement_target(self, man: dict, new_slug: str) -> str | None:
-        """The memory a [USER] quote in this manifest names as the retired one.
-
-        The longest match wins, so `k3-plan` is never retired because a quote happened
-        to mention `k3`. No match, or the new memory itself, is no retirement — the
-        distiller stays silent rather than guessing which memory the human meant."""
-        quotes = " ".join(str(q.get("text") or "") for q in (man.get("quotes") or [])
-                          if isinstance(q, dict) and q.get("class") == "USER")
+        Old is resolved by exact slug or exact index title only, longest name first,
+        so `k3-plan` is never retired because a quote happened to mention `k3`. No
+        proof is no retirement — the distiller stays silent rather than guessing."""
+        quotes = [q for q in (man.get("quotes") or [])
+                  if isinstance(q, dict) and q.get("class") == "USER"]
         if not quotes:
             return None
-        low = quotes.lower()
-        names = [(sl, sl) for sl in self.store.slugs()]
-        names += [(sl, t) for t, sl in self.store.titles().items()]
-        hits = [(len(name), sl) for sl, name in names
-                if sl != new_slug and name and name.lower() in low]
-        return max(hits)[1] if hits else None
+        titles = {sl: t for t, sl in self.store.titles().items()}
+        new = {"slug": new_slug, "title": titles.get(new_slug, "")}
+        cands = sorted(((len(titles.get(sl, "") or sl), sl) for sl in self.store.slugs()
+                        if sl != new_slug), reverse=True)
+        for _, sl in cands:
+            r = transition.find_transition(quotes, {"slug": sl, "title": titles.get(sl, "")},
+                                           new)
+            if r and r["kind"] == "superseded":
+                return r
+        return None
 
     def _retire_if_superseded(self, new_slug: str, hexd: str) -> dict | None:
-        """→ the retirement result, or None when nothing was claimed."""
+        """→ the retirement result, or None when nothing was proven."""
         man = self.store.load_manifest_verified(hexd)
-        if not man or not self._claims_supersede(man):
+        if not man:
             return None
-        old = self._retirement_target(man, new_slug)
-        if not old:
+        proof = self._retirement_target(man, new_slug)
+        if not proof:
             return None
+        old = proof["old"]
         r = self.store.retire(old, new_slug, hexd)
         if r.get("ok") and r.get("changed"):
             _log(f"  ⌛ retired {old} — superseded by {new_slug}")
