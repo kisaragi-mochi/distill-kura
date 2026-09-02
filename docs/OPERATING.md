@@ -251,7 +251,19 @@ kura distill tidy   # 0 = repaired a line, 2 = index is clean
 kura prefill        # 0 = a current cloth was served, 2 = no cloth or it is stale
 kura pay-forward    # 1 = ANY mouth failed or was busy — retry, even if others worked;
                     # 0 = worked, whole fleet covered; 2 = every mouth VERIFIED fresh
+kura tend --once    # 0 = the requested work completed successfully
+                    # 1 = work was attempted or required and did not complete — retry
+                    # 2 = honestly nothing to do
 ```
+
+`tend --once` prints one JSON line with the outcome: `error` is `null` on 0 and 2, and
+on 1 is one of `track-failed` (the track ran and reported failure), `yielded` (the
+human came back and the track was stopped), `child-error` (the child died badly, e.g.
+on a signal) or `timeout` (`--timeout`, default 3600 s, passed with the track still
+running). All four carry `"retryable": true`. A timeout used to exit 0 — a scheduler
+read "started something, deadline expired" as done and never retried. When `--once`
+returns, the track it started is stopped (TERM, short grace, KILL) and reaped: no
+child of that run is left holding the seat.
 
 **Exit 2 means "there was nothing to do".** A scheduler must distinguish it from
 success. A loop that treats "found nothing" as "did work" spins, and the spinning
