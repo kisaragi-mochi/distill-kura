@@ -91,6 +91,12 @@ wearing a re-bound number, an invented marker, a dropped negation or a reversed 
 
 ### Pay-forward measured (M5)
 
+*Measured on the house mouth (2026-09-02, a 320B CPU model, 17.6k-token map, 217-token
+trail): cold 950 s; restored spine + trail 16.4 s (prompt_n 190); trail changed 2.1 s
+(35); last line of the map changed 22.5 s (242); first line changed 956 s (17,629) —
+the volatile-header proof in one row; warm repeat 16.0 s. The spine/trail split stands;
+no partial-KV work is warranted by these numbers.*
+
 `kura bench payforward --mouth NAME` makes a `[[payforward.mouths]]` entry price its
 own warmth, condition by condition, reading `timings.prompt_n` back from each reply —
 the mouth's own count of what it reprocessed, the only witness that counts. Six
