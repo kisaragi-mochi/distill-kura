@@ -22,6 +22,8 @@ import json
 import os
 import re
 import subprocess
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -400,13 +402,13 @@ class DshSource(Source):
 
 # ── Classified evidence JSONL (append-only → byte watermark) ───────────────
 
-class EvidenceJsonlSource(Source):
-    # In-memory scan/skip cursors for irreversibly oversized lines only. Not
-    # persisted — a restart may rescan bounded chunks but must not skip valid
-    # suffixes. Keyed by (abspath, line_start, file_size); size change clears.
-    _discard_scan: dict[tuple[str, int, int], int] = {}
-    _discard_done: dict[tuple[str, int, int], int] = {}
+@dataclass
+class _ScanCursor:
+    pos: int
+    anchor: bytes
 
+
+class EvidenceJsonlSource(Source):
     """`*.evidence.jsonl` — one versioned, class-tagged event per line.
 
     Writers append complete JSON objects; a crash may leave a partial final line.
@@ -431,6 +433,16 @@ class EvidenceJsonlSource(Source):
     digests fit.
     """
     name = "evidence"
+    _ANCHOR_LEN = 16
+    # ponytail: raise if many concurrent unterminated huge tails exceed this cap;
+    # eviction only restarts an unreserved progressive scan, never a reserved sip.
+    _SCAN_STATE_CAP = 256
+
+    def __init__(self) -> None:
+        self._scan_lock = threading.Lock()
+        self._scan_cursors: OrderedDict[
+            tuple[str, int, int, int], _ScanCursor
+        ] = OrderedDict()
 
     def matches(self, path: str) -> bool:
         return path.endswith(".evidence.jsonl")
@@ -447,58 +459,108 @@ class EvidenceJsonlSource(Source):
         if report is not None:
             report.note(reason, at, size)
 
-    @classmethod
-    def _discard_key(cls, path: str, line_start: int, file_size: int) -> tuple[str, int, int]:
-        return (os.path.abspath(path), line_start, file_size)
+    @staticmethod
+    def _scan_key(path: str, line_start: int, st_dev: int, st_ino: int) -> tuple[str, int, int, int]:
+        return (os.path.abspath(path), line_start, st_dev, st_ino)
 
-    @classmethod
-    def _discard_invalidate_path(cls, path: str, file_size: int) -> None:
+    def _anchor_ok(self, h, line_start: int, anchor: bytes) -> bool:
+        if not anchor:
+            return True
+        here = h.tell()
+        h.seek(line_start)
+        ok = h.read(len(anchor)) == anchor
+        h.seek(here)
+        return ok
+
+    def _scan_put(self, key: tuple[str, int, int, int], entry: _ScanCursor) -> None:
+        abspath, line_start, st_dev, st_ino = key
+        stale = [k for k in self._scan_cursors
+                 if k[0] == abspath and k[1] == line_start and k[2:] != (st_dev, st_ino)]
+        for k in stale:
+            self._scan_cursors.pop(k, None)
+        if key in self._scan_cursors:
+            self._scan_cursors.move_to_end(key)
+        self._scan_cursors[key] = entry
+        while len(self._scan_cursors) > self._SCAN_STATE_CAP:
+            self._scan_cursors.popitem(last=False)
+
+    def _scan_get(self, path: str, line_start: int) -> _ScanCursor | None:
+        st = os.stat(path)
+        key = self._scan_key(path, line_start, st.st_dev, st.st_ino)
         abspath = os.path.abspath(path)
-        for store in (cls._discard_scan, cls._discard_done):
-            for key in [k for k in store if k[0] == abspath and k[2] != file_size]:
-                store.pop(key, None)
+        with self._scan_lock:
+            stale = [k for k in self._scan_cursors
+                     if k[0] == abspath and k[1] == line_start
+                     and k[2:] != (st.st_dev, st.st_ino)]
+            for k in stale:
+                self._scan_cursors.pop(k, None)
+            entry = self._scan_cursors.get(key)
+            if entry is None:
+                return None
+            if st.st_size < entry.pos:
+                self._scan_cursors.pop(key, None)
+                return None
+            self._scan_cursors.move_to_end(key)
+            return entry
 
-    @classmethod
-    def _discard_clear(cls, key: tuple[str, int, int]) -> None:
-        cls._discard_scan.pop(key, None)
-        cls._discard_done.pop(key, None)
+    def _scan_clear(self, path: str, line_start: int) -> None:
+        st = os.stat(path)
+        key = self._scan_key(path, line_start, st.st_dev, st.st_ino)
+        with self._scan_lock:
+            self._scan_cursors.pop(key, None)
 
-    def _scan_oversized_discard(
+    def _scan_bounded_line(self, h, line_start: int, visible_end: int) -> str:
+        """Within a reservation: scan the oversized line through its newline once."""
+        while h.tell() < visible_end:
+            pos = h.tell()
+            limit = min(MAX_LINE, visible_end - pos)
+            if limit <= 0:
+                break
+            chunk = h.readline(limit)
+            if not chunk:
+                h.seek(line_start)
+                return "partial"
+            if chunk.endswith(b"\n"):
+                return "oversized"
+        h.seek(line_start)
+        return "partial"
+
+    def _scan_progressive(
         self,
         h,
         path: str,
         line_start: int,
-        key: tuple[str, int, int],
         visible_end: int,
+        anchor: bytes,
     ) -> str:
-        """Scan at most SCAN_LIMIT bytes of one irreversibly oversized line.
-
-        Never parse from the middle — only hunt for a newline to skip or stop.
-        Public watermark stays at line_start until the line is consumed or EOF.
-        """
+        """Unreserved: scan at most SCAN_LIMIT bytes; watermark stays at line_start."""
+        st = os.stat(path)
+        key = self._scan_key(path, line_start, st.st_dev, st.st_ino)
         scanned = 0
         while scanned < SCAN_LIMIT:
             pos = h.tell()
             if pos >= visible_end:
-                self._discard_scan[key] = pos
+                with self._scan_lock:
+                    self._scan_put(key, _ScanCursor(pos, anchor))
                 h.seek(line_start)
                 return "partial"
             limit = min(MAX_LINE, visible_end - pos)
             if limit <= 0:
                 h.seek(line_start)
                 return "partial"
-            more = h.readline(limit)
-            if not more:
-                self._discard_scan[key] = h.tell()
+            chunk = h.readline(limit)
+            if not chunk:
+                with self._scan_lock:
+                    self._scan_put(key, _ScanCursor(h.tell(), anchor))
                 h.seek(line_start)
                 return "partial"
-            scanned += len(more)
-            if more.endswith(b"\n"):
-                line_end = h.tell()
-                self._discard_scan.pop(key, None)
-                self._discard_done[key] = line_end
+            scanned += len(chunk)
+            if chunk.endswith(b"\n"):
+                with self._scan_lock:
+                    self._scan_cursors.pop(key, None)
                 return "oversized"
-        self._discard_scan[key] = h.tell()
+        with self._scan_lock:
+            self._scan_put(key, _ScanCursor(h.tell(), anchor))
         h.seek(line_start)
         return "partial"
 
@@ -518,23 +580,16 @@ class EvidenceJsonlSource(Source):
             return None, "eof"
         file_size = os.path.getsize(path)
         visible_end = bound_end if bound_end is not None else file_size
-        self._discard_invalidate_path(path, file_size)
-        key = self._discard_key(path, line_start, file_size)
 
-        done_end = self._discard_done.get(key)
-        if done_end is not None:
-            if done_end > visible_end:
+        if bound_end is None:
+            entry = self._scan_get(path, line_start)
+            if entry is not None:
+                if self._anchor_ok(h, line_start, entry.anchor):
+                    h.seek(entry.pos)
+                    return None, self._scan_progressive(
+                        h, path, line_start, visible_end, entry.anchor)
+                self._scan_clear(path, line_start)
                 h.seek(line_start)
-                return None, "partial"
-            h.seek(done_end)
-            self._discard_clear(key)
-            return None, "oversized"
-
-        scan_cursor = self._discard_scan.get(key)
-        if scan_cursor is not None:
-            h.seek(scan_cursor)
-            return None, self._scan_oversized_discard(
-                h, path, line_start, key, visible_end)
 
         first_limit = MAX_LINE + 1
         if bound_end is not None:
@@ -550,8 +605,14 @@ class EvidenceJsonlSource(Source):
             return chunk, "ok"
         if len(chunk) <= MAX_LINE:
             return chunk, "partial"
-        return None, self._scan_oversized_discard(
-            h, path, line_start, key, visible_end)
+        here = h.tell()
+        h.seek(line_start)
+        anchor = h.read(self._ANCHOR_LEN)
+        h.seek(here)
+        if bound_end is not None:
+            return None, self._scan_bounded_line(h, line_start, visible_end)
+        return None, self._scan_progressive(
+            h, path, line_start, visible_end, anchor)
 
     @staticmethod
     def _parse(raw: bytes) -> tuple[str | None, Segment | None]:

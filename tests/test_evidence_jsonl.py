@@ -17,6 +17,7 @@ from distill_kura.distill.sources import (                  # noqa: E402
     MAX_SEG,
     MAX_TOOL,
     SCAN_LIMIT,
+    SOURCES,
     ClaudeCodeSource,
     EvidenceJsonlSource,
     IntakeReport,
@@ -107,16 +108,23 @@ def _sip_past_huge_prefix(src, path, start, limit, *, bound_end=None, max_rounds
     raise AssertionError("sip stuck scanning an oversized prefix")
 
 
-def _clear_discard_state():
-    EvidenceJsonlSource._discard_scan.clear()
-    EvidenceJsonlSource._discard_done.clear()
+def _clear_scan_state(*sources: EvidenceJsonlSource) -> None:
+    seen: set[int] = set()
+    for src in sources:
+        sid = id(src)
+        if sid in seen:
+            continue
+        seen.add(sid)
+        with src._scan_lock:
+            src._scan_cursors.clear()
 
 
 @pytest.fixture(autouse=True)
-def _evidence_discard_state_isolation():
-    _clear_discard_state()
+def _evidence_scan_state_isolation():
+    singleton = SOURCES.get("evidence")
+    _clear_scan_state(EvidenceJsonlSource(), singleton if isinstance(singleton, EvidenceJsonlSource) else EvidenceJsonlSource())
     yield
-    _clear_discard_state()
+    _clear_scan_state(EvidenceJsonlSource(), singleton if isinstance(singleton, EvidenceJsonlSource) else EvidenceJsonlSource())
 
 # ── classification ──────────────────────────────────────────────────────────
 
@@ -850,18 +858,144 @@ def test_completed_oversized_past_scan_limit_respects_bound_end(tmp_path):
 
 
 def test_discard_scan_state_resets_on_truncation(tmp_path):
-    """Truncation/replacement clears cached scan cursors keyed on stale file size."""
+    """Truncation/replacement clears cached scan cursors for that inode."""
     p = tmp_path / "trunc.evidence.jsonl"
     old_size = SCAN_LIMIT + 5000
     p.write_bytes(b"x" * old_size)
     src = EvidenceJsonlSource()
     _, pos1 = src.sip(str(p), 0, 10_000)
     assert pos1 == 0
-    stale_key = EvidenceJsonlSource._discard_key(str(p), 0, old_size)
-    assert stale_key in EvidenceJsonlSource._discard_scan
+    st = p.stat()
+    stale_key = EvidenceJsonlSource._scan_key(str(p), 0, st.st_dev, st.st_ino)
+    with src._scan_lock:
+        assert stale_key in src._scan_cursors
     good = (json.dumps(_event("USER", "fresh", event_id="f")) + "\n").encode()
     p.write_bytes(good)
     segs, end = src.sip(str(p), 0, 10_000)
-    assert stale_key not in EvidenceJsonlSource._discard_scan
+    with src._scan_lock:
+        assert stale_key not in src._scan_cursors
     assert len(segs) == 1 and segs[0].text == "fresh"
     assert end == len(good)
+
+
+def test_progressive_cursor_survives_append_growth(tmp_path, monkeypatch):
+    """Append growth must not invalidate the unreserved progressive scan cursor."""
+    p = tmp_path / "grow.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 50_000))
+    consumed = _track_readline_bytes(p, monkeypatch)
+    src = EvidenceJsonlSource()
+    _, pos1 = src.sip(str(p), 0, 10_000)
+    assert pos1 == 0
+    first_pass = consumed[-1]
+    with open(p, "ab") as f:
+        f.write(b"y" * 1000)
+    _, pos2 = src.sip(str(p), 0, 10_000)
+    assert pos2 == 0
+    second_pass = consumed[-1]
+    assert second_pass <= _PER_RESUME_BYTE_CAP
+    assert first_pass > second_pass
+
+
+def test_claim_append_one_byte_reserved_sip_returns_valid_evidence(tmp_path):
+    """claim_bound past a huge prefix, append one byte, sip(bound_end) must not skip."""
+    p = tmp_path / "claim-append.evidence.jsonl"
+    huge = b"x" * (2 * SCAN_LIMIT + 50_000) + b"\n"
+    good = (json.dumps(_event("USER", _blob("reserved"), event_id="ok")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(good)
+    src = EvidenceJsonlSource()
+    marks = Watermarks(str(tmp_path / "marks.json"))
+    claimed = None
+    for _ in range(30):
+        result = marks.claim([str(p)], 4000, MIN_DRINK)
+        if result is not None:
+            claimed = result
+            break
+        src.sip(str(p), 0, 4000)
+    assert claimed is not None
+    path, start, reserved, _ = claimed
+    assert start == 0
+    with open(p, "ab") as f:
+        f.write(b"z")
+    segs, sip_end = src.sip(path, start, 4000, bound_end=reserved)
+    assert len(segs) == 1 and segs[0].text.startswith("reserved")
+    assert sip_end == reserved == p.stat().st_size - 1
+    assert marks.read()[src.key(str(p))] == reserved
+
+
+def test_inode_replacement_resets_scan_cursor(tmp_path):
+    """A new file at the same path (new inode) must not inherit a stale cursor."""
+    p = tmp_path / "replace.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 5000))
+    src = EvidenceJsonlSource()
+    src.sip(str(p), 0, 10_000)
+    st_old = p.stat()
+    key_old = EvidenceJsonlSource._scan_key(str(p), 0, st_old.st_dev, st_old.st_ino)
+    with src._scan_lock:
+        assert key_old in src._scan_cursors
+    good = (json.dumps(_event("USER", "replaced", event_id="r")) + "\n").encode()
+    p.unlink()
+    p.write_bytes(good)
+    st_new = p.stat()
+    key_new = EvidenceJsonlSource._scan_key(str(p), 0, st_new.st_dev, st_new.st_ino)
+    assert key_new != key_old
+    segs, end = src.sip(str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "replaced"
+    assert end == len(good)
+    with src._scan_lock:
+        assert key_old not in src._scan_cursors
+
+
+def test_same_inode_rewrite_resets_scan_cursor(tmp_path):
+    """Same-inode content rewrite at line_start clears a saved progressive cursor."""
+    p = tmp_path / "rewrite.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 5000))
+    src = EvidenceJsonlSource()
+    src.sip(str(p), 0, 10_000)
+    st = p.stat()
+    key = EvidenceJsonlSource._scan_key(str(p), 0, st.st_dev, st.st_ino)
+    with src._scan_lock:
+        assert key in src._scan_cursors
+    good = (json.dumps(_event("USER", "rewritten", event_id="w")) + "\n").encode()
+    p.write_bytes(good)
+    segs, end = src.sip(str(p), 0, 10_000)
+    with src._scan_lock:
+        assert key not in src._scan_cursors
+    assert len(segs) == 1 and segs[0].text == "rewritten"
+    assert end == len(good)
+
+
+def test_scan_state_is_instance_local(tmp_path):
+    """Two instances do not share progressive scan cursors."""
+    p = tmp_path / "local.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 5000))
+    a = EvidenceJsonlSource()
+    b = EvidenceJsonlSource()
+    a.sip(str(p), 0, 10_000)
+    with a._scan_lock:
+        assert a._scan_cursors
+    with b._scan_lock:
+        assert not b._scan_cursors
+
+
+def test_scan_state_cap_evicts_without_breaking_reserved_sip(tmp_path):
+    """Eviction restarts unreserved scans but reserved sips stay correct."""
+    src = EvidenceJsonlSource()
+    src._SCAN_STATE_CAP = 2
+    paths = []
+    for i in range(3):
+        p = tmp_path / f"cap{i}.evidence.jsonl"
+        p.write_bytes(b"x" * (SCAN_LIMIT + 1000))
+        paths.append(p)
+        src.sip(str(p), 0, 10_000)
+    with src._scan_lock:
+        assert len(src._scan_cursors) <= 2
+    huge = b"x" * (2 * SCAN_LIMIT + 10_000) + b"\n"
+    good = (json.dumps(_event("USER", "after-cap", event_id="c")) + "\n").encode()
+    p = tmp_path / "reserved.evidence.jsonl"
+    p.write_bytes(huge + good)
+    bound_end = len(huge) + len(good)
+    segs, end = src.sip(str(p), 0, 10_000, bound_end=bound_end)
+    assert len(segs) == 1 and segs[0].text == "after-cap"
+    assert end == bound_end
