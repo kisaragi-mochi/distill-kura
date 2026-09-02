@@ -966,6 +966,72 @@ def test_same_inode_rewrite_resets_scan_cursor(tmp_path):
     assert end == len(good)
 
 
+def test_same_size_same_head_rewrite_resets_scan_cursor(tmp_path):
+    """Same inode, size, and head anchor: generation change must not reuse cursor."""
+    p = tmp_path / "same-size.evidence.jsonl"
+    old_size = SCAN_LIMIT + 5000
+    p.write_bytes(b"x" * old_size)
+    src = EvidenceJsonlSource()
+    segs1, pos1 = src.sip(str(p), 0, 10_000)
+    assert segs1 == [] and pos1 == 0
+    st = p.stat()
+    key = EvidenceJsonlSource._scan_key(str(p), 0, st.st_dev, st.st_ino)
+    with src._scan_lock:
+        assert key in src._scan_cursors
+    good = (json.dumps(_event("USER", "found", event_id="f")) + "\n").encode()
+    huge = b"x" * (old_size - len(good) - 1) + b"\n"
+    assert len(huge) + len(good) == old_size
+    assert huge[:16] == b"x" * 16
+    p.write_bytes(huge + good)
+    segs2, end = src.sip(str(p), 0, 10_000)
+    with src._scan_lock:
+        assert key not in src._scan_cursors
+    assert len(segs2) == 1 and segs2[0].text == "found"
+    assert end == old_size
+
+
+def test_same_size_rewrite_resets_even_when_mtime_restored(tmp_path):
+    """Restoring mtime cannot hide a same-size rewrite; ctime generation still resets."""
+    p = tmp_path / "mtime-restore.evidence.jsonl"
+    old_size = SCAN_LIMIT + 5000
+    p.write_bytes(b"x" * old_size)
+    src = EvidenceJsonlSource()
+    src.sip(str(p), 0, 10_000)
+    old_st = p.stat()
+    good = (json.dumps(_event("USER", "ctime", event_id="c")) + "\n").encode()
+    huge = b"x" * (old_size - len(good) - 1) + b"\n"
+    p.write_bytes(huge + good)
+    os.utime(p, ns=(old_st.st_atime_ns, old_st.st_mtime_ns))
+    assert p.stat().st_mtime_ns == old_st.st_mtime_ns
+    assert p.stat().st_ctime_ns != old_st.st_ctime_ns
+    segs, end = src.sip(str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "ctime"
+    assert end == old_size
+
+
+def test_append_growth_near_cursor_mutation_resets_scan_cursor(tmp_path, monkeypatch):
+    """Growth that mutates bytes near the saved cursor must not reuse it."""
+    p = tmp_path / "mutate.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 50_000))
+    consumed = _track_readline_bytes(p, monkeypatch)
+    src = EvidenceJsonlSource()
+    src.sip(str(p), 0, 10_000)
+    first_pass = consumed[-1]
+    with src._scan_lock:
+        entry = next(iter(src._scan_cursors.values()))
+        cursor_pos = entry.pos
+    with open(p, "r+b") as f:
+        f.seek(cursor_pos - 1)
+        f.write(b"y")
+        f.seek(0, 2)
+        f.write(b"z" * 1000)
+    _, pos = src.sip(str(p), 0, 10_000)
+    assert pos == 0
+    second_pass = consumed[-1]
+    # Reset restarts detection + progressive scan; resume would read far less.
+    assert second_pass >= first_pass - (MAX_LINE + 2)
+
+
 def test_scan_state_is_instance_local(tmp_path):
     """Two instances do not share progressive scan cursors."""
     p = tmp_path / "local.evidence.jsonl"

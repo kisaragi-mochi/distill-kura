@@ -406,6 +406,10 @@ class DshSource(Source):
 class _ScanCursor:
     pos: int
     anchor: bytes
+    cursor_anchor: bytes
+    file_size: int
+    mtime_ns: int
+    ctime_ns: int
 
 
 class EvidenceJsonlSource(Source):
@@ -414,6 +418,13 @@ class EvidenceJsonlSource(Source):
     Writers append complete JSON objects; a crash may leave a partial final line.
     The watermark stops before that line so the next append can finish it. Invalid
     lines are dropped, never reclassified, and counted on an IntakeReport.
+
+    Progressive oversized-line discard assumes an append-only source contract.
+    Cached scan cursors are fail-closed defence against observable truncation,
+    inode/path replacement, same-size rewrites (via ``st_mtime_ns`` /
+    ``st_ctime_ns`` generation), and in-place mutation near a saved cursor
+    (via head and cursor anchors). A malicious rewrite that grows the file and
+    preserves every checked anchor is not claimed detectable here.
 
     Minimum shape (schema_version 1)::
 
@@ -472,6 +483,41 @@ class EvidenceJsonlSource(Source):
         h.seek(here)
         return ok
 
+    def _read_cursor_anchor(self, h, line_start: int, pos: int) -> bytes:
+        if pos <= line_start:
+            return b""
+        start = max(line_start, pos - self._ANCHOR_LEN)
+        here = h.tell()
+        h.seek(start)
+        anchor = h.read(pos - start)
+        h.seek(here)
+        return anchor
+
+    def _cursor_anchor_ok(
+        self, h, line_start: int, pos: int, cursor_anchor: bytes,
+    ) -> bool:
+        if not cursor_anchor:
+            return pos <= line_start
+        start = max(line_start, pos - len(cursor_anchor))
+        here = h.tell()
+        h.seek(start)
+        ok = h.read(len(cursor_anchor)) == cursor_anchor
+        h.seek(here)
+        return ok
+
+    def _make_scan_cursor(
+        self, h, path: str, line_start: int, pos: int, head_anchor: bytes,
+    ) -> _ScanCursor:
+        st = os.stat(path)
+        return _ScanCursor(
+            pos=pos,
+            anchor=head_anchor,
+            cursor_anchor=self._read_cursor_anchor(h, line_start, pos),
+            file_size=st.st_size,
+            mtime_ns=st.st_mtime_ns,
+            ctime_ns=st.st_ctime_ns,
+        )
+
     def _scan_put(self, key: tuple[str, int, int, int], entry: _ScanCursor) -> None:
         abspath, line_start, st_dev, st_ino = key
         stale = [k for k in self._scan_cursors
@@ -497,7 +543,12 @@ class EvidenceJsonlSource(Source):
             entry = self._scan_cursors.get(key)
             if entry is None:
                 return None
-            if st.st_size < entry.pos:
+            if st.st_size < entry.file_size or st.st_size < entry.pos:
+                self._scan_cursors.pop(key, None)
+                return None
+            if (st.st_size == entry.file_size
+                    and (st.st_mtime_ns != entry.mtime_ns
+                         or st.st_ctime_ns != entry.ctime_ns)):
                 self._scan_cursors.pop(key, None)
                 return None
             self._scan_cursors.move_to_end(key)
@@ -541,7 +592,8 @@ class EvidenceJsonlSource(Source):
             pos = h.tell()
             if pos >= visible_end:
                 with self._scan_lock:
-                    self._scan_put(key, _ScanCursor(pos, anchor))
+                    self._scan_put(
+                        key, self._make_scan_cursor(h, path, line_start, pos, anchor))
                 h.seek(line_start)
                 return "partial"
             limit = min(MAX_LINE, visible_end - pos)
@@ -551,7 +603,9 @@ class EvidenceJsonlSource(Source):
             chunk = h.readline(limit)
             if not chunk:
                 with self._scan_lock:
-                    self._scan_put(key, _ScanCursor(h.tell(), anchor))
+                    self._scan_put(
+                        key, self._make_scan_cursor(
+                            h, path, line_start, h.tell(), anchor))
                 h.seek(line_start)
                 return "partial"
             scanned += len(chunk)
@@ -560,7 +614,8 @@ class EvidenceJsonlSource(Source):
                     self._scan_cursors.pop(key, None)
                 return "oversized"
         with self._scan_lock:
-            self._scan_put(key, _ScanCursor(h.tell(), anchor))
+            self._scan_put(
+                key, self._make_scan_cursor(h, path, line_start, h.tell(), anchor))
         h.seek(line_start)
         return "partial"
 
@@ -584,7 +639,12 @@ class EvidenceJsonlSource(Source):
         if bound_end is None:
             entry = self._scan_get(path, line_start)
             if entry is not None:
-                if self._anchor_ok(h, line_start, entry.anchor):
+                st = os.stat(path)
+                head_ok = self._anchor_ok(h, line_start, entry.anchor)
+                if head_ok and (
+                        st.st_size == entry.file_size
+                        or self._cursor_anchor_ok(
+                            h, line_start, entry.pos, entry.cursor_anchor)):
                     h.seek(entry.pos)
                     return None, self._scan_progressive(
                         h, path, line_start, visible_end, entry.anchor)
