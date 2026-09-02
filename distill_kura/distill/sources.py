@@ -481,7 +481,29 @@ class EvidenceJsonlSource(Source):
             total += len(more)
             if more.endswith(b"\n"):
                 return None, "oversized"
-        return None, "partial"
+        # Bounded scan exhausted without a newline. A completed oversized JSONL
+        # record still starts with '{'; scan once to its newline so the invalid
+        # line is skipped instead of returning partial forever. Garbage tails and
+        # bound_end cuts stay capped at SCAN_LIMIT per attempt.
+        if not chunk.startswith(b"{"):
+            return None, "partial"
+        while True:
+            pos = h.tell()
+            if bound_end is not None and pos >= bound_end:
+                h.seek(line_start)
+                return None, "partial"
+            limit = MAX_LINE
+            if bound_end is not None:
+                limit = min(limit, max(0, bound_end - pos))
+                if limit <= 0:
+                    h.seek(line_start)
+                    return None, "partial"
+            more = h.readline(limit)
+            if not more:
+                h.seek(line_start)
+                return None, "partial"
+            if more.endswith(b"\n"):
+                return None, "oversized"
 
     @staticmethod
     def _parse(raw: bytes) -> tuple[str | None, Segment | None]:

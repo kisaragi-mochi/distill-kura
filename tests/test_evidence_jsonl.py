@@ -14,6 +14,7 @@ from distill_kura.distill.sources import (                  # noqa: E402
     MAX_LINE,
     MAX_SEG,
     MAX_TOOL,
+    SCAN_LIMIT,
     ClaudeCodeSource,
     EvidenceJsonlSource,
     IntakeReport,
@@ -670,3 +671,83 @@ def test_completed_oversized_line_then_valid_event(tmp_path):
     segs, end = EvidenceJsonlSource().sip(str(p), 0, 10_000)
     assert len(segs) == 1 and segs[0].text == "after"
     assert end == p.stat().st_size
+
+def test_unterminated_tail_larger_than_scan_limit_stays_bounded(tmp_path, monkeypatch):
+    """Garbage tail with no newline: capped per attempt, watermark unchanged."""
+    p = tmp_path / "tail.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 50_000))
+    consumed: list[int] = []
+    real_open = open
+
+    def open_wrapper(path, mode="r", *args, **kwargs):
+        fh = real_open(path, mode, *args, **kwargs)
+        if os.path.abspath(str(path)) == os.path.abspath(str(p)) and "b" in mode:
+            total = 0
+            base_readline = fh.readline
+
+            def readline(size=-1):
+                nonlocal total
+                chunk = base_readline(size)
+                if chunk:
+                    total += len(chunk)
+                return chunk
+
+            fh.readline = readline
+            base_close = fh.close
+
+            def close():
+                consumed.append(total)
+                return base_close()
+
+            fh.close = close
+        return fh
+
+    monkeypatch.setattr("builtins.open", open_wrapper)
+    src = EvidenceJsonlSource()
+    segs, pos = src.sip(str(p), 0, 10_000)
+    assert segs == [] and pos == 0
+    assert consumed and consumed[0] <= SCAN_LIMIT + MAX_LINE
+    segs2, pos2 = src.sip(str(p), 0, 10_000)
+    assert segs2 == [] and pos2 == 0
+    assert len(consumed) == 2 and consumed[1] <= SCAN_LIMIT + MAX_LINE
+
+
+def test_completed_oversized_line_past_scan_limit_then_valid_event(tmp_path):
+    """Completed invalid line longer than SCAN_LIMIT must not block later evidence."""
+    p = tmp_path / "past-scan.evidence.jsonl"
+    prefix = (b'{"schema_version": 1, "event_id": "e", "session_id": "s", "turn_id": "t", '
+              b'"class": "USER", "text": "')
+    suffix = b'", "timestamp": "2026-08-27T00:00:00Z"}\n'
+    text_len = SCAN_LIMIT - len(prefix) - len(suffix) + 50_000
+    huge = prefix + (b"A" * text_len) + suffix
+    assert len(huge) > SCAN_LIMIT and huge.endswith(b"\n")
+    good = (json.dumps(_event("USER", "after", event_id="ok")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(good)
+    segs, end = EvidenceJsonlSource().sip(str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "after"
+    assert end == p.stat().st_size
+
+
+def test_completed_oversized_past_scan_limit_respects_bound_end(tmp_path):
+    """Skip a completed oversized line inside the reservation; do not drink past it."""
+    p = tmp_path / "bound-scan.evidence.jsonl"
+    prefix = (b'{"schema_version": 1, "event_id": "e", "session_id": "s", "turn_id": "t", '
+              b'"class": "USER", "text": "')
+    suffix = b'", "timestamp": "2026-08-27T00:00:00Z"}\n'
+    text_len = SCAN_LIMIT - len(prefix) - len(suffix) + 50_000
+    huge = prefix + (b"A" * text_len) + suffix
+    in_bound = (json.dumps(_event("USER", "inside", event_id="in")) + "\n").encode()
+    outside = (json.dumps(_event("USER", "outside", event_id="out")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(in_bound)
+        f.write(outside)
+    bound_end = len(huge) + len(in_bound)
+    segs, end = EvidenceJsonlSource().sip(str(p), 0, 10_000, bound_end=bound_end)
+    assert len(segs) == 1 and segs[0].text == "inside"
+    assert end == bound_end
+    segs2, end2 = EvidenceJsonlSource().sip(str(p), bound_end, 10_000)
+    assert len(segs2) == 1 and segs2[0].text == "outside"
+    assert end2 == p.stat().st_size
