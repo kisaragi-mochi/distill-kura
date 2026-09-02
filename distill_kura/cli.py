@@ -120,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("weave", help="re-weave the resident index")
     p.add_argument("--status", action="store_true", help="report layers and size, weave nothing")
+    p.add_argument("--adaptive", action="store_true",
+                   help="also run the M4 shadow (shortest safe cue per memory); implied by "
+                        "[prefill] adaptive_triggers = true")
     p.add_argument("--fresh-days", type=float)
     p.add_argument("--trigger-tokens", type=int)
     p.add_argument("--no-model", action="store_true", help="trim mechanically, call no model")
@@ -297,6 +300,28 @@ def main(argv: list[str] | None = None) -> int:
         if a.status:
             st = loom.weave(generate=False).stats
             print(json.dumps(st, ensure_ascii=False, indent=1))
+            return 0
+        # M4: the adaptive shadow runs AFTER the production cloth is settled and never
+        # decides what it says — unless adaptive_apply has been earned by a benchmark,
+        # in which case the shortest-safe cues are worn through the loom's own override
+        # (the postcondition still applies). Old configs never reach this block.
+        adaptive_on = bool(cfg.get("adaptive_triggers")) or getattr(a, "adaptive", False)
+        if adaptive_on and a.cmd == "weave":
+            from .adaptive import DEFAULT_STEPS, Adaptive
+            ad = Adaptive(store, loom, steps=cfg.get("trigger_steps") or DEFAULT_STEPS,
+                          scribe=scribe)
+            if cfg.get("adaptive_apply"):
+                shadow = ad.shadow()
+                cloth = loom.weave(triggers=ad.triggers(shadow))
+                r = loom.persist(cloth) if hasattr(loom, "persist") else {}
+                print(json.dumps({"adaptive": shadow["summary"], "applied": True,
+                                  **({"persist": r} if r else {})}, ensure_ascii=False))
+                return 0
+            cloth = loom.weave()
+            r = loom.persist(cloth) if hasattr(loom, "persist") else {}
+            shadow = ad.shadow()
+            print(json.dumps({**({"persist": r} if r else {}), "adaptive": shadow["summary"],
+                              "applied": False}, ensure_ascii=False))
             return 0
         from .weave import WeaveError
         try:
