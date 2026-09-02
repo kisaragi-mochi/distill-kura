@@ -290,6 +290,35 @@ def test_store_ratio_counts_only_what_the_recorded_batches_produced(tmp_path):
     assert exact["store_ratio_units"].startswith("mixed")   # the raw side is never exact
 
 
+def test_a_tampered_manifest_counts_as_unattributed_in_compress(tmp_path):
+    """Content-addressed means the name is the hash of the bytes. bench read the
+    manifest raw, so a file whose bytes no longer hash to its name still attributed
+    its memory to a recorded batch — while doctor called the same file tampered."""
+    import hashlib
+    from distill_kura.bench import compress
+    from distill_kura.registry import Registry
+    from distill_kura.thinker import Models
+    st = Store(name="m", path=str(tmp_path / "m"))
+    st.init_files()
+    os.makedirs(st.still, exist_ok=True)
+    with open(os.path.join(st.still, "metrics.jsonl"), "w", encoding="utf-8") as f:
+        f.write(json.dumps({"source_key": "x", "raw_tokens_est": 500}) + "\n")
+    man = json.dumps({"source_key": "x"})
+    digest = hashlib.sha256(man.encode()).hexdigest()
+    os.makedirs(os.path.join(st.path, "_evidence"), exist_ok=True)
+    mpath = os.path.join(st.path, "_evidence", f"{digest}.json")
+    with open(mpath, "w") as f:
+        f.write(man)
+    st.pour_verified("one", "from the recorded batch", "short body",
+                     meta={"evidence_manifest": f"sha256:{digest}"})
+    with open(mpath, "a") as f:
+        f.write(" ")                                        # same name, other bytes
+    reg = Registry(stores={"m": st}, modes={}, models=Models.from_config({}), default="m")
+    r = compress(reg, st)
+    assert r["memories_from_recorded_batches"] == 0
+    assert r["memories_unattributed"] == 1
+
+
 def test_the_global_distill_table_is_type_checked_too(tmp_path):
     """The per-store table was checked; the global one was not, so the same truthy
     string that was refused under [stores.x.distill] slipped through under [distill]."""

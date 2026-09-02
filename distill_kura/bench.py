@@ -194,20 +194,17 @@ def compress(reg: Registry, store: Store, tokenizer_command: str | None = None,
     # is attributed to a batch through its evidence manifest, which names the source.
     scoped_bodies = []
     unattributed = 0
-    ev_dir = os.path.join(store.path, "_evidence")
     for slug in store.slugs():
-        ref = store.frontmatter(slug).get("evidence_manifest", "")
-        digest = ref.split("sha256:", 1)[1] if "sha256:" in ref else ""
-        mpath = os.path.join(ev_dir, f"{digest}.json") if digest else ""
-        if not (mpath and os.path.exists(mpath)):
+        ref = str(store.frontmatter(slug).get("evidence_manifest", ""))
+        # The one door: attribution reads the manifest through the verified loader,
+        # so a manifest whose bytes no longer hash to its name is unattributed here
+        # exactly as it is tampered in doctor — never trusted on its filename.
+        m = re.fullmatch(r"sha256:([0-9a-f]{64})", ref)
+        man = store.load_manifest_verified(m.group(1)) if m else None
+        if man is None:
             unattributed += 1
             continue
-        try:
-            with open(mpath, encoding="utf-8") as f:
-                src_key = json.load(f).get("source_key", "")
-        except (OSError, ValueError):
-            unattributed += 1
-            continue
+        src_key = man.get("source_key", "")
         if src_key in recorded_keys:
             scoped_bodies.append(store.read_exact(slug))
     scoped_tokens = count("\n".join(scoped_bodies)) if scoped_bodies else 0
