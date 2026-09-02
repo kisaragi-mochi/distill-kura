@@ -38,7 +38,7 @@ from .glance import glance as do_glance
 from .recall import recall as do_recall
 from .registry import Registry
 from .server import serve
-from .store import Store
+from .store import ANNOTATION_KEYS, Store
 
 
 
@@ -51,8 +51,9 @@ def _annotation_args(p) -> None:
 
 
 def _annotations_of(a) -> dict:
-    return {k: v for k, v in (("belongs_because", a.belongs_because), ("keep", a.keep),
-                              ("may_fade", a.may_fade)) if v}
+    # The three names live in store.ANNOTATION_KEYS; argparse's dests already match
+    # them, so a fourth sentence never has to be added here as well.
+    return {k: getattr(a, k) for k in ANNOTATION_KEYS if getattr(a, k, None)}
 
 
 def _reg(a) -> Registry:
