@@ -742,7 +742,12 @@ class Distiller:
                                      meta={"evidence_manifest": man.group(1)} if man else None,
                                      tags=tags, annotations=ann)
         if r.get("ok"):
-            os.rename(p, p + ".poured")
+            # Numbered, like the staging side: a later draft of the same slug is
+            # staged under the plain name again (the poured one no longer occupies
+            # `<slug>.md`), and renaming straight onto `<slug>.md.poured` destroyed
+            # the earlier draft's text, evidence header and mark with no trace.
+            os.rename(p, _free_path(os.path.dirname(p), os.path.basename(p)[:-3],
+                                    ".md.poured"))
             self._store_text = None
             # The route becomes real only now that the memory does. A staged draft
             # carried its cues as provenance; a TOSSed or quarantined one never

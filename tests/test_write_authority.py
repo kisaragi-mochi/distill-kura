@@ -161,3 +161,27 @@ def test_swapping_the_directory_for_a_symlink_afterwards_is_refused(tmp_path):
     r = s.remember_direct("planted", "d", "b")
     assert r["ok"] is False and "no longer resolves" in r["error"]
     assert not (tmp_path / "private" / "planted.md").exists()
+
+
+def test_a_second_pour_of_one_slug_does_not_destroy_the_first_poured_draft(tmp_path):
+    """`os.rename(p, p + ".poured")` overwrote the archive of the earlier draft: once
+    the first draft was poured its file left `*.md`, so the next draft of the same
+    slug was staged under the plain name again and its pour renamed straight onto the
+    older `.poured` — the first draft's text, evidence header and mark simply gone."""
+    s = a_store(tmp_path, policy="distiller-only")
+    d = a_distiller(s)
+    base = {"slug": "real", "title": "Real", "description": "the trigger",
+            "kind": "project", "evidence": [{"class": "USER", "text": "they said so"}],
+            "classes": ["USER"], "unverified_numbers": False, "judgement": False,
+            "attributed_to_human": False}
+    d.stage({**base, "body": "the first body"}, "session.jsonl")
+    assert d.pour("real")["ok"] is True
+    first = open(os.path.join(d.drafts_dir, "real.md.poured"), encoding="utf-8").read()
+    d.stage({**base, "body": "the second body"}, "session.jsonl")
+    assert d.pour("real")["ok"] is True
+    assert open(os.path.join(d.drafts_dir, "real.md.poured"),
+                encoding="utf-8").read() == first
+    poured = sorted(f for f in os.listdir(d.drafts_dir) if f.endswith(".poured"))
+    assert len(poured) == 2, poured
+    assert "the second body" in "".join(
+        open(os.path.join(d.drafts_dir, f), encoding="utf-8").read() for f in poured)
