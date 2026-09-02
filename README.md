@@ -591,7 +591,7 @@ yet: see [`docs/DESIGN.md`](docs/DESIGN.md) §8.
 | `POST /remember` | `{slug, description, body, type, title, tags, belongs_because, keep, may_fade}` — a DIRECT write, refused unless `write_policy = "direct-allowed"` |
 | `POST /annotate` | `{slug, tags, belongs_because, keep, may_fade}` — merge tags / the three sentences onto an existing memory. The direct door: same refusal as `/remember`. A merge that adds nothing touches nothing |
 | `GET /index` | the raw index |
-| `GET /prefill` | the resident block, ready to inject (`&format=text` for a hook) |
+| `GET /prefill` | the resident block, ready to inject (`&format=text` for a hook; `&window=N` / `&fraction=F` override the store's `window_tokens` / `budget_fraction` for one request) |
 | `GET /memory/<slug>` | one memory in full, with its `tags` and `annotations` |
 | `GET /doctor` | health of one store (`?all=1` for every store) |
 | `GET /stores` | stores, modes, and which model fills each role |

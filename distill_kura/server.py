@@ -3,14 +3,18 @@
 Every route takes an optional store selector, so one process serves as many kura
 as you configure and a client can switch modes per request:
 
-    POST /recall            {"question": ..., "hops": 1, "store"|"mode": "eq"}
-    POST /remember          {"slug","description","body","type","hook","title","store"}
+    POST /recall            {"question", "hops": 1, "top": 3, "chars": 6000,
+                             "total_chars", "store"|"mode": "eq"}
+    POST /remember          {"slug","description","body","type","hook","title","tags",
+                             the three sentences (flat or nested "annotations"), "store"}
     POST /annotate          {"slug","tags","belongs_because","keep","may_fade","store"}
+                            merge onto an existing memory — the direct door
     GET  /index             ?store=maker
     GET  /doctor            ?store=maker          (?all=1 → every store at once)
     GET  /memory/<slug>     ?store=maker
     GET  /glance/<slug>     ?store=maker   the ~150-token confirmation, exact
-    GET  /prefill           ?store=eq[&format=text] the resident index block, ready to paste
+    GET  /prefill           ?store=eq[&format=text][&window=N][&fraction=F]
+                            the resident index block, ready to paste
     GET  /profile           ?store=eq             the store's charter + persona pointer
     GET  /stores            what exists, which mode maps where, which models
     GET  /health            liveness — and which build/pid/config is actually serving
