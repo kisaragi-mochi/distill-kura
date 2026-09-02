@@ -81,6 +81,14 @@ unchanged. The reason is stored on the hook entry as `floor` (None when clean), 
 `LEDGER_VERSION` is bumped to 10 so the old unchecked hooks are regenerated, not
 reused. A cut that lies is never worn.
 
+*Measured, not promoted (2026-09-02):* on a 320-memory house store, 42 private
+cases, one format-compliant reader run twice, the adaptive map recovered 24/42 and
+22/42 against the production cloth's 20/42 and 22/42 — inside the run-to-run noise
+(±2) — with more unnecessary opens and a 2% smaller map. `adaptive_apply` stays off;
+the shadow keeps measuring. The measurable gain of M4 so far is the one it forced
+upstream: the production trigger now faces the same floors (34/67 house hooks were
+wearing a re-bound number, an invented marker, a dropped negation or a reversed arrow).
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the
