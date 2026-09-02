@@ -401,3 +401,49 @@ def test_a_racer_that_leaves_a_short_key_is_refused_not_papered_over(tmp_path, m
     else:
         raise AssertionError("a truncated key must not be handed back")
     assert len(attempts) == 2
+
+
+def test_gate_key_reads_the_key_file_through_one_path_on_every_outcome(tmp_path, monkeypatch):
+    """`gate_key` read the key twice — once in the loop, once after it — and the two
+    reads disagreed about failure: the in-loop read named a short key as corruption and
+    refused to regenerate, while the post-loop copy said only "unreadable after
+    creation". Which sentence an operator saw for the same broken file depended on
+    whether it happened to exist when the process walked in. One read now, at the top
+    of the loop; the two race branches the tests above pin are untouched."""
+    import builtins
+    import pytest
+    s = make(tmp_path)
+    key_path = os.path.join(s.still, "gate.key")
+    real_open = builtins.open
+    reads = []
+
+    def counting_open(file, mode="r", *a, **kw):
+        if file == key_path and "r" in mode:
+            reads.append(mode)
+        return real_open(file, mode, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", counting_open)
+
+    if os.path.exists(key_path):
+        real_open(key_path, "rb").close()
+        os.remove(key_path)
+    # First boot: absent → mint → read back. The mint is an os.open, so the only
+    # reads are the loop's own, one per pass.
+    k = s.gate_key()
+    assert len(k) >= 32
+    assert reads == ["rb", "rb"], reads
+
+    # Already there: one pass, one read, nothing minted.
+    reads.clear()
+    assert s.gate_key() == k
+    assert reads == ["rb"], reads
+
+    # Corrupt: the same single read produces the refusal that explains itself,
+    # never the blunt post-loop message that used to exist in parallel.
+    reads.clear()
+    with real_open(key_path, "wb") as f:
+        f.write(b"short")
+    with pytest.raises(RuntimeError) as e:
+        s.gate_key()
+    assert reads == ["rb"], reads
+    assert "Refusing to regenerate" in str(e.value)

@@ -624,8 +624,14 @@ class Store:
     # so whoever can write the directory can usually read the key. This stops a tool
     # with a file handle and an accident, not a principal with the filesystem.
     def gate_key(self) -> bytes:
+        # ONE read, at the top of the loop. Pass 1 reads what is already there;
+        # if nothing is, we mint and come round for pass 2, which reads whatever
+        # now exists — ours, or the key that won the O_EXCL race. The post-loop
+        # copy of this read used to be a second code path with its own, blunter
+        # failure message, so which sentence a corrupt key produced depended on
+        # whether the file existed when we walked in.
         path = os.path.join(self.still, "gate.key")
-        for attempt in (1, 2):
+        for last_pass in (False, True):
             try:
                 with open(path, "rb") as f:
                     key = f.read()
@@ -636,8 +642,12 @@ class Store:
                     return key
                 # A short or empty key is corruption. Regenerating here would
                 # orphan every signature in the store in one silent stroke —
-                # the one repair that must never be automatic.
+                # the one repair that must never be automatic. On the second
+                # pass the same file is a racer's half-written key, named as
+                # such: nobody's marks depend on it yet.
                 raise RuntimeError(
+                    f"gate key at {path} unreadable after creation"
+                    if last_pass else
                     f"gate key at {path} is {len(key)} bytes (needs 32+). "
                     "Refusing to regenerate: a new key orphans every existing "
                     "mark. Restore the key from backup, or move it aside "
@@ -648,15 +658,12 @@ class Store:
                 # reads the winner's key instead of minting a second one.
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             except FileExistsError:
-                continue
+                continue                  # round again, and READ what they wrote
             with os.fdopen(fd, "wb") as f:
                 f.write(secrets.token_bytes(32))
-            # Loop once more to READ what we (or a racer) wrote — one code path.
-        with open(path, "rb") as f:
-            key = f.read()
-        if len(key) < 32:
-            raise RuntimeError(f"gate key at {path} unreadable after creation")
-        return key
+        # Two passes and still nothing to read: every attempt lost the race and
+        # the winner's file vanished again. No key beats a wrong one.
+        raise RuntimeError(f"gate key at {path} unreadable after creation")
 
     def _curation_mark(self, slug: str, tags: tuple[str, ...], annotations: dict) -> str:
         blob = json.dumps({"slug": slug, "tags": list(tags),
