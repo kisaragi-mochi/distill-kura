@@ -132,6 +132,33 @@ def test_writable_bridge_offers_and_performs_the_write():
         srv.shutdown()
 
 
+def test_the_write_log_records_writes_that_happened_and_nothing_else(tmp_path):
+    """KURA_WRITE_LOG is an operator knob that creates directories and appends to an
+    arbitrary path, and it shipped with no doc and no test. It is a record, not a
+    permission: a refused write must never appear in it as a write."""
+    log = tmp_path / "sub" / "w.jsonl"
+    srv, url = start()
+    try:
+        speak(url, [INIT,
+                    call("kura_remember", {"slug": "a", "description": "d", "body": "b"}, 2),
+                    call("kura_remember", {"slug": "b", "description": "d", "body": "b"}, 3)],
+              env={"KURA_READONLY": "0", "KURA_WRITE_LOG": str(log)})
+        lines = log.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 2                       # the directory was created for us
+        recs = [json.loads(x) for x in lines]
+        assert [r["args"]["slug"] for r in recs] == ["a", "b"]
+        assert all(set(r) == {"ts", "store", "args", "result"} for r in recs)
+
+        refused = tmp_path / "refused.jsonl"
+        out = speak(url, [INIT, call("kura_remember", {"slug": "c", "description": "d",
+                                                       "body": "b"})],
+                    env={"KURA_WRITE_LOG": str(refused)})     # read-only by default
+        assert out[1]["result"]["isError"] is True
+        assert not refused.exists()
+    finally:
+        srv.shutdown()
+
+
 def test_bound_bridge_ignores_a_store_argument():
     """A preset-bound bridge is the mode switch. An argument must not escape the binding."""
     srv, url = start()

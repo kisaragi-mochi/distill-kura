@@ -415,6 +415,19 @@ codebase should follow.
 Leave `KURA_STORE` unset for free mode: the tools take an optional `store` argument and
 `kura_use` switches for the session.
 
+The bridge reads five variables:
+
+| variable | default | meaning |
+|---|---|---|
+| `KURA_URL` | `http://127.0.0.1:8085` | where the kura's HTTP mouth is listening |
+| `KURA_STORE` | unset | bind to one kura; unset = free mode (whitespace-only exits) |
+| `KURA_LABEL` | `the kura` | the name the tool descriptions use for this memory |
+| `KURA_READONLY` | `1` | anything but `""`/`0`/`false`/`no` hides *and* refuses `kura_remember` |
+| `KURA_WRITE_LOG` | unset | path to a JSONL file that gets one `{ts, store, args, result}` line per direct write; the directory is created, and a failure to log never fails the write |
+
+`KURA_WRITE_LOG` is a record, not a permission: it only sees writes that already
+happened, so it is only meaningful with `KURA_READONLY: '0'`.
+
 ---
 
 ## Models: one by default, upgrade a role at a time

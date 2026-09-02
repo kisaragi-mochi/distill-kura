@@ -70,6 +70,10 @@ be written — the read log, and a woven cloth if you point `cloth_path` outside
 woven *inside* it at all, so an archive that should keep a resident map needs
 `cloth_path` set somewhere else.
 
+The MCP bridge can additionally keep a client-side audit line per direct write
+(`KURA_WRITE_LOG`, one JSONL record per successful `kura_remember`). It is a record,
+not a permission: the write has already happened by the time it is logged.
+
 `distiller-only` is the right setting for anything an agent reads from constantly: every
 memory then has to pass the evidence gate, and a model with a spare tool call cannot
 write a fact into the store.

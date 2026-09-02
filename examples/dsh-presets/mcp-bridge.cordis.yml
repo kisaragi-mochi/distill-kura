@@ -28,5 +28,7 @@
           KURA_STORE: eq            # omit to let the agent choose per call
           KURA_LABEL: the EQ kura
           KURA_READONLY: '1'
+          # KURA_WRITE_LOG: /var/log/kura/mcp-writes.jsonl   # audit line per direct
+          # write; only meaningful with KURA_READONLY: '0'
         toolCallTimeoutMs: 300000
         failOnStartupError: false   # a memory that is down must not block the session
