@@ -59,3 +59,35 @@ def test_a_store_table_overrides_key_by_key_and_an_explicit_zero_wins(tmp_path):
     assert d["idle_min"] == 0                     # presence, not truthiness
     assert d["backoff_min"] == 20
     assert reg.prefill_cfg == {"window_tokens": 1000, "budget_fraction": 0.05}   # global intact
+
+
+def _load(tmp_path, body: str):
+    Store(name="s", path=str(tmp_path / "s")).init_files()
+    cfg = tmp_path / "kura.toml"
+    cfg.write_text(f'[stores.s]\npath = "{tmp_path / "s"}"\n' + body, encoding="utf-8")
+    return Registry.load(str(cfg))
+
+
+def test_a_typo_in_prefill_or_fastpath_is_refused_not_silently_ignored(tmp_path):
+    """`[stores.<name>]` refused an unknown key loudly, but [prefill] and [fastpath] —
+    global and per-store — only had their TYPES checked, and the type check skips a key
+    it does not know. So `adaptive_aply = true` changed nothing and said nothing: the
+    operator believes they threw a switch that is not wired to anything."""
+    import pytest
+    cases = [
+        ("[prefill]\nadaptive_aply = true\n", "prefill", "adaptive_aply"),
+        ("[fastpath]\nenable = false\n", "fastpath", "enable"),
+        ("[stores.s.prefill]\ntrigger_token = 20\n", "stores.s.prefill", "trigger_token"),
+        ("[stores.s.fastpath]\ngat = 0.5\n", "stores.s.fastpath", "gat"),
+    ]
+    for body, section, key in cases:
+        with pytest.raises(ValueError) as e:
+            _load(tmp_path, body)
+        assert f"[{section}]" in str(e.value) and key in str(e.value)
+        assert "unknown key" in str(e.value)
+
+
+def test_an_x_prefixed_extension_key_still_loads_in_prefill_and_fastpath(tmp_path):
+    """The escape hatch the store tables document, honoured by the new check too."""
+    reg = _load(tmp_path, "[prefill]\nx_mine = 1\n[stores.s.fastpath]\nx_mine = 2\n")
+    assert "s" in reg.stores

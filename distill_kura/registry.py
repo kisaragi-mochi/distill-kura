@@ -173,12 +173,26 @@ def _check_prefill(section: str, t: dict) -> None:
     outside the three names would either raise inside `prefill.build` on every
     request or be quietly read as `full` — named at load, like every other bad
     config value."""
+    _check_unknown(section, t, _PREFILL_TYPES)
     _check_table(section, t, _PREFILL_TYPES)
     _check_adaptive(section, t)
     rm = t.get("resident_mode")
     if rm is not None and rm not in RESIDENT_MODES:
         raise ValueError(f"[{section}] resident_mode must be one of "
                          f"{list(RESIDENT_MODES)}, got {rm!r}")
+
+
+def _check_unknown(where: str, table: dict, types: dict) -> None:
+    """The same loud refusal the store tables give, for the tables that only ever had
+    their TYPES checked. `_check_table` skips a key it does not know, so `[prefill]
+    adaptive_aply = true` and `[fastpath] enable = false` changed nothing and said
+    nothing — a switch the operator believes they threw. `x_`-prefixed names stay
+    reserved for extensions, exactly as in [stores.<name>]."""
+    unknown = {k for k in (table or {}) if k not in types and not k.startswith("x_")}
+    if unknown:
+        raise ValueError(f"[{where}] has unknown key(s) {sorted(unknown)}. "
+                         f"Known: {sorted(types)}. "
+                         f"Use an `x_`-prefixed name for your own extensions.")
 
 
 def _check_table(where: str, table: dict, types: dict) -> None:
@@ -201,6 +215,7 @@ def _check_types(name: str, sc: dict) -> None:
     _check_table(f"stores.{name}", sc, _TYPES)
     _check_table(f"stores.{name}.distill", sc.get("distill") or {}, _DISTILL_TYPES)
     _check_prefill(f"stores.{name}.prefill", sc.get("prefill") or {})
+    _check_unknown(f"stores.{name}.fastpath", sc.get("fastpath") or {}, _FASTPATH_TYPES)
     _check_table(f"stores.{name}.fastpath", sc.get("fastpath") or {}, _FASTPATH_TYPES)
 
 
@@ -374,6 +389,7 @@ class Registry:
             stores["main"] = Store(name="main", path=d, label=os.environ.get("KURA_LABEL", "kura"))
         _check_table("distill", raw.get("distill") or {}, _DISTILL_TYPES)
         _check_prefill("prefill", raw.get("prefill") or {})
+        _check_unknown("fastpath", raw.get("fastpath") or {}, _FASTPATH_TYPES)
         _check_table("fastpath", raw.get("fastpath") or {}, _FASTPATH_TYPES)
         srv = raw.get("server") or {}
         default = srv.get("default") or next(iter(stores))
