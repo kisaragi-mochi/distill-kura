@@ -385,6 +385,34 @@ def a_config(tmp_path, store):
     return str(cfg)
 
 
+def test_the_cli_retires_and_says_what_it_did(tmp_path, capsys):
+    from distill_kura.cli import main
+
+    s = a_store(tmp_path)
+    h = user_manifest(s)
+    cfg = a_config(tmp_path, s)
+    assert main(["-c", cfg, "-s", "m", "retire", "old-way", "new-way", "--manifest", h]) == 0
+    assert "superseded by new-way" in capsys.readouterr().out
+    assert Store.is_faced(hook_of(s, "old-way"))
+    # sha256:-prefixed is the spelling the memories themselves carry; both work.
+    assert main(["-c", cfg, "-s", "m", "retire", "old-way", "new-way",
+                 "--manifest", "sha256:" + h]) == 0
+    assert "already" in capsys.readouterr().out
+
+
+def test_the_cli_exits_1_with_the_reason_on_a_refusal(tmp_path, capsys):
+    """A scheduler that reads 0 for a refused retirement would report a transition
+    that never happened."""
+    from distill_kura.cli import main
+
+    s = a_store(tmp_path)
+    cfg = a_config(tmp_path, s)
+    bad = a_manifest(s, [{"class": "TOOL", "text": "old-way.py removed, new-way stands"}])
+    assert main(["-c", cfg, "-s", "m", "retire", "old-way", "new-way", "--manifest", bad]) == 1
+    assert "[USER]" in capsys.readouterr().err
+    assert not Store.is_faced(hook_of(s, "old-way"))
+
+
 def test_doctor_and_richness_count_the_faced_memories(tmp_path):
     from distill_kura import richness
 

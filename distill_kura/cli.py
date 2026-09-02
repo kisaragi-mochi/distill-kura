@@ -207,6 +207,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("slug")
     _annotation_args(p)
 
+    p = sub.add_parser("retire", help="mark OLD as superseded by NEW — a person's act, "
+                                      "with the evidence manifest that proves it")
+    p.add_argument("old", help="the memory being retired (it is never deleted or hidden)")
+    p.add_argument("new", help="the memory that replaces it")
+    p.add_argument("--manifest", required=True,
+                   help="the evidence manifest, sha256:<hex> or the bare hex; it must "
+                        "carry a [USER] quote naming the old memory")
+
     p = sub.add_parser("profile", help="the learned profile of a store (the wide room)")
     psub = p.add_subparsers(dest="pcmd", required=True)
     psub.add_parser("show", help="state and text of profile.md, and whether a draft waits")
@@ -678,6 +686,18 @@ def main(argv: list[str] | None = None) -> int:
                                   tags=a.tag, annotations=_annotations_of(a))
         print(json.dumps(r, ensure_ascii=False))
         return 0 if r.get("ok") else 1
+
+    if a.cmd == "retire":
+        r = store.retire(a.old, a.new, a.manifest)
+        if not r.get("ok"):
+            print(r["error"], file=sys.stderr)
+            return 1
+        if r.get("already"):
+            print(f"{r['old']} already reads as superseded by {r['new']}; nothing written")
+        else:
+            print(f"{r['old']} now reads as superseded by {r['new']} "
+                  f"({r['manifest']}); the memory itself is untouched")
+        return 0
 
     if a.cmd == "annotate":
         r = store.annotate_direct(a.slug, tags=a.tag, annotations=_annotations_of(a))
