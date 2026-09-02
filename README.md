@@ -703,8 +703,8 @@ rather than collapsing every cause into a silent `None`.
 ## Tests
 
 ```bash
-python3 -m pytest tests -q                              # 346 tests, no model required
-cd dsh-plugin && npm test                               # 24 more for the plugin
+python3 -m pytest tests -q                              # no model required
+cd dsh-plugin && npm test                               # the plugin suite; stubs the harness, no install
 ```
 
 The gate is tested adversarially: every case is a way a real model actually tried to
