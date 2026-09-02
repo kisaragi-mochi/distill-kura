@@ -49,6 +49,13 @@ def _drafts_dir(still: str) -> str:
     return os.path.join(still, "drafts")
 
 
+def _evidence_lines(ev: list[dict], limit: int | None = None, indent: str = "") -> str:
+    """The `[CLASS] text` shape a prompt shows evidence in — and the shape the gate
+    matches quotes against, so it is rendered in one place. `limit` truncates each
+    quote for human eyes (the draft header); the prompts pass the whole thing."""
+    return "\n".join(f"{indent}[{e['class']}] {e['text'][:limit]}" for e in ev)
+
+
 def _log(s: str) -> None:
     print(f"{datetime.now().strftime('%H:%M:%S')} {s}", flush=True)
 
@@ -251,7 +258,7 @@ class Distiller:
                 names.append(t)
         if not texts:
             return "NEW", "could not read the neighbours", None
-        ev = "\n".join(f"[{e['class']}] {e['text']}" for e in c["evidence"])
+        ev = _evidence_lines(c["evidence"])
         out = self.brain(prompts.NOVEL_SYS,
                          f"CANDIDATE: {c.get('topic')}\n{c.get('why')}\n\nEVIDENCE:\n{ev}\n\n"
                          + "\n\n".join(texts)
@@ -356,7 +363,7 @@ class Distiller:
         open_seeds = self.seeds.open_seeds(30)
         if not open_seeds:
             return
-        ev = "\n".join(f"[{e['class']}] {e['text']}" for e in c["evidence"])
+        ev = _evidence_lines(c["evidence"])
         listing = "\n".join(f"{i+1}. {s['text']}" for i, s in enumerate(open_seeds))
         out = self.brain(prompts.SPROUT_SYS,
                          f"=== NEW EVIDENCE ===\n{c.get('topic')}: {c.get('why')}\n{ev}\n\n"
@@ -377,7 +384,7 @@ class Distiller:
         hands it over; one that does not (a test, the CLI) still gets its own."""
         if c.get("extends"):
             return self._compose_extension(c)
-        ev = "\n".join(f"[{e['class']}] {e['text']}" for e in c["evidence"])
+        ev = _evidence_lines(c["evidence"])
         if near is None:
             near = kura_recall(self.store, self.models.thinker,
                                c.get("why") or c.get("topic", ""), hops=0, top=3, chars=1200)
@@ -494,7 +501,7 @@ class Distiller:
         existing = self.store.read(target)
         if not existing:
             return None
-        ev = "\n".join(f"[{e['class']}] {e['text']}" for e in c["evidence"])
+        ev = _evidence_lines(c["evidence"])
         date = self._evidence_date()
         out = self.scribe(prompts.EXTEND_SYS,
                           f"MEMORY TO EXTEND: {target}\nDATE: {date}\n"
@@ -617,7 +624,7 @@ class Distiller:
         # gone with nothing logged. The second draft takes a numbered name instead.
         p = _free_path(self.drafts_dir, d["slug"])
         staged = os.path.basename(p)[:-3]
-        ev = "\n".join(f"  [{e['class']}] {e['text'][:300]}" for e in d["evidence"])
+        ev = _evidence_lines(d["evidence"], limit=300, indent="  ")
         flags = ""
         if d.get("unverified_numbers"):
             flags += "   ⚠️unbacked number"

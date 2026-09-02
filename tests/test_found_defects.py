@@ -330,3 +330,15 @@ def test_verified_loader_defines_what_a_digest_is(tmp_path):
     s = Store(name="m", path=str(tmp_path / "m")); s.init_files()
     assert s.load_manifest_verified("../../../etc/passwd") is None
     assert s.load_manifest_verified("deadbeef") is None
+
+
+def test_evidence_is_rendered_in_the_shape_the_gate_matches(tmp_path):
+    """Every prompt shows evidence as `[CLASS] text`, and the gate matches quotes
+    against that shape. The e2e fakes never read the prompt, so a slip in the
+    rendering — a lost bracket, a truncation where there should be none — would show
+    up only as a model that stopped quoting correctly."""
+    from distill_kura.distill.pipeline import _evidence_lines
+    ev = [{"class": "USER", "text": "a"}, {"class": "TOOL", "text": "b" * 400}]
+    assert _evidence_lines(ev) == "[USER] a\n[TOOL] " + "b" * 400
+    assert _evidence_lines(ev, limit=300, indent="  ") == "  [USER] a\n  [TOOL] " + "b" * 300
+
