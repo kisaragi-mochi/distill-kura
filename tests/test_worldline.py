@@ -53,15 +53,21 @@ def reg_of(store):
 
 
 def _cue_manifest(tmp_path, store, cue_text="全員野球", quote="例の全員野球でいこう"):
-    """One verified cue on freetoken-hybrid, written straight to the evidence dir —
-    the test_callsigns pattern: provenance only, no model."""
+    """One verified cue on freetoken-hybrid, made REAL: manifest (provenance)
+    plus receipt (the routing authority) — no model anywhere."""
+    from distill_kura.cues import CueLedger
     src = tmp_path / "journal.jsonl"
     src.write_text("{}\n", encoding="utf-8")
-    return Distiller(reg_of(store), store)._write_manifest(
+    cues = [{"text": cue_text, "class": "USER", "quote": quote}]
+    d = Distiller(reg_of(store), store)._write_manifest(
         {"slug": "freetoken-hybrid", "kind": "project",
          "evidence": [{"class": "USER", "text": quote}], "classes": ["USER"],
-         "routing_cues": [{"text": cue_text, "class": "USER", "quote": quote}]},
+         "routing_cues": cues},
         str(src), "test:cue")
+    CueLedger(store).issue(memory_slug="freetoken-hybrid",
+                           evidence_manifest=f"sha256:{d}",
+                           routing_cues=cues, accepted_via="new")
+    return d
 
 
 CASES = [

@@ -701,6 +701,19 @@ class Distiller:
         if r.get("ok"):
             os.rename(p, p + ".poured")
             self._store_text = None
+            # The route becomes real only now that the memory does. A staged draft
+            # carried its cues as provenance; a TOSSed or quarantined one never
+            # reaches this line, so no unpoured draft can grow a route.
+            if man:
+                hexd = man.group(1).split("sha256:", 1)[-1]
+                vm = self.store.load_manifest_verified(hexd)
+                if vm and vm.get("routing_cues"):
+                    from ..cues import CueLedger
+                    CueLedger(self.store).issue(
+                        memory_slug=slug_out,
+                        evidence_manifest=f"sha256:{hexd}",
+                        routing_cues=vm["routing_cues"],
+                        accepted_via="extends" if head.get("EXTENDS") else "new")
         # `created` already means "the file did not exist"; naming the slug here too
         # overwrote that answer with a string.
         return {**r, "poured_into": slug_out, "extended": bool(head.get("EXTENDS"))}
@@ -1067,13 +1080,18 @@ class Distiller:
                         # for it the store had never heard. The cue and its provenance
                         # are recorded against the EXISTING slug (code-chosen, never
                         # the model's) — and nothing else moves: no memory body, no
-                        # index line, not one canonical byte.
-                        self._write_manifest(
+                        # index line, not one canonical byte. The RECEIPT is what makes
+                        # it a route; the manifest alone is provenance, not authority.
+                        mdigest = self._write_manifest(
                             {"slug": target, "kind": c.get("kind"),
                              "evidence": c["evidence"], "classes": c["classes"],
                              "routing_cues": c["routing_cues"],
                              "routing_cues_refused": c.get("routing_cues_refused") or {}},
                             path, key)
+                        from ..cues import CueLedger
+                        CueLedger(self.store).issue(
+                            memory_slug=target, evidence_manifest=f"sha256:{mdigest}",
+                            routing_cues=c["routing_cues"], accepted_via="covered")
                         _log(f"      ⇢ cue kept for COVERED {target}: "
                              f"{[x['text'] for x in c['routing_cues']]}")
                     with open(os.path.join(self.still, "dropped.jsonl"), "a", encoding="utf-8") as f:

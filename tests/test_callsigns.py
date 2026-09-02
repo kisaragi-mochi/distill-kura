@@ -130,13 +130,18 @@ def _dis(s):
 
 
 def _cue_manifest(tmp_path, dis, slug, cue_text, quote="例の全員野球でいこう"):
+    """A cue that became REAL: manifest (provenance) plus receipt (authority)."""
     src = tmp_path / "journal.jsonl"
     src.write_text("{}\n", encoding="utf-8")
-    return dis._write_manifest(
+    cues = [{"text": cue_text, "class": "USER", "quote": quote}]
+    digest = dis._write_manifest(
         {"slug": slug, "kind": "project",
          "evidence": [{"class": "USER", "text": quote}], "classes": ["USER"],
-         "routing_cues": [{"text": cue_text, "class": "USER", "quote": quote}]},
+         "routing_cues": cues},
         str(src), "test:cue")
+    CueLedger(dis.store).issue(memory_slug=slug, evidence_manifest=f"sha256:{digest}",
+                               routing_cues=cues, accepted_via="new")
+    return digest
 
 
 def test_8_the_same_cue_on_two_memories_is_ambiguous_never_directed(tmp_path):
