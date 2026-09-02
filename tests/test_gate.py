@@ -254,3 +254,13 @@ def test_composed_signed_scientific_is_one_token():
     from distill_kura.distill.gate import composed_number_violations
     ev = [{"class": "TOOL", "text": "temperature -1 C; repeated 9 times"}]
     assert composed_number_violations("-1e9 parameters", ev) == ["-1e9"]
+
+
+def test_attribution_knows_the_houses_own_shorthand():
+    # The house writes "ケン確定 / ケン裁定 / ケン: …" more often than "ケンが決めた"; a
+    # floor that knew only the verb forms let a cue rewrite who decided.
+    for line in ("ケン確定: SSD層はアーカイブ用途", "ケン裁定 09-01", "ケン: こっちで行こう",
+                 "Ken decided to keep the slow disk", "the owner ruled it out"):
+        assert attributes_to_human(line, []), line
+    for line in ("ケンにとってのユキ", "SSD層はアーカイブ用途", "a decision was reached"):
+        assert not attributes_to_human(line, []), line

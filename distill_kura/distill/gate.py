@@ -376,6 +376,11 @@ def attributes_to_human(text: str, classes: list[str], words: list[str] | None =
     Prompt instructions get broken; this is checked mechanically instead."""
     if "USER" in classes:
         return False
-    pat = words or [r"ケン(は|が|の指示|の決裁|さんが)", r"\b(the user|the human|the owner)\b\s+\w*\s*"
-                                                        r"(decided|asked|approved|chose|instructed|said)"]
+    # The house writes "ケン確定 / ケン裁定 / ケン方針 / ケン決定 / ケン: ..." at least as
+    # often as "ケンが決めた"; a floor that knew only the verb forms let a cue rewrite
+    # who decided while every 2-gram stayed in place.
+    pat = words or [r"ケン(は|が|の指示|の決裁|さんが|確定|裁定|方針|決定|号令|決裁|指示|裁決|承認)",
+                    r"ケン\s*[:：]",
+                    r"\b(the user|the human|the owner|ken)\b\s+\w*\s*"
+                    r"(decided|asked|approved|chose|instructed|said|ruled|confirmed)"]
     return any(re.search(p, text, re.I) for p in pat)
