@@ -144,6 +144,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--adaptive", action="store_true",
                    help="also run the M4 shadow (shortest safe cue per memory); implied by "
                         "[prefill] adaptive_triggers = true")
+    p.add_argument("--adaptive-out", metavar="PATH",
+                   help="write the shadow RENDERED as a resident map to PATH (for "
+                        "`kura bench worldline --resident-file adaptive=PATH`); never the cloth")
     p.add_argument("--fresh-days", type=float)
     p.add_argument("--trigger-tokens", type=int)
     p.add_argument("--no-model", action="store_true", help="trim mechanically, call no model")
@@ -380,8 +383,17 @@ def main(argv: list[str] | None = None) -> int:
             cloth = loom.weave()
             r = loom.persist(cloth) if hasattr(loom, "persist") else {}
             shadow = ad.shadow()
+            out_path = getattr(a, "adaptive_out", None)
+            if out_path:
+                # A rendered VARIANT for the benchmark — written where asked, never
+                # where the cloth lives, so nothing can mistake it for production.
+                if os.path.abspath(out_path) == os.path.abspath(loom.out_path):
+                    sys.exit("--adaptive-out must not be the cloth path")
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(ad.render(shadow))
             print(json.dumps({**({"persist": r} if r else {}), "adaptive": shadow["summary"],
-                              "applied": False}, ensure_ascii=False))
+                              "applied": False, **({"rendered": out_path} if out_path else {})},
+                             ensure_ascii=False))
             return 0
         from .weave import WeaveError
         try:

@@ -329,3 +329,17 @@ def test_the_summary_reports_per_script(tmp_path):
                  ja[1]: {24: "写しが八日止まり百九十七本が世界に無かった"}})
     sm = Adaptive(s, Loom(s, scribe=None), scribe=sc).shadow()["summary"]
     assert set(sm["by_script"]) >= {"en", "ja"}
+
+
+def test_the_cli_renders_the_shadow_to_a_path_but_never_onto_the_cloth(tmp_path):
+    from distill_kura.cli import main
+    s = old_store(tmp_path, [A, C])
+    cfg = tmp_path / "kura.toml"
+    cfg.write_text(f'[stores.s]\npath = "{s.path}"\n[prefill]\ntrigger_tokens = 24\nadaptive_triggers = true\n', encoding="utf-8")
+    out = tmp_path / "map.md"
+    assert main(["-c", str(cfg), "-s", "s", "weave", "--no-model", "--adaptive-out", str(out)]) == 0
+    assert out.exists() and "(fans-first.md)" in out.read_text(encoding="utf-8")
+    import pytest as _pt
+    with _pt.raises(SystemExit):
+        main(["-c", str(cfg), "-s", "s", "weave", "--no-model",
+              "--adaptive-out", os.path.join(s.still, "index.woven.md")])
