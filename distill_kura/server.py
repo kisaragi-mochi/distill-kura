@@ -60,11 +60,19 @@ def _make_handler(reg: Registry):
             pass
 
         # ── plumbing ─────────────────────────────────────────────────────
-        def _send(self, code: int, obj):
+        def _send(self, code: int, obj, *,
+                  ctype: str | None = "application/json; charset=utf-8",
+                  headers: dict | None = None):
+            """One reply. A str goes out as it stands (the `format=text` map), anything
+            else as JSON; `ctype=None` sends no Content-Type at all, which is what a
+            304 wants — a body type for an empty body would be a small lie."""
             b = obj.encode() if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False).encode()
             self.send_response(code)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            if ctype:
+                self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(b)))
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(b)
 
@@ -144,28 +152,14 @@ def _make_handler(reg: Registry):
                 # The map is the largest thing this server hands out and it changes a
                 # few times a day, while clients re-read it every couple of minutes.
                 inm = (self.headers.get("If-None-Match") or "").strip('"')
+                et = {"ETag": f'"{pf.etag}"'}
                 if inm and inm == pf.etag:
-                    self.send_response(304)
-                    self.send_header("ETag", f'"{pf.etag}"')
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-                    return
+                    return self._send(304, "", ctype=None, headers=et)
                 if q.get("format") == "text":
                     # For a shell hook or a `$(...)`: the block and nothing else.
-                    b = pf.text.encode()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/plain; charset=utf-8")
-                    self.send_header("Content-Length", str(len(b)))
-                    self.send_header("ETag", f'"{pf.etag}"')
-                    self.end_headers()
-                    return self.wfile.write(b)
-                b = json.dumps(pf.as_dict(), ensure_ascii=False).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(b)))
-                self.send_header("ETag", f'"{pf.etag}"')
-                self.end_headers()
-                return self.wfile.write(b)
+                    return self._send(200, pf.text, ctype="text/plain; charset=utf-8",
+                                      headers=et)
+                return self._send(200, pf.as_dict(), headers=et)
             if path.startswith("/index"):
                 t = st.index_text()
                 return self._send(200, {"store": st.name, "index": t,
