@@ -248,6 +248,21 @@ key file through one path on every outcome.
 Left for a decision or a later wave: a single `_parse_scribe`, an `_Envelope` type,
 fsync-unified atomic writes, and the twenty-one structure/split findings.
 
+### The instruments stop lying (2026-09-02 evening, the plan author's rulings)
+Agent-only rows are judged on the model's user-visible `content` alone (`Endpoint.ask_full`
+takes the reply apart; `ask()` keeps its thinker-side reasoning fallback); `truncated`
+(finish_reason=length) and `reasoning_only` (blank content beside reasoning) are recorded
+apart and never excuse a `format_error`. Every row and result carries `case_set_sha`, the
+sha256 of the case file it was measured on. A `paired-format-valid` table judges only the
+cases valid in every variant of the run, and `kura bench worldline-compare A B` sets two
+runs of the same case set side by side (all cases, paired-valid, format_error delta, the
+four safety metrics) with no composite score; the promotion rule is written in OPERATING
+with the observed noise envelope (about ±2 / 42 on the house set v1). `kura tend --once`
+exits 0 = completed, 1 = attempted or required but not completed (a timeout is 1, with a
+`retryable` record), 2 = honestly nothing to do; five outcomes stay distinguishable and no
+child process survives the return. The index craft tells writers that a retired thing
+wears it — on its own trigger, only after a verified transition, never from a derived edge.
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the
