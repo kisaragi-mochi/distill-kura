@@ -1,0 +1,201 @@
+"""The retirement face — the one way canonical may say "this is over".
+
+Every test here is named for the failure it prevents. The shape of the danger is
+always the same: a memory that is no longer true keeps being read as current, or —
+the opposite and worse — something that is not the human's own word quietly rewrites
+the map's most-read line.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from distill_kura.store import Store                          # noqa: E402
+
+
+def a_store(tmp_path, policy="direct-allowed"):
+    s = Store(name="m", path=str(tmp_path / "m"))
+    s.init_files()
+    s.remember("old-way", "the old way of doing it, kept because it is still true history",
+               "OLD BODY")
+    s.remember("new-way", "the new way, which replaced it", "NEW BODY")
+    s.write_policy = policy
+    return s
+
+
+def a_manifest(store: Store, quotes: list[dict]) -> str:
+    """A manifest named by the hash of its own bytes, like a genuine one."""
+    blob = json.dumps({"gate_version": 6, "quotes": quotes}, ensure_ascii=False, sort_keys=True)
+    h = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    os.makedirs(os.path.join(store.path, "_evidence"), exist_ok=True)
+    with open(os.path.join(store.path, "_evidence", h + ".json"), "w", encoding="utf-8") as f:
+        f.write(blob)
+    return h
+
+
+def user_manifest(store: Store) -> str:
+    return a_manifest(store, [{"class": "USER",
+                               "text": "stop using old-way, we do it the new way now"}])
+
+
+def hook_of(store: Store, slug: str) -> str:
+    for line in store.index_text().splitlines():
+        if f"({slug}.md)" in line:
+            return line.split(" — ", 1)[1]
+    raise AssertionError(f"{slug} has no index line")
+
+
+# ── the door works ──────────────────────────────────────────────────────────
+
+def test_a_verified_transition_faces_the_old_line_and_nothing_else(tmp_path):
+    s = a_store(tmp_path)
+    h = user_manifest(s)
+    before_new = s.read_exact("new-way")
+    r = s.retire("old-way", "new-way", h)
+    assert r["ok"] and r["changed"]
+    assert hook_of(s, "old-way").startswith("superseded: ")
+    assert "[[new-way]]" in hook_of(s, "old-way")
+    assert f"retired: superseded by [[new-way]] (manifest sha256:{h})" in s.read_exact("old-way")
+    assert "OLD BODY" in s.read_exact("old-way"), "the old memory is never emptied"
+    assert s.read_exact("new-way") == before_new, "the new memory is not touched"
+
+
+def test_the_face_is_written_in_the_script_of_the_old_trigger(tmp_path):
+    s = Store(name="m", path=str(tmp_path / "m"))
+    s.init_files()
+    s.remember("k3-plan", "K3をSSD階層で走らせる計画。純CPUで10 tok/sを狙う", "本文")
+    s.remember("k3-new", "新しい計画", "本文")
+    h = a_manifest(s, [{"class": "USER", "text": "k3-plan はもうやめる。新しい方でいく"}])
+    assert s.retire("k3-plan", "k3-new", h)["ok"]
+    hook = hook_of(s, "k3-plan")
+    assert hook.startswith("退役: ") and "／現在は [[k3-new]]" in hook
+
+
+def test_a_user_quote_naming_the_old_title_is_enough(tmp_path):
+    """The human says the memory's NAME, not its slug — the way people talk."""
+    s = a_store(tmp_path)
+    title = next(t for t, sl in s.titles().items() if sl == "old-way")
+    h = a_manifest(s, [{"class": "USER", "text": f"we are done with {title}, use the new one"}])
+    assert s.retire("old-way", "new-way", h)["ok"]
+
+
+# ── the failures it prevents ────────────────────────────────────────────────
+
+def test_a_derived_edge_alone_cannot_retire(tmp_path):
+    """M7 edges are a READING of the store. A reading that could rewrite what it read
+    would let the store's own prose retire its memories — no human in the loop at all."""
+    import inspect
+
+    from distill_kura import edges
+
+    src = inspect.getsource(edges)
+    assert ".retire(" not in src and "store.retire" not in src, \
+        "edges.py must never reach the retirement door"
+    s = a_store(tmp_path)
+    # And the derived map, built over a store whose bodies talk about superseding,
+    # changes no index line.
+    s.remember("old-way", "the old way of doing it, kept because it is still true history",
+               "OLD BODY. this supersedes nothing; see [[new-way]] which replaced it")
+    before = s.index_text()
+    edges.current(s)
+    assert s.index_text() == before
+    assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_a_tool_only_manifest_cannot_retire(tmp_path):
+    """A `git log` line saying "removed the old path" is not the human retiring a plan."""
+    s = a_store(tmp_path)
+    h = a_manifest(s, [{"class": "TOOL", "text": "deleted old-way.py, the new-way path wins"},
+                       {"class": "SELF", "text": "I judge old-way to be finished"},
+                       {"class": "ACT", "text": "ran the new-way script instead of old-way"}])
+    r = s.retire("old-way", "new-way", h)
+    assert not r["ok"] and "[USER]" in r["error"]
+    assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_a_tampered_manifest_cannot_retire(tmp_path):
+    """Content-addressed means the name is the hash. Edit the bytes, lose the door."""
+    s = a_store(tmp_path)
+    h = user_manifest(s)
+    p = os.path.join(s.path, "_evidence", h + ".json")
+    man = json.load(open(p, encoding="utf-8"))
+    man["quotes"][0]["text"] = "stop using new-way, old-way is fine"
+    open(p, "w", encoding="utf-8").write(json.dumps(man, ensure_ascii=False, sort_keys=True))
+    r = s.retire("old-way", "new-way", h)
+    assert not r["ok"] and "tampered" in r["error"]
+
+
+def test_a_missing_manifest_cannot_retire(tmp_path):
+    s = a_store(tmp_path)
+    r = s.retire("old-way", "new-way", "f" * 64)
+    assert not r["ok"] and "missing" in r["error"]
+
+
+def test_a_memory_cannot_supersede_itself(tmp_path):
+    s = a_store(tmp_path)
+    r = s.retire("old-way", "old-way", user_manifest(s))
+    assert not r["ok"] and "itself" in r["error"]
+
+
+def test_an_absent_old_or_new_memory_is_a_refusal(tmp_path):
+    s = a_store(tmp_path)
+    h = user_manifest(s)
+    assert not s.retire("no-such", "new-way", h)["ok"]
+    r = s.retire("old-way", "no-such-either", h)
+    assert not r["ok"] and "nothing to point at" in r["error"]
+    assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_the_second_call_is_already_and_writes_nothing(tmp_path):
+    s = a_store(tmp_path)
+    h = user_manifest(s)
+    assert s.retire("old-way", "new-way", h)["ok"]
+    faced_index, faced_body, rev = s.index_text(), s.read_exact("old-way"), s.revision()
+    r = s.retire("old-way", "new-way", h)
+    assert r["ok"] and r["already"] and not r["changed"]
+    assert s.index_text() == faced_index and s.read_exact("old-way") == faced_body
+    assert s.revision() == rev, "a no-op must not announce a mutation"
+
+
+def test_a_second_different_successor_is_refused(tmp_path):
+    """A face is a ruling, not a stack: overwriting it would erase the first one."""
+    s = a_store(tmp_path)
+    s.remember("third-way", "a later idea", "BODY")
+    h = user_manifest(s)
+    assert s.retire("old-way", "new-way", h)["ok"]
+    h2 = a_manifest(s, [{"class": "USER", "text": "old-way is dead, third-way now"}])
+    r = s.retire("old-way", "third-way", h2)
+    assert not r["ok"] and "already wears" in r["error"]
+    assert "[[new-way]]" in hook_of(s, "old-way")
+
+
+def test_the_retired_memory_is_still_listed_and_still_readable(tmp_path):
+    """Never deleted, never hidden, never re-slugged: forgetting is not how a store
+    records that the world moved on."""
+    s = a_store(tmp_path)
+    assert s.retire("old-way", "new-way", user_manifest(s))["ok"]
+    assert "old-way" in s.slugs() and "old-way" in s.known_slugs()
+    assert s.resolve_exact("old-way") == "old-way"
+    assert "OLD BODY" in s.read("old-way")
+    assert s.doctor()["not_in_index"] == [] and s.doctor()["index_orphans"] == []
+
+
+def test_a_frozen_store_refuses_to_retire(tmp_path):
+    s = a_store(tmp_path, policy="frozen")
+    h = user_manifest(s)
+    r = s.retire("old-way", "new-way", h)
+    assert not r["ok"] and "frozen" in r["error"]
+    assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_a_grouped_index_line_is_left_to_its_author(tmp_path):
+    """Rewriting a grouped line from one slug would swallow its siblings — the same
+    rule `_write` keeps."""
+    s = a_store(tmp_path)
+    s._write_index("# m\n\n- ways — [old](old-way.md)/[new](new-way.md)\n")
+    r = s.retire("old-way", "new-way", user_manifest(s))
+    assert not r["ok"] and "no index line of its own" in r["error"]

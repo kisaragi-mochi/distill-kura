@@ -700,6 +700,125 @@ class Store:
     # is a tool that can immortalise whatever it likes. So the direct door obeys the
     # direct policy, and the verified door is reached only from the distiller, which
     # carries evidence for every reserved tag it adds.
+    # ── the retirement face ──────────────────────────────────────────────
+    #
+    # A memory whose plan, method or ruling has been retired is never deleted, hidden,
+    # moved or re-slugged — the world's state changed, and forgetting is not how you
+    # record that. What changes is ONE thing: its own index trigger says so, first, so
+    # every reader that sees the map at all sees the transition. Plus one appended body
+    # line naming the manifest, so the claim can be audited from the memory itself.
+    #
+    # The door is narrow on purpose. Canonical may gain a face ONLY from a mechanically
+    # verified transition: an evidence manifest that carries at least one USER-class
+    # quote naming the old memory (its slug, or its exact index title). A TOOL/SELF/ACT
+    # manifest is refused — a tool line and the agent's own prose cannot retire a plan.
+    # The derived edge map (M7) never calls this: an edge is a reading of the store,
+    # and a reading may not rewrite what it read.
+    _FACE_JA = "退役: {old}／現在は [[{new}]]"
+    _FACE_EN = "superseded: {old} — now [[{new}]]"
+    _FACED = re.compile(r"^\s*(?:退役\s*[:：]|superseded\s*:)", re.I)
+    _CJK = re.compile(r"[぀-ヿ㐀-鿿ｦ-ﾟ]")
+
+    @classmethod
+    def is_faced(cls, hook: str) -> bool:
+        """Does this index trigger already wear a retirement face?"""
+        return bool(cls._FACED.match(hook or ""))
+
+    @classmethod
+    def _face(cls, old_hook: str, new_slug: str) -> str:
+        """The face, in the script the OLD trigger is written in — the line keeps
+        speaking the language it was written in, or a Japanese map grows an English
+        sentence at its most-read position."""
+        tpl = cls._FACE_JA if cls._CJK.search(old_hook) else cls._FACE_EN
+        return tpl.format(old=old_hook.strip(), new=new_slug)
+
+    def _manifest_names_old(self, man: dict, old: str) -> bool:
+        """Does this manifest carry a USER-class quote that NAMES the old memory?
+
+        Slug or exact index title, plain substring — the same floor the gate itself
+        stands on. Nothing else counts: not a TOOL line, not the agent's prose, not a
+        paraphrase the model believes points here."""
+        title = next((t for t, sl in self.titles().items() if sl == old), None)
+        for q in (man.get("quotes") or []):
+            if not isinstance(q, dict) or q.get("class") != "USER":
+                continue
+            text = str(q.get("text") or "")
+            if old in text or (title and title in text.lower()):
+                return True
+        return False
+
+    def retire(self, old_slug: str, new_slug: str, manifest_hex: str) -> dict:
+        """Mark the OLD memory's index line as superseded by the new one.
+
+        The old memory keeps its file, its slug, its body and its place in the index.
+        Only its trigger changes, and one line is appended to its body. Idempotent: a
+        second call with the same pair returns `already` and touches nothing."""
+        if (r := self._frozen_refused()):
+            return r
+        if (r := self._substitution_refusal()):
+            return r
+        old = self._clean(old_slug)
+        new = self._clean(new_slug)
+        if not old or not new:
+            return {"ok": False, "error": "retire needs an old and a new memory name"}
+        if old == new:
+            return {"ok": False, "error": f"'{old}' cannot supersede itself"}
+        hexd = str(manifest_hex or "").split("sha256:", 1)[-1]
+        man = self.load_manifest_verified(hexd)
+        if man is None:
+            return {"ok": False, "error": f"evidence manifest {hexd[:12]}… is missing or "
+                                          f"tampered; a retirement needs provenance that "
+                                          f"verifies"}
+        with self._locked():
+            if not self.resolve_exact(old):
+                return {"ok": False, "error": f"no memory named {old!r} in store '{self.name}'"}
+            if not self.resolve_exact(new):
+                return {"ok": False, "error": f"no memory named {new!r} in store "
+                                              f"'{self.name}': nothing to point at"}
+            if not self._manifest_names_old(man, old):
+                return {"ok": False, "error": "the manifest carries no [USER] evidence naming "
+                                              f"{old!r}; a tool line or the agent's own prose "
+                                              f"cannot retire a memory"}
+            cur = self.index_text()
+            commented = self._commented_lines(cur)
+            out: list[str] = []
+            hit = False
+            already = None
+            for i, l in enumerate(cur.splitlines()):
+                m = (None if i in commented else
+                     re.match(rf"- \[([^\]]+)\]\({re.escape(old)}\.md\) — (.+)", l))
+                if m and not hit:
+                    hit = True
+                    hook = m.group(2)
+                    if self.is_faced(hook):
+                        # Already retired. The same transition again is a no-op; a
+                        # DIFFERENT one is a refusal — a face is not a place to stack
+                        # successors, and rewriting one would erase the first ruling.
+                        already = f"[[{new}]]" in hook
+                        out.append(l)
+                        continue
+                    out.append(self._index_line(m.group(1), old, self._face(hook, new)))
+                else:
+                    out.append(l)
+            if not hit:
+                return {"ok": False, "error": f"{old!r} has no index line of its own to face "
+                                              f"(a grouped line is the author's to keep current)"}
+            if already is not None:
+                if already:
+                    return {"ok": True, "old": old, "new": new, "already": True, "changed": False}
+                return {"ok": False, "error": f"{old!r} already wears a retirement face; "
+                                              f"a second successor would erase the first"}
+            new_index = "\n".join(out) + "\n"
+            text = self._open(old)
+            note = f"retired: superseded by [[{new}]] (manifest sha256:{hexd})"
+            body = text if note in text else text.rstrip("\n") + "\n\n" + note + "\n"
+            self._commit(old, "retire", {f"{old}.md": body.encode("utf-8"),
+                                         INDEX: new_index.encode("utf-8")})
+            self._titles = None
+            self._slugs_cache = None
+            return {"ok": True, "old": old, "new": new, "already": False, "changed": True,
+                    "manifest": f"sha256:{hexd}"}
+
     def annotate_direct(self, slug: str, tags=None, annotations: dict | None = None) -> dict:
         if (r := self._direct_refused()):
             return r
