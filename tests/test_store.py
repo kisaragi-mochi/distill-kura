@@ -51,6 +51,26 @@ def test_index_title_is_never_a_truncated_description(tmp_path):
     assert not long.startswith(title)
 
 
+def line_for(s, slug):
+    return [l for l in s.index_text().splitlines() if f"({slug}.md)" in l][0]
+
+
+def test_the_title_fallbacks_are_the_same_on_a_new_line_and_a_rewrite(tmp_path):
+    """The two renders of an entry line had two copies of the `0 < len <= 40` rule with
+    two different fallbacks. Only one of them was tested."""
+    s = make(tmp_path)
+    # no title, description short enough to say → the description becomes the title
+    s.remember("s1", "short desc", "b")
+    assert line_for(s, "s1") == "- [short desc](s1.md) — short desc"
+    # a title too long to say falls back the same way
+    s.remember("s2", "short desc", "b", title="x" * 41)
+    assert line_for(s, "s2") == "- [short desc](s2.md) — short desc"
+    # on a REWRITE with no title, the line keeps the title already on it
+    s.remember("s3", "d", "b", title="Keep")
+    s.remember("s3", "new d", "b")
+    assert line_for(s, "s3") == "- [Keep](s3.md) — new d"
+
+
 def test_write_policy_distiller_only_refuses_a_direct_write_and_accepts_a_pour(tmp_path):
     """The documented meaning of the old `readonly = true`: tools may not write, the
     distiller's verified pour may. The boolean refused BOTH, so a store advertised as

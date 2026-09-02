@@ -542,6 +542,18 @@ class Store:
         return None
 
     @staticmethod
+    def _index_line(title: str, slug: str, hook: str) -> str:
+        """The exact entry line this store writes. `remember` renders it twice — once
+        when refreshing a line, once when adding one — and store.py:LINK / weave.ENTRY
+        are the readers of what it produces."""
+        return f"- [{title}]({slug}.md) — {hook}"
+
+    @staticmethod
+    def _sayable_title(title: str, fallback: str) -> str:
+        """A title must be a name one can say aloud — never a truncated description."""
+        return title if 0 < len(title) <= 40 else fallback
+
+    @staticmethod
     def _carried_meta(fm: dict) -> dict:
         """The frontmatter a rewrite carries through untouched (see _TEMPLATE_KEYS)."""
         return {k: v for k, v in fm.items() if k not in _TEMPLATE_KEYS}
@@ -1095,8 +1107,8 @@ class Store:
                     m = (None if i in commented else
                          re.match(rf"- \[([^\]]+)\]\({re.escape(slug)}\.md\) — (.+)", l))
                     if m and not hit:
-                        out.append(f"- [{t1 if 0 < len(t1) <= 40 else m.group(1)}]"
-                                   f"({slug}.md) — {d1}")
+                        out.append(self._index_line(
+                            self._sayable_title(t1, m.group(1)), slug, d1))
                         hit = True
                     else:
                         out.append(l)
@@ -1106,9 +1118,9 @@ class Store:
             if new_index is None:
                 if f"({slug}.md)" not in entries:
                     # Title must be a name one can say aloud — never a truncated description.
-                    t1 = t1 if 0 < len(t1) <= 40 else (d1 if len(d1) <= 34 else slug)
+                    t1 = self._sayable_title(t1, d1 if len(d1) <= 34 else slug)
                     sep = "" if (not cur or cur.endswith("\n")) else "\n"
-                    new_index = f"{cur}{sep}- [{t1}]({slug}.md) — {d1}\n"
+                    new_index = f"{cur}{sep}{self._index_line(t1, slug, d1)}\n"
                     result = {"ok": True, "slug": slug, "created": not existed, "indexed": True}
                 else:
                     result = {"ok": True, "slug": slug, "created": not existed, "indexed": False}
