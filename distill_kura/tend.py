@@ -145,9 +145,8 @@ class Tender:
                  idle_min: float | None = None, poll_s: float = 15.0,
                  backoff_min: float | None = None, yield_on_return: bool | None = None):
         self.reg, self.store, self.config_path = reg, store, config_path
-        cfg = (reg.raw.get("distill") or {})
-        scfg = store.extra.get("distill") if isinstance(store.extra.get("distill"), dict) else {}
-        pick = lambda k, d: scfg.get(k, cfg.get(k, d))   # noqa: E731
+        merged = reg.distill_cfg_for(store)   # `scfg.get(k, cfg.get(k, d))`, one rule
+        pick = merged.get
         self.idle_s = float(idle_min if idle_min is not None else pick("idle_min", 10)) * 60
         self.backoff_s = float(backoff_min if backoff_min is not None else pick("backoff_min", 20)) * 60
         self.yield_on_return = bool(yield_on_return if yield_on_return is not None

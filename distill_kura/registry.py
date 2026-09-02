@@ -478,15 +478,28 @@ class Registry:
             return self.models
         return self.profiles[want]
 
+    def _own(self, store: Store, table: str) -> dict:
+        """A store's own `[stores.<name>.<table>]`, or {} when it has none."""
+        own = store.extra.get(table)
+        return own if isinstance(own, dict) else {}
+
+    def _cfg_for(self, store: Store, table: str) -> dict:
+        """Global `[<table>]`, overridden per store by `[stores.<name>.<table>]`.
+
+        Key PRESENCE, not truthiness: an explicit `0` or `""` in a store's table is
+        that store's answer, not a request to fall back to the global one.
+        """
+        return {**dict(self.raw.get(table) or {}), **self._own(store, table)}
+
     @property
     def prefill_cfg(self) -> dict:
         return dict(self.raw.get("prefill") or {})
 
     def prefill_cfg_for(self, store: Store) -> dict:
-        """Global `[prefill]`, overridden per store by `[stores.<name>.prefill]`."""
-        cfg = self.prefill_cfg
-        own = store.extra.get("prefill")
-        return {**cfg, **own} if isinstance(own, dict) else cfg
+        return self._cfg_for(store, "prefill")
+
+    def distill_cfg_for(self, store: Store) -> dict:
+        return self._cfg_for(store, "distill")
 
     @property
     def payforward_mouths(self) -> list[dict]:
@@ -502,10 +515,7 @@ class Registry:
         return dict(self.raw.get("fastpath") or {})
 
     def fastpath_cfg_for(self, store: Store) -> dict:
-        """Global `[fastpath]`, overridden per store by `[stores.<name>.fastpath]`."""
-        cfg = self.fastpath_cfg
-        own = store.extra.get("fastpath")
-        return {**cfg, **own} if isinstance(own, dict) else cfg
+        return self._cfg_for(store, "fastpath")
 
     def describe(self) -> dict:
         return {
