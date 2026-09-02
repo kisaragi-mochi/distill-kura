@@ -60,7 +60,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 
-from .store import Store
+from .store import Store, contained
 from .thinker import Models
 from .prefill import RESIDENT_MODES
 
@@ -209,11 +209,11 @@ def _real(path: str) -> str:
 
 
 def _inside(a: str, b: str) -> bool:
-    """True when `a` is `b` or lives under it."""
-    try:
-        return os.path.commonpath([a, b]) == b
-    except ValueError:
-        return False
+    """True when `a` is `b` or lives under it — the store's own containment check,
+    kept under this name because `_check_paths` reads as "a inside b". A third
+    implementation of the one predicate the trust model rests on is how the copies
+    drift apart in argument order."""
+    return contained(b, a)
 
 
 def _check_paths(stores: dict[str, Store], raw: dict) -> None:

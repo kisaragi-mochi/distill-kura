@@ -22,6 +22,8 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+from ..store import contained
+
 MAX_TOOL = 1500      # tools are verbose; the head is enough to ground a number
 MAX_SEG = 4000
 
@@ -375,14 +377,6 @@ def source_for(path: str) -> Source | None:
     return None
 
 
-def _inside(path: str, root: str) -> bool:
-    try:
-        return os.path.commonpath([os.path.realpath(path), os.path.realpath(root)]) \
-            == os.path.realpath(root)
-    except (ValueError, OSError):
-        return False
-
-
 def discover_all(roots: dict, exclude_roots: list[str] | None = None) -> list[str]:
     """Journals to drink from, newest first — today's decisions are worth the most.
 
@@ -426,7 +420,7 @@ def discover_all(roots: dict, exclude_roots: list[str] | None = None) -> list[st
             found = [f for f in found if f not in dropped]
         files += found
     for root in (exclude_roots or []):
-        files = [f for f in files if not _inside(f, root)]
+        files = [f for f in files if not contained(root, f)]
     # Path exclusion is not enough: a HARDLINK to a memory, sitting in an otherwise clean
     # journal root, is a different path to the same inode. It walked through and was
     # sipped as [USER] evidence — model-written memory laundered into the human's words,
