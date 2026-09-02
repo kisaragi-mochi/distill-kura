@@ -183,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--agent-url", help="agent-only measures THIS model reading the map "
                    "alone; without it the configured thinker plays the agent")
     b.add_argument("--agent-model", help="model name for --agent-url (default: 'agent')")
+    b.add_argument("--agent-key-env", help="NAME of the environment variable holding the "
+                   "bearer key for --agent-url (the key itself never goes on a command line)")
     b.add_argument("--no-cues", action="store_true",
                    help="run the fastpath tier without the callsign pre-head — the "
                         "comparison that isolates what the shared vocabulary buys")
@@ -301,7 +303,8 @@ def main(argv: list[str] | None = None) -> int:
                 identity = None
                 if a.routing == "agent-only":
                     if a.agent_url:
-                        thinker = Endpoint(url=a.agent_url, model=a.agent_model or "agent")
+                        thinker = Endpoint(url=a.agent_url, model=a.agent_model or "agent",
+                                           api_key_env=a.agent_key_env or None)
                     identity = {"url": thinker.url, "model": thinker.model}
                 elif a.agent_url or a.agent_model:
                     # The same refusal bench.worldline() makes: full ALWAYS runs the
