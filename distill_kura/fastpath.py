@@ -48,6 +48,10 @@ STOP_DF_RATIO = 0.20
 STOP_DF_MIN = 3
 GATE_RATIO = 1.15       # the winner must be CLEAR of the runner-up, not just tall
 DEFAULT_GATE = 1.0
+# Bumped whenever heads, weights, stop-gram rules or the gate change: the adaptive
+# trigger shadow keys its cache on it, so a cue judged "distinguishable" by an
+# older recognizer is re-judged rather than trusted across an algorithm change.
+RECOGNIZER_VERSION = 1
 BODY_CHARS = 500
 
 _TOKEN = re.compile(
@@ -146,7 +150,7 @@ def _clean_title(t: str) -> str:
     return re.sub(r"^[^\w]+|[^\w]+$", "", _norm(t))
 
 
-def _build(store: Store, stamp: tuple[int, int]) -> _Index:
+def _build(store: Store, stamp: tuple[int, int], body: bool = True) -> _Index:
     t0 = time.perf_counter()
     titles, hooks = _index_lines(store)
     mems: list[dict] = []
@@ -164,7 +168,10 @@ def _build(store: Store, stamp: tuple[int, int]) -> _Index:
         meta = " ".join([title, fm.get("description", ""), hook])
         meta3.append(_grams(meta, 3))
         meta2.append(_grams(meta, 2))
-        body3.append(_grams(body[:BODY_CHARS], 3))
+        # The adaptive shadow judges cues against what the AGENT sees — the resident
+        # map — so it asks for an index without the body head; with it, a cue would
+        # be "recognised" by prose the resident line never shows.
+        body3.append(_grams(body[:BODY_CHARS], 3) if body else set())
     n = len(mems)
     heads: dict[str, dict] = {}
     stops: dict[str, frozenset[str]] = {}
@@ -180,19 +187,21 @@ _CACHE: dict[str, _Index] = {}
 _LOCK = threading.Lock()
 
 
-def index_for(store: Store) -> _Index:
+def index_for(store: Store, body: bool = True) -> _Index:
     """The store's recognizer index, built on first use (~100 ms per ~300 memories)
     and rebuilt when the store moves underneath it. The lock is for the threaded
-    server: two concurrent recalls must not both pay the build."""
+    server: two concurrent recalls must not both pay the build. `body=False` is a
+    second, separately cached index over the resident lines only."""
     stamp = _stamp(store)
-    idx = _CACHE.get(store.path)
+    key = store.path if body else store.path + "|resident-only"
+    idx = _CACHE.get(key)
     if idx is not None and idx.stamp == stamp:
         return idx
     with _LOCK:
-        idx = _CACHE.get(store.path)
+        idx = _CACHE.get(key)
         if idx is None or idx.stamp != stamp:
-            idx = _build(store, stamp)
-            _CACHE[store.path] = idx
+            idx = _build(store, stamp, body=body)
+            _CACHE[key] = idx
     return idx
 
 
@@ -282,7 +291,7 @@ def _score(idx: _Index, question: str, top: int, gate: float) -> tuple[list[dict
 
 
 def lookup(store: Store, question: str, top: int = 3,
-           gate: float = DEFAULT_GATE, cues: bool = True) -> dict:
+           gate: float = DEFAULT_GATE, cues: bool = True, body: bool = True) -> dict:
     """→ {"hits": [{slug, score, heads}…], "verdict": "ok"|"no-confident-hit", "ms"}.
 
     Empty hits is the honest answer, never a failure: it means "this question needs
@@ -302,7 +311,7 @@ def lookup(store: Store, question: str, top: int = 3,
                               "heads": {"cue": cue["cue"]}}],
                     "verdict": "ok", "cue": cue["cue"],
                     "ms": round((time.perf_counter() - t0) * 1000, 3)}
-    idx = index_for(store)
+    idx = index_for(store, body=body)
     hits, verdict = _score(idx, question, top, float(gate))
     return {"hits": hits, "verdict": verdict, "cue": None,
             "ms": round((time.perf_counter() - t0) * 1000, 3)}
