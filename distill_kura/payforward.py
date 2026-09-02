@@ -149,7 +149,8 @@ def _build_prefill(reg: Registry, store: Store):
     return prefill_mod.build(store, loom, header=cfg.get("header"),
                              window_tokens=int(cfg.get("window_tokens", 131072)),
                              fraction=float(cfg.get("budget_fraction", 0.05)),
-                             hard_fraction=float(cfg.get("hard_fraction", 0.20)))
+                             hard_fraction=float(cfg.get("hard_fraction", 0.20)),
+                             resident_mode=cfg.get("resident_mode", "full"))
 
 
 def _probe(base: str, mouth: dict, map_text: str,

@@ -62,6 +62,7 @@ from dataclasses import dataclass, field
 
 from .store import Store
 from .thinker import Models
+from .prefill import RESIDENT_MODES
 
 CONFIG_CANDIDATES = ("kura.toml", os.path.expanduser("~/.config/distill-kura/kura.toml"))
 
@@ -87,7 +88,11 @@ _PREFILL_TYPES = {"window_tokens": int, "budget_fraction": float, "hard_fraction
                   # M4 adaptive minimum recognition trigger — SHADOW by default: candidates
                   # are generated and judged, the production cloth keeps trigger_tokens
                   # until a benchmark says otherwise. An untouched old config changes nothing.
-                  "adaptive_triggers": bool, "adaptive_apply": bool, "trigger_steps": list}
+                  "adaptive_triggers": bool, "adaptive_apply": bool, "trigger_steps": list,
+                  # M6: what the resident block wears when the full map is over the ceiling.
+                  "resident_mode": str}
+# M6 resident modes, imported so there is one list: `full` (today's map), `auto`
+# (map while it fits, constellation over the ceiling), `constellation` (always).
 # Tier zero of recall (`fastpath.py`). `gate` is the honesty bar: a hit below it is
 # silence, and silence goes to the thinker.
 _FASTPATH_TYPES = {"enabled": bool, "gate": (int, float), "cues": bool}
@@ -163,6 +168,19 @@ def _check_adaptive(section: str, t: dict) -> None:
         raise ValueError(f"[{section}] adaptive_apply=true needs adaptive_triggers=true")
 
 
+def _check_prefill(section: str, t: dict) -> None:
+    """The [prefill] table's shape AND its enumerated values. A `resident_mode`
+    outside the three names would either raise inside `prefill.build` on every
+    request or be quietly read as `full` — named at load, like every other bad
+    config value."""
+    _check_table(section, t, _PREFILL_TYPES)
+    _check_adaptive(section, t)
+    rm = t.get("resident_mode")
+    if rm is not None and rm not in RESIDENT_MODES:
+        raise ValueError(f"[{section}] resident_mode must be one of "
+                         f"{list(RESIDENT_MODES)}, got {rm!r}")
+
+
 def _check_table(where: str, table: dict, types: dict) -> None:
     for k, v in (table or {}).items():
         want = types.get(k)
@@ -182,8 +200,7 @@ def _check_table(where: str, table: dict, types: dict) -> None:
 def _check_types(name: str, sc: dict) -> None:
     _check_table(f"stores.{name}", sc, _TYPES)
     _check_table(f"stores.{name}.distill", sc.get("distill") or {}, _DISTILL_TYPES)
-    _check_table(f"stores.{name}.prefill", sc.get("prefill") or {}, _PREFILL_TYPES)
-    _check_adaptive(f"stores.{name}.prefill", sc.get("prefill") or {})
+    _check_prefill(f"stores.{name}.prefill", sc.get("prefill") or {})
     _check_table(f"stores.{name}.fastpath", sc.get("fastpath") or {}, _FASTPATH_TYPES)
 
 
@@ -356,8 +373,7 @@ class Registry:
             d = os.environ.get("KURA_DIR", os.path.abspath("memory"))
             stores["main"] = Store(name="main", path=d, label=os.environ.get("KURA_LABEL", "kura"))
         _check_table("distill", raw.get("distill") or {}, _DISTILL_TYPES)
-        _check_table("prefill", raw.get("prefill") or {}, _PREFILL_TYPES)
-        _check_adaptive("prefill", raw.get("prefill") or {})
+        _check_prefill("prefill", raw.get("prefill") or {})
         _check_table("fastpath", raw.get("fastpath") or {}, _FASTPATH_TYPES)
         srv = raw.get("server") or {}
         default = srv.get("default") or next(iter(stores))

@@ -115,6 +115,37 @@ trail reaches disk, the mouth is left restored on the current-etag spine, and th
 exits 0 unless the mouth is unreachable. The test fake is a llama.cpp in miniature: a
 per-slot KV string, common-prefix reprocessing, and save/restore by filename.
 
+### Constellation (M6)
+
+For a store whose full map alone is over the hard ceiling, the choice until now was
+an honest stub that said only "too large" — and an agent told nothing about what
+exists fills the gap with invention. The constellation is the honest middle, with no
+new structure and no model: the sectors ARE the canonical index's existing `## `
+headings, in order, and every memory belongs to exactly one sector — the heading
+above its FIRST index line. Lines before the first heading, and memories with no
+index line at all, are `UNSECTIONED`; a grouped line (`- topic — [A](a.md)/[B](b.md)`)
+puts each of its slugs in that line's sector once. The invariant is structural,
+checked in code, and raised loudly if broken: sum(sector counts) == len(slug_set()).
+
+Absence means something different here and the block says so out loud — right after
+the frame header, verbatim: "This is a map of sectors, not individual memories. /
+A memory not named here may still exist inside a sector." The full map's "not on the
+list = not remembered" wording never rides on a constellation. A sector line carries
+the name, its count, and up to three example titles verbatim from the index marked
+"e.g." — a hint, never a listing, and partial maps are forbidden in both directions.
+
+`prefill.build` gains `resident_mode` (`full | auto | constellation`): `full` is
+today's behaviour byte for byte; `constellation` always wears the sector map (the
+trail still rides after it when it fits); `auto` wears the map while it fits under
+the ceiling and falls back to the constellation only when the map alone is over it —
+and when the constellation itself is over, the existing TOO_BIG stub comes back.
+Stats name the choice: `resident_mode`, `source: "constellation"` when worn,
+`map_shown` stays false (it is not the map), and `constellation_shown` says what
+went out. Configure with `[prefill] resident_mode = "..."` (global or per store);
+anything outside the three names fails config loading. `kura constellation [--json]`
+prints the sector table and the invariant; `kura doctor` carries the sector and
+UNSECTIONED counts — a large unsectioned count is the cue to add headings.
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the

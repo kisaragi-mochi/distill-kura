@@ -130,6 +130,23 @@ If the map will not fit: lower `trigger_tokens`, narrow `pinned_types`, shorten
 `fresh_days`, raise `budget_fraction` if the window can afford it — or split the store,
 which is the honest answer past a few hundred memories.
 
+### When the map alone is over the ceiling: the constellation
+
+`[prefill] resident_mode` picks what the agent wears. `full` (the default) is
+today's map; `auto` keeps the map while it fits and wears the *constellation* only
+when the map alone is over the hard ceiling; `constellation` wears it always. The
+constellation is a map of SECTORS — the index's own `## ` headings, no model, no
+clustering — one line per sector: its memory count and up to three example titles.
+It says plainly that a memory not named may still exist inside a sector, which is
+why it is not the map and `map_shown` stays false while it is worn.
+
+Every memory lands in exactly one sector (first index line wins; the rest are
+`UNSECTIONED`), and the invariant `sum(sector counts) == memories` is checked in
+code. Inspect it with `kura constellation` (`--json` for the counts), or watch
+`constellation.unsectioned` in `kura doctor` — a large unsectioned count is the cue
+to add `## ` headings to `MEMORY.md`. The trail still rides after the block when it
+fits, and a constellation that will not fit itself degrades to the honest stub.
+
 **Never** hand-edit the woven cloth. It is derived; the next weave overwrites it. Edit
 the canonical `MEMORY.md`, or the memory itself, and re-weave.
 

@@ -12,6 +12,7 @@
     kura weave [-s eq] [--status]     re-weave the resident index (three-layer cloth)
     kura prefill [-s eq]            print the standing block a host should inject
     kura trail [-s eq]              rebuild the Hot Trail appended after the map
+    kura constellation [-s eq]      the sector map: which `## ` heading holds what
     kura pay-forward [-s eq]          bake the map into each mouth's KV slot, save it to disk
     kura bench compress [-s eq]       what the store cost against the journal it came from
     kura bench payforward --mouth N   what the pay-forward spine buys, priced by the mouth
@@ -176,6 +177,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("trail", help="rebuild the Hot Trail — the recent-path block appended after the map")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("constellation",
+                       help="the sector map: which `## ` heading holds what, and the invariant")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("pay-forward", help="pay the map's cold prefill forward: bake it "
                                            "into each mouth's KV slot and save the slot to disk")
     p.add_argument("--mouth", help="only this mouth (by [[payforward.mouths]] name)")
@@ -271,6 +276,25 @@ def main(argv: list[str] | None = None) -> int:
                              ensure_ascii=False, indent=1))
         else:
             print(json.dumps(_store(reg, a.store).doctor(), ensure_ascii=False, indent=1))
+        return 0
+
+    if a.cmd == "constellation":
+        from . import constellation
+        st = _store(reg, a.store)
+        r = constellation.check(st)
+        if a.json:
+            print(json.dumps({**r, "sectors_detail": [
+                {"name": sec.name, "count": len(sec.slugs), "titles": sec.titles}
+                for sec in constellation.sectors(st)]}, ensure_ascii=False, indent=1))
+            return 0
+        for sec in constellation.sectors(st):
+            line = f"- {sec.name} — {len(sec.slugs)} memories"
+            if sec.titles:
+                line += f" (e.g. {' / '.join(sec.titles)})"
+            print(line)
+        print(f"invariant: sum(sector counts) = {r['covered']} memories, "
+              f"store holds {r['memories']} — "
+              f"{'ok' if r['invariant_ok'] else 'BROKEN'}")
         return 0
 
     if a.cmd == "pay-forward":
@@ -397,7 +421,8 @@ def main(argv: list[str] | None = None) -> int:
                                    window_tokens=int(cfg.get("window_tokens", 131072)),
                                    fraction=float(cfg.get("budget_fraction", 0.05)),
                                    hard_fraction=float(cfg.get("hard_fraction", 0.20)),
-                                   trail=prefill_mod.trail_for(store, cfg, loom=loom))
+                                   trail=prefill_mod.trail_for(store, cfg, loom=loom),
+                                   resident_mode=cfg.get("resident_mode", "full"))
             if a.json:
                 print(json.dumps(pf.as_dict(), ensure_ascii=False))
             else:
