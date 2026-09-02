@@ -60,10 +60,12 @@ cases runnable anywhere; `explanation_burden` waits for M8 and a human definitio
 *Found on the way:* the shadow's candidate cache (`adaptive.hooks.json`) is a file,
 not a witness — a reused entry is now shape-checked and re-cleaned, and every reused
 cue still meets the floors and the recognizer in `judge` (reuse saves the model call,
-nothing else; `cues_reused` in the summary). The production `hooks.json` remains
-unsigned; it deserves the mark the cue ledger has (follow-up). Two more measurement
-fixes: the recognizer tells `untestable` (a cue made only of stop-grams — the store
-could not be asked) apart from `no-confident-hit` (the store said no), and every
+nothing else; `cues_reused` in the summary). The production `hooks.json` now carries
+the same mark as the cue ledger — HMAC over the canonical payload with the store's
+gate key — and a file whose mark does not verify is treated as empty: every hook is
+regenerated, never partially trusted. Two more measurement fixes: the recognizer
+tells `untestable` (a cue made only of stop-grams — the store could not be asked)
+apart from `no-confident-hit` (the store said no), and every
 Worldline trace row and variant carries `resident_sha`, the identity of the map it
 actually wore, because "adaptive" names a label, not a trigger set.
 

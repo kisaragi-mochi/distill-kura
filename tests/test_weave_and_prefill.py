@@ -304,13 +304,69 @@ def test_improving_the_trimmer_invalidates_the_ledger(tmp_path):
     loom = Loom(s, scribe=None)
     loom.weave()
     import json as _json
-    ledger = _json.load(open(loom.hooks_path, encoding="utf-8"))
+    ledger = _json.load(open(loom.hooks_path, encoding="utf-8"))["payload"]
     assert all(e["v"] == LEDGER_VERSION for e in ledger.values())
     for e in ledger.values():
         e["v"] = LEDGER_VERSION - 1
         e["hook"] = "a stale line from an older trimmer"
-    _json.dump(ledger, open(loom.hooks_path, "w", encoding="utf-8"))
+    # Still marked, so the file itself is trusted: only the stale `v` retires the lines.
+    _json.dump({"payload": ledger, "mark": loom._hooks_mark(ledger)},
+               open(loom.hooks_path, "w", encoding="utf-8"))
     assert "a stale line from an older trimmer" not in loom.weave().text
+
+
+def test_a_hand_edited_hook_line_is_not_worn_and_the_ledger_regenerates(tmp_path):
+    """The defect this closes: hooks.json was plain JSON, so a hook line edited by hand
+    reached the production cloth on the next weave. The file now carries the ledger's
+    mark, and a file whose mark does not verify is treated as EMPTY — every hook is
+    regenerated (mechanical when no scribe; that is the intended cost), never
+    partially trusted."""
+    import json as _json
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.weave()
+    env = _json.load(open(loom.hooks_path, encoding="utf-8"))
+    assert {"payload", "mark"} <= set(env)
+    env["payload"]["old-0"]["hook"] = "a hand-edited line worn on every turn"
+    _json.dump(env, open(loom.hooks_path, "w", encoding="utf-8"))
+    cloth = loom.weave()
+    assert "a hand-edited line worn on every turn" not in cloth.text
+    assert cloth.stats["hooks_reused"] == 0 and cloth.stats["hooks_written"] >= 1
+    # The rewritten ledger verifies again: the lie did not survive on disk either.
+    fresh = loom._hooks()
+    assert fresh and fresh["old-0"]["hook"] != "a hand-edited line worn on every turn"
+
+
+def test_a_legacy_unmarked_hooks_file_is_ignored_not_worn(tmp_path):
+    """The old format was a bare slug→entry dict. An unmarked file is neither trusted
+    entry-by-entry nor upgraded in place: it reads as empty, every hook regenerates,
+    and nothing crashes. The entries here are otherwise reusable, so hooks_reused == 0
+    shows the FILE was refused, not the entries."""
+    import json as _json
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.weave()
+    env = _json.load(open(loom.hooks_path, encoding="utf-8"))
+    _json.dump(env["payload"], open(loom.hooks_path, "w", encoding="utf-8"))
+    cloth = loom.weave()
+    assert cloth.stats["hooks_reused"] == 0 and cloth.stats["hooks_written"] >= 1
+
+
+def test_a_frozen_store_grows_no_hooks_file(tmp_path):
+    """How frozen is handled today, kept: a loom whose cloth would land inside a frozen
+    store is refused at construction, before any hook is computed or saved; and the
+    no-model status weave (generate=False) never saves. The mark must not add a new
+    way for a frozen archive to grow."""
+    s = a_store(tmp_path, n_old=2)
+    s.write_policy = "frozen"
+    with pytest.raises(ValueError, match="frozen"):
+        Loom(s, scribe=None)                   # the default cloth lives in the store
+    assert not os.path.exists(os.path.join(s.still, "hooks.json"))
+    assert not os.path.exists(os.path.join(s.still, "gate.key"))
+    outside = Loom(s, scribe=None, out_path=str(tmp_path / "cloth.md"))
+    cloth = outside.weave(generate=False)
+    assert cloth.stats["hooks_written"] == 0
+    assert not os.path.exists(os.path.join(s.still, "hooks.json"))
 
 
 def test_weaving_twice_changes_nothing(tmp_path):

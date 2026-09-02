@@ -53,6 +53,7 @@ byte-stable and free of anything volatile.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -82,7 +83,14 @@ DEFAULT_TRIGGER_TOKENS = 24
 # code that wrote it", so without a version the trimmer can be improved and nothing
 # happens. Observed exactly that: a fix for dropped ★ markers changed nothing until the
 # ledger was invalidated.
-LEDGER_VERSION = 8   # 8: the mechanical trim faces the numeric floor too (7: attribution)
+LEDGER_VERSION = 9   # 9: the file is marked (8: the mechanical trim faces the numeric floor too)
+
+# The hooks file carries the cue ledger's mark (cues.py `_mark`): HMAC over the
+# canonical payload with the store's gate key. It used to be plain JSON, so a hook
+# line edited by hand reached the production cloth on the next weave. A file whose
+# mark does not verify is treated as EMPTY — every hook regenerated — never
+# partially trusted. The prefix domain-separates these marks from the cue ledger's.
+HOOKS_MARK_PREFIX = "hook-ledger-v1"
 
 # Markers that carry the point of a line. A trimmer that drops them keeps the words and
 # loses the meaning: ⚠️ says "this will bite you again", ★ says "this is the important
@@ -132,6 +140,11 @@ def _sha1(s: str) -> str:
 
 def _sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _canon(obj) -> str:
+    """One deterministic serialisation for hashing and signing (same as cues._canon)."""
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 class WeaveError(RuntimeError):
@@ -267,19 +280,34 @@ class Loom:
         return "trigger"
 
     # ── the hook ledger: why this is cheap in the steady state ───────────
+    def _hooks_mark(self, payload: dict) -> str:
+        return hmac.new(self.store.gate_key(),
+                        (HOOKS_MARK_PREFIX + _canon(payload)).encode("utf-8"),
+                        hashlib.sha256).hexdigest()
+
     def _hooks(self) -> dict:
         try:
             with open(self.hooks_path, encoding="utf-8") as f:
                 d = json.load(f)
-            return d if isinstance(d, dict) else {}
         except (OSError, ValueError):
             return {}
+        # Marked like the cue ledger: a file is trusted only when its mark
+        # verifies. Missing, malformed, unmarked (the old plain dict) or
+        # mis-marked (a hook line edited by hand) all read as EMPTY — the whole
+        # ledger is regenerated; it is never partially trusted.
+        if isinstance(d, dict) and isinstance(d.get("payload"), dict) \
+                and isinstance(d.get("mark"), str) \
+                and hmac.compare_digest(self._hooks_mark(d["payload"]), d["mark"]):
+            return d["payload"]
+        return {}
 
     def _save_hooks(self, hooks: dict) -> None:
+        blob = json.dumps({"payload": hooks, "mark": self._hooks_mark(hooks)},
+                          ensure_ascii=False, indent=1, sort_keys=True)
         os.makedirs(self.store.still, exist_ok=True)
         tmp = self.hooks_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(hooks, f, ensure_ascii=False, indent=1, sort_keys=True)
+            f.write(blob)
         os.replace(tmp, self.hooks_path)
 
     # ── mechanical trimming (the no-model path) ──────────────────────────
