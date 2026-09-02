@@ -1,6 +1,8 @@
 """The gate — the floor under every model in the system.
 
-If these tests pass, a model cannot get an invented fact into the store no matter how
+If these tests pass, a model cannot get the covered classes of unsupported claims —
+fabricated quotes, unbacked numbers, unearned attribution to the human — into the
+store, no matter how
 confidently it words it. That is the whole claim of this project, so it is tested
 adversarially: each case is a way a real model actually tried to get something through.
 """
@@ -150,3 +152,115 @@ def test_attribution_check_is_mechanical():
     assert attributes_to_human("ケンが決めた", [])
     assert not attributes_to_human("the user decided to drop it", ["USER"])
     assert not attributes_to_human("the index was moved", [])
+
+
+# ── the composed text's numbers (gate_version 3) ────────────────────────────
+#
+# Every case is a way a scribe actually invents: a measurement from nowhere, a
+# ratio it computed itself, a rounded "improvement" of a real figure.
+
+def test_composed_invented_number_is_caught():
+    ev = [{"class": "TOOL", "text": "decode 51.43 t/s held while streaming"}]
+    from distill_kura.distill.gate import composed_number_violations
+    assert composed_number_violations("the run reached 49 TPS on 12 GPUs", ev) == ["49", "12"]
+
+
+def test_composed_number_from_evidence_passes():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "decode 51.43 t/s held; port :8085 answered"}]
+    assert composed_number_violations("held 51.43 t/s, served on :8085", ev) == []
+
+
+def test_composed_number_survives_formatting_drift():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "table is 51,200,245,760 params"}]
+    assert composed_number_violations("a 51200245760-param table", ev) == []
+
+
+def test_composed_derived_ratio_is_refused_on_purpose():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "before 899 ms, after 2.3 ms"}]
+    assert composed_number_violations("that is roughly 390x faster", ev) == ["390"]
+
+
+def test_composed_allowed_text_and_list_markers():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "USER", "text": "please keep the archive on the slow disk"}]
+    assert composed_number_violations("## 2026-09-01 decided", ev, allowed="2026-09-01") == []
+    assert composed_number_violations("1. check the fans\n2. check the disk", ev) == []
+
+
+def test_composed_single_digits_are_claims_now():
+    # "8 GPUs" and "4-bit" are exactly what a local-model house invents.
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "ran on 4 GPUs"}]
+    assert composed_number_violations("ran on 8 GPUs", ev) == ["8"]
+    assert composed_number_violations("ran on 4 GPUs", ev) == []
+
+
+# Three exploits from the second outside review — each passed the first gate v3 draft.
+
+def test_composed_numbers_never_borrow_neighbouring_digits():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "before 899 ms; after 2.3 ms"}]
+    assert composed_number_violations("it took 923 ms", ev) == ["923"]
+
+
+def test_composed_sign_is_meaning():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "profit was +12.5%"}]
+    assert composed_number_violations("loss was -12.5%", ev) == ["-12.5"]
+    assert composed_number_violations("the figure 12.5% moved", ev) == []
+
+
+def test_composed_range_is_one_claim():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "12 GPUs and 16 GB"}]
+    assert composed_number_violations("needs 12-16 GPUs", ev) == ["12-16"]
+
+
+def test_composed_markdown_bullet_is_not_a_sign():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "counted 12 entries"}]
+    assert composed_number_violations("- 12 entries were counted", ev) == []
+
+
+# Round three: the Unicode disguises, and the door behind the last writer.
+
+def test_composed_unicode_dashes_are_not_a_disguise():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "12 GPUs and 16 GB; profit was +12.5%"}]
+    assert composed_number_violations("needs 12\u201316 GPUs", ev) == ["12-16"]      # en dash
+    assert composed_number_violations("loss was \u221212.5%", ev) == ["-12.5"]       # true minus
+
+
+def test_composed_scientific_notation_is_one_token():
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "about 1e9 parameters"}]
+    assert composed_number_violations("about 1e9 parameters", ev) == []
+    assert composed_number_violations("about 2e9 parameters", ev) == ["2e9"]
+
+
+def test_final_surface_covers_attribution_too():
+    from distill_kura.distill.gate import final_surface_violations
+    ev = [{"class": "SELF", "text": "I think the slow disk is right"}]
+    out = final_surface_violations("the user decided on the slow disk", ev, ["SELF"])
+    assert out == ["credits the human with no [USER] quote"]
+    assert final_surface_violations("the slow disk seems right", ev, ["SELF"]) == []
+
+
+def test_composed_signed_scientific_is_one_token():
+    # Round four: "-1e9" must not decompose into an evidenced "-1" and "9".
+    from distill_kura.distill.gate import composed_number_violations
+    ev = [{"class": "TOOL", "text": "temperature -1 C; repeated 9 times"}]
+    assert composed_number_violations("-1e9 parameters", ev) == ["-1e9"]
+
+
+def test_attribution_knows_the_houses_own_shorthand():
+    # The house writes "ケン確定 / ケン裁定 / ケン: …" more often than "ケンが決めた"; a
+    # floor that knew only the verb forms let a cue rewrite who decided.
+    for line in ("ケン確定: SSD層はアーカイブ用途", "ケン裁定 09-01", "ケン: こっちで行こう",
+                 "Ken decided to keep the slow disk", "the owner ruled it out"):
+        assert attributes_to_human(line, []), line
+    for line in ("ケンにとってのユキ", "SSD層はアーカイブ用途", "a decision was reached"):
+        assert not attributes_to_human(line, []), line

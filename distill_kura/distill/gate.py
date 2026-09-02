@@ -21,6 +21,7 @@ Four things happen here:
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from ..store import InvalidTag, normalize_tags
 from .sources import Segment
@@ -89,12 +90,97 @@ def gate(cands: list[dict], segs: list[Segment], store_text: str = "") -> tuple[
 
         claims_number = bool(re.search(r"\d", f"{c.get('why', '')} {c.get('topic', '')}"))
         grounded = bool(classes & {"TOOL", "ACT"})
-        kept.append({**c,
-                     "evidence": good,
-                     "classes": sorted(classes),
-                     "judgement": judgement,
-                     "unverified_numbers": claims_number and not grounded})
+        entry = {**c,
+                 "evidence": good,
+                 "classes": sorted(classes),
+                 "judgement": judgement,
+                 "unverified_numbers": claims_number and not grounded}
+        # Callsigns are verified against the SURVIVING quotes, not the raw material:
+        # a phrase that only ever appeared in a dropped quote was never evidence.
+        cues, cue_refused = verify_callsigns(c.get("callsigns"), good)
+        if cues or cue_refused:
+            entry["routing_cues"] = cues
+            entry["routing_cues_refused"] = cue_refused
+        kept.append(entry)
     return kept, dropped, ideas
+
+
+# ── the final surface, re-checked ────────────────────────────────────────
+#
+# The gate above verifies what the CANDIDATE brought. Models write text after
+# that — the scribe composing, the judge fixing — and every one of them is a
+# model: told "write no numbers", it can still write one with nothing behind it.
+# The mark (HMAC) proves who staged a draft, not that its claims are grounded.
+# So everything a model wrote that will be stored or indexed — title, trigger,
+# section heading, body, the curation sentences — gets a deterministic floor,
+# token by token: a numeric token in the final surface must equal a numeric
+# token the evidence itself contains. Never by concatenating the evidence's
+# digits ("899 ms … 2.3 ms" must not vouch for an invented "923"). A sign is
+# meaning; a range is one claim; scientific notation is one token; Unicode
+# lookalikes (−, –, —, full-width digits) are normalised before scanning, so a
+# dash from a different alphabet is not a disguise. Single digits are verified
+# too — "8 GPUs" and "4-bit" are exactly the claims a house full of local
+# models invents — with one mechanical exception: ordered-list markers.
+
+_SCI_OR_NUM = re.compile(r"[+-]?\d+(?:\.\d+)?[eE][+-]?\d+|[+-]?\d[\d,.:/-]*\d|[+-]?\d")
+_LIST_MARKER = re.compile(r"(?m)^\s*\d+[.)]\s+")
+
+
+def _num_normalize(s: str) -> str:
+    s = unicodedata.normalize("NFKC", s).replace("\u2212", "-")   # true minus
+    return re.sub(r"(?<=\d)\s?[\u2013\u2014]\s?(?=\d)", "-", s)  # digit–digit dashes
+
+
+def _canon_num(t: str) -> str:
+    # A comma is forgiven only as a THOUSANDS separator (\d{1,3}(,\d{3})+): erasing
+    # every comma made "1,5" canonicalise to "15", so a claimed 1,5 passed on
+    # evidence that said 15 — two different numbers, one vouching for the other.
+    # A comma that is not a thousands separator stays, and the token fails closed.
+    # "E" folds to "e": 1.23E-4 and 1.23e-4 are one magnitude, not two claims.
+    return re.sub(r"(?<=\d),(?=\d{3}(\D|$))", "", t.rstrip(",.:/-").replace("E", "e"))
+
+
+def _num_tokens(s: str) -> list[str]:
+    return [_canon_num(m.group(0)) for m in _SCI_OR_NUM.finditer(s)]
+
+
+def composed_number_violations(text: str, evidence: list[dict], allowed: str = "") -> list[str]:
+    """→ numeric tokens the final text claims that its evidence never contained.
+
+    Canonicalisation forgives formatting (commas, trailing punctuation, Unicode
+    spellings) and nothing else. An unsigned token in the text may cite a signed
+    one in the evidence (the magnitude is the evidence's); a signed token must
+    match sign and all. `allowed` is extra text whose numbers are legitimate —
+    the caller decides what that is, and today the pipeline passes nothing.
+    """
+    hay = _num_normalize(norm(" ".join(str(e.get("text", "")) for e in evidence)) + " " + allowed)
+    exact: set[str] = set()
+    unsigned: set[str] = set()
+    for c in _num_tokens(hay):
+        exact.add(c)
+        unsigned.add(c.lstrip("+-"))
+    bad: list[str] = []
+    for t in _num_tokens(_LIST_MARKER.sub("", _num_normalize(text))):
+        ok = (t in exact) if t[:1] in "+-" else (t in unsigned)
+        if not ok and t not in bad:
+            bad.append(t)
+    return bad
+
+
+def final_surface_violations(surface: str, evidence: list[dict], classes: list[str],
+                             allowed: str = "") -> list[str]:
+    """The one door every model-written surface must pass before it earns a mark.
+
+    `surface` is everything that will be stored or indexed: title, description,
+    section heading, body, curation sentences — concatenation is fine, this is a
+    floor, not a parser. `allowed` is text whose numbers CODE put there (an
+    extension heading's mechanically stamped date). Returns human-readable
+    violations; empty means pass.
+    """
+    v = [f"invented number: {t}" for t in composed_number_violations(surface, evidence, allowed)]
+    if attributes_to_human(surface, classes):
+        v.append("credits the human with no [USER] quote")
+    return v
 
 
 # ── tags: a model proposes, the evidence decides ─────────────────────────
@@ -188,6 +274,66 @@ def verify_tags(proposed, evidence: list[dict], recurred_ok: bool = False
     return tuple(kept), basis, refused
 
 
+# ── USER callsigns: the shared vernacular that routes to a memory ─────────
+#
+# A callsign is not content — it is the two-of-us word ("全員野球") that leads
+# BACK to a memory. As a routing word it is worth exactly its provenance, so
+# the floor is the same one quotes stand on: the phrase must exist verbatim
+# inside a SURVIVING [USER] quote. A nickname the agent coined, a string a tool
+# printed, a paraphrase of what the human "meant" — none of it is shared
+# vocabulary, and none of it passes.
+
+CUE_MIN, CUE_MAX, CUE_MAX_N = 3, 40, 2
+
+
+def cue_key(text: str) -> str:
+    """The routing-comparison key: NFKC + casefold + collapsed whitespace. The
+    DISPLAY keeps the human's spelling; only comparison normalises, so '全員野球'
+    and 'ＦＵＬＬ野球' never silently merge but 'FreeToken' and 'freetoken' do."""
+    import unicodedata as _u
+    return " ".join(_u.normalize("NFKC", text).casefold().split())
+
+
+def verify_callsigns(proposed, evidence: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """→ (kept, refused). kept items carry {text, class: USER, quote} — the quote
+    is the surviving [USER] evidence the phrase was found in, so the manifest can
+    always say whose words the callsign is.
+
+    Deterministic, like the rest of this file: the model proposes, the human's
+    surviving words decide. The GATED VALUE is the whitespace-collapsed form —
+    what is returned is exactly what a JSON round-trip gives back."""
+    user_quotes = [e["text"] for e in evidence if e["class"] == "USER"]
+    kept: list[dict] = []
+    refused: dict[str, str] = {}
+    seen_keys: set[str] = set()
+    for raw in (proposed or []):
+        text = " ".join(str(raw).split())            # round-trip shape, see test 7
+        key = cue_key(text)
+        why = None
+        if not text or not any(ch.isalnum() for ch in key):
+            why = "whitespace and punctuation alone do not route anywhere"
+        elif not (CUE_MIN <= len(key) <= CUE_MAX):
+            why = f"a callsign is {CUE_MIN}–{CUE_MAX} codepoints after normalisation"
+        elif key in seen_keys:
+            continue                                  # the same word, proposed twice
+        else:
+            hit = next((q for q in user_quotes if text in q), None)
+            if hit is None:
+                # Not inside a surviving [USER] quote: invented, paraphrased, or a
+                # phrase only the agent or a tool used. All three are the same
+                # refusal — the human never said it.
+                why = "needs the human's own words: an exact substring of a surviving [USER] quote"
+        if why is not None:
+            refused[text or repr(raw)] = why
+            continue
+        if len(kept) >= CUE_MAX_N:
+            refused[text] = f"at most two callsigns per memory (kept {[k['text'] for k in kept]})"
+            continue
+        seen_keys.add(key)
+        kept.append({"text": text, "class": "USER", "quote": hit})
+    return kept, refused
+
+
 def salvage(raw: str) -> list[dict]:
     """Recover complete objects from a truncated JSON array.
 
@@ -230,6 +376,11 @@ def attributes_to_human(text: str, classes: list[str], words: list[str] | None =
     Prompt instructions get broken; this is checked mechanically instead."""
     if "USER" in classes:
         return False
-    pat = words or [r"ケン(は|が|の指示|の決裁|さんが)", r"\b(the user|the human|the owner)\b\s+\w*\s*"
-                                                        r"(decided|asked|approved|chose|instructed|said)"]
+    # The house writes "ケン確定 / ケン裁定 / ケン方針 / ケン決定 / ケン: ..." at least as
+    # often as "ケンが決めた"; a floor that knew only the verb forms let a cue rewrite
+    # who decided while every 2-gram stayed in place.
+    pat = words or [r"ケン(は|が|の指示|の決裁|さんが|確定|裁定|方針|決定|号令|決裁|指示|裁決|承認)",
+                    r"ケン\s*[:：]",
+                    r"\b(the user|the human|the owner|ken)\b\s+\w*\s*"
+                    r"(decided|asked|approved|chose|instructed|said|ruled|confirmed)"]
     return any(re.search(p, text, re.I) for p in pat)

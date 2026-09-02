@@ -20,7 +20,26 @@ import pytest   # noqa: E402
 from distill_kura.prefill import build, etag_of, loom_for, unreachable   # noqa: E402
 from distill_kura.store import Store                                     # noqa: E402
 from distill_kura.tokens import estimate                                 # noqa: E402
+from distill_kura.distill.gate import composed_number_violations        # noqa: E402
 from distill_kura.weave import Loom, WeaveError, _links_per_line         # noqa: E402
+
+
+# Real index lines from the household this store was built for: Japanese, English, and
+# both mixed with identifiers. Every one carries numbers, which is the point — a trigger
+# is worn on every turn, so a number the trimmer composed by accident is a lie the agent
+# reads all day and pay-forward bakes into KV.
+REAL_LINES = [
+    ("常駐して噛む脳", "★背景で日誌消化+前景0.15秒応答。記憶の新陳代謝はこの形。GPU普段0%=消化はタダ"),
+    ("蔵サービス", ":8085 記憶への唯一の入り口。索引常駐＋意味の再認＋リンク歩行0.4秒。雲/ローカル/足軽/声が共有"),
+    ("蔵の救命艇", "⚠️写しが8日止まり197本が世界に無かった。lifeboat.shで別盤・別筐体+復元ドリル済。地雷=sortロケール"),
+    ("Qwen3.6-35B-A3B NVFP4", "vLLM0.22無改造163t/s。27B pi-tune=grafted-MTPをignoreに/ThinkingCap=思考46%減"),
+    ("FreeToken/SAZANAMI", "★KV永続化 116秒→23ms(greedy一致)。床+限界費用で読む。投機がコードで勝った(18.907→23.139/k=4)"),
+    ("Huihui-Qwen3.8", "TP=8で単流107.7/8並列547.5 t/s・⚠️APC明示必須・FP16素体の口 :8019 TP=8 xhigh(門3/3)"),
+    ("GLM-5.2-for-3090検証", "⚠️実測1375KiB/expertでREADME 320KiB主張と矛盾・厳格PASS 4/75層(worst 0.866)→3090では不成立"),
+    ("表流しの実証", "★冷キャッシュ+MemoryMax=90Gで実証: 表領域0.1-3.5%常駐で code 51.43 t/s維持。所要=ファイル72.9GiB+anon≈83GB"),
+    ("bake and restore", "the bake took 796.5 seconds and the restore 0.655 seconds afterwards, measured cold"),
+    ("CPU推論はDIMMファン待ち", "the run finished at 43.7 t/s after the fans went in, which was the whole point of the week"),
+]
 
 
 def a_store(tmp_path, n_old: int = 6) -> Store:
@@ -118,7 +137,12 @@ def test_the_postcondition_actually_fires(tmp_path, monkeypatch):
     """The guard has to be able to fail, or it is decoration."""
     s = a_store(tmp_path, n_old=2)
     loom = Loom(s, scribe=None)
-    monkeypatch.setattr(loom, "_mechanical", lambda desc: "](ghost.md) invented")
+    monkeypatch.setattr(loom, "_mechanical",
+                        lambda desc, title="": "](ghost.md) invented")
+    # The floors now refuse this cut before it is worn; silence them so the lie
+    # reaches the cloth and the postcondition — the backstop behind the floors —
+    # is the thing under test, as before W2b.
+    monkeypatch.setattr("distill_kura.floors.first_violation", lambda *a, **k: None)
     with pytest.raises(WeaveError):
         loom.weave()
 
@@ -164,6 +188,96 @@ def test_trimming_never_invents_a_unit(tmp_path):
     assert "3.7s" not in out
 
 
+def test_a_decimal_is_never_split_into_two_numbers(tmp_path):
+    """The observed bug: the clause splitter treated the ASCII "." as a full stop, so
+    "the bake took 796.5 seconds" was cut to "the bake took 796." and the trigger
+    reported 796 and 5 — two measurements that appear nowhere in the memory. Unlike a
+    model's candidate this path never faced the numeric floor, so the invented number
+    went onto the resident map and was worn on every turn."""
+    desc = "the bake took 796.5 seconds and the restore 0.655 seconds afterwards"
+    for tokens in (6, 8, 10, 12, 16, 24):
+        out = Loom(a_store(tmp_path, n_old=1), scribe=None,
+                   trigger_tokens=tokens)._mechanical(desc, "bake and restore")
+        assert "796." not in out or "796.5" in out, (tokens, out)
+        assert not composed_number_violations(
+            out, [{"text": f"bake and restore {desc}"}]), (tokens, out)
+
+
+def test_a_decimal_is_never_split_in_japanese(tmp_path):
+    """Same cut, a line with no spaces to fall back on. 。 and ； are real boundaries
+    and stay; the period inside 796.5 is not one."""
+    desc = "★焼成は796.5秒、復元は0.655秒だった。以後この形で運用する。⚠️冷キャッシュだと12,500GiB読み直し"
+    for tokens in (6, 8, 10, 12, 16, 24):
+        out = Loom(a_store(tmp_path, n_old=1), scribe=None,
+                   trigger_tokens=tokens)._mechanical(desc, "焼成と復元")
+        assert not composed_number_violations(
+            out, [{"text": f"焼成と復元 {desc}"}]), (tokens, out)
+
+
+def test_a_number_at_the_edge_of_the_budget_is_not_halved():
+    """The budget lands where it lands. Every character position is a possible cut, and
+    a cut inside a number invents one whichever mechanism made it — so the cut moves off
+    the number rather than the number being trimmed to fit. "107.7/8" counts as one
+    number here because the floor reads it as one claim."""
+    for text in ("the restore finished in 0.655 seconds after the bake wrote 12,500 GB to disk",
+                 "TP=8で単流107.7/8並列547.5 t/s・⚠️APC明示必須・FP16素体の口 :8019 xhigh",
+                 "measured 2026-08-22 at 1.23e-4 error over 4/75 layers, worst 0.866"):
+        for limit in range(6, len(text) + 3):
+            out = Loom._soft_cut(text, limit)
+            assert out.strip(), (limit, text)
+            assert not composed_number_violations(out, [{"text": text}]), (limit, out)
+
+
+def test_the_mechanical_trim_faces_the_numeric_floor_too(tmp_path):
+    """A model-written trigger has to clear the numeric floor in `_acceptable`; the
+    mechanical fallback did not, and it is the path that runs whenever the GPU is down —
+    so the unchecked line is the one worn on the worst day. Same floor, same source,
+    across every budget the loom is used at."""
+    s = a_store(tmp_path, n_old=1)
+    for tokens in (6, 8, 10, 12, 16, 24, 40):
+        loom = Loom(s, scribe=None, trigger_tokens=tokens)
+        for title, desc in REAL_LINES:
+            out = loom._keep_markers(desc, loom._mechanical(desc, title))
+            assert not composed_number_violations(
+                out, [{"text": f"{title} {desc}"}]), (tokens, title, out)
+
+
+def test_the_numeric_floor_on_the_trim_can_actually_fire(tmp_path, monkeypatch):
+    """The guard has to be able to fail, or it is decoration. With a fragment that no
+    honest cut could produce, the trim must reach for a wider one — never patch the
+    number out, never come back blank."""
+    desc = ("the ledger held steady all week. later the sheet showed the same figure "
+            "again and then a long tail of words that blows any sensible budget")
+    loom = Loom(a_store(tmp_path, n_old=1), scribe=None, trigger_tokens=16)
+    monkeypatch.setattr(Loom, "_salient", staticmethod(lambda text: ["923ms"]))
+    out = loom._mechanical(desc, "ledger")
+    assert "923" not in out
+    assert out.strip() and out in f"{desc}"
+
+
+def test_the_trim_is_never_blank(tmp_path):
+    """A blank trigger drops the memory off the map entirely, which is far worse than a
+    mediocre one — so no rung of the fallback may end in silence."""
+    s = a_store(tmp_path, n_old=1)
+    for tokens in (1, 2, 4, 6, 24):
+        loom = Loom(s, scribe=None, trigger_tokens=tokens)
+        for title, desc in REAL_LINES + [("digits", "123456789012345678901234567890"),
+                                         ("one", "0.6551234567890123456789012345")]:
+            assert loom._mechanical(desc, title).strip(), (tokens, title)
+
+
+def test_a_woven_line_never_carries_a_number_the_index_did_not(tmp_path):
+    """End to end, with no model reachable: what lands in the cloth is what gets worn."""
+    s = a_store(tmp_path, n_old=1)
+    for i, (title, desc) in enumerate(REAL_LINES):
+        s.remember(f"real-{i}", desc, "body")
+        os.utime(s.file_of(f"real-{i}"), (time.time() - 400 * 86400,) * 2)
+    cloth = Loom(s, scribe=None, trigger_tokens=12).weave().text
+    source = s.index_text()
+    for line in cloth.splitlines():
+        assert not composed_number_violations(line, [{"text": source}]), line
+
+
 def test_trimming_does_not_cut_mid_word_when_a_break_is_near(tmp_path):
     loom = Loom(a_store(tmp_path, n_old=1), scribe=None)
     out = loom._soft_cut("ここは私自身の自律進化の土壌、工房ではない話", 14)
@@ -194,13 +308,69 @@ def test_improving_the_trimmer_invalidates_the_ledger(tmp_path):
     loom = Loom(s, scribe=None)
     loom.weave()
     import json as _json
-    ledger = _json.load(open(loom.hooks_path, encoding="utf-8"))
+    ledger = _json.load(open(loom.hooks_path, encoding="utf-8"))["payload"]
     assert all(e["v"] == LEDGER_VERSION for e in ledger.values())
     for e in ledger.values():
         e["v"] = LEDGER_VERSION - 1
         e["hook"] = "a stale line from an older trimmer"
-    _json.dump(ledger, open(loom.hooks_path, "w", encoding="utf-8"))
+    # Still marked, so the file itself is trusted: only the stale `v` retires the lines.
+    _json.dump({"payload": ledger, "mark": loom._hooks_mark(ledger)},
+               open(loom.hooks_path, "w", encoding="utf-8"))
     assert "a stale line from an older trimmer" not in loom.weave().text
+
+
+def test_a_hand_edited_hook_line_is_not_worn_and_the_ledger_regenerates(tmp_path):
+    """The defect this closes: hooks.json was plain JSON, so a hook line edited by hand
+    reached the production cloth on the next weave. The file now carries the ledger's
+    mark, and a file whose mark does not verify is treated as EMPTY — every hook is
+    regenerated (mechanical when no scribe; that is the intended cost), never
+    partially trusted."""
+    import json as _json
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.weave()
+    env = _json.load(open(loom.hooks_path, encoding="utf-8"))
+    assert {"payload", "mark"} <= set(env)
+    env["payload"]["old-0"]["hook"] = "a hand-edited line worn on every turn"
+    _json.dump(env, open(loom.hooks_path, "w", encoding="utf-8"))
+    cloth = loom.weave()
+    assert "a hand-edited line worn on every turn" not in cloth.text
+    assert cloth.stats["hooks_reused"] == 0 and cloth.stats["hooks_written"] >= 1
+    # The rewritten ledger verifies again: the lie did not survive on disk either.
+    fresh = loom._hooks()
+    assert fresh and fresh["old-0"]["hook"] != "a hand-edited line worn on every turn"
+
+
+def test_a_legacy_unmarked_hooks_file_is_ignored_not_worn(tmp_path):
+    """The old format was a bare slug→entry dict. An unmarked file is neither trusted
+    entry-by-entry nor upgraded in place: it reads as empty, every hook regenerates,
+    and nothing crashes. The entries here are otherwise reusable, so hooks_reused == 0
+    shows the FILE was refused, not the entries."""
+    import json as _json
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.weave()
+    env = _json.load(open(loom.hooks_path, encoding="utf-8"))
+    _json.dump(env["payload"], open(loom.hooks_path, "w", encoding="utf-8"))
+    cloth = loom.weave()
+    assert cloth.stats["hooks_reused"] == 0 and cloth.stats["hooks_written"] >= 1
+
+
+def test_a_frozen_store_grows_no_hooks_file(tmp_path):
+    """How frozen is handled today, kept: a loom whose cloth would land inside a frozen
+    store is refused at construction, before any hook is computed or saved; and the
+    no-model status weave (generate=False) never saves. The mark must not add a new
+    way for a frozen archive to grow."""
+    s = a_store(tmp_path, n_old=2)
+    s.write_policy = "frozen"
+    with pytest.raises(ValueError, match="frozen"):
+        Loom(s, scribe=None)                   # the default cloth lives in the store
+    assert not os.path.exists(os.path.join(s.still, "hooks.json"))
+    assert not os.path.exists(os.path.join(s.still, "gate.key"))
+    outside = Loom(s, scribe=None, out_path=str(tmp_path / "cloth.md"))
+    cloth = outside.weave(generate=False)
+    assert cloth.stats["hooks_written"] == 0
+    assert not os.path.exists(os.path.join(s.still, "hooks.json"))
 
 
 def test_weaving_twice_changes_nothing(tmp_path):
@@ -342,3 +512,233 @@ def test_estimator_is_close_on_mixed_text():
     assert estimate(jp) > len(jp) * 0.7          # Japanese is ~1 token per character
     assert estimate(en) < len(en) * 0.45         # English is ~1 per four
     assert etag_of("a") != etag_of("b")
+
+
+def test_a_trigger_that_swaps_a_digit_is_not_grounded(tmp_path):
+    # A one-digit swap keeps most of its 2-grams and walks over the overlap floor —
+    # and a false trigger is worn on every turn, then baked into KV by pay-forward.
+    s = Store(name="w", path=str(tmp_path / "w")); s.init_files()
+    loom = Loom(s, scribe=None)
+    title = "SAZANAMI GPUs"
+    desc = "SAZANAMI runs 12 GPUs with NVFP4 and local inference"
+    assert not loom._acceptable("SAZANAMI runs 99 GPUs with NVFP4 and local inference", title, desc)
+    assert loom._acceptable("SAZANAMI runs 12 GPUs with NVFP4 and local inference", title, desc)
+
+
+# ── the source-hash CAS: a pour during the weave must not vanish ────────────
+
+def test_persist_refuses_when_the_source_moved_while_weaving(tmp_path):
+    """weave() reads the index, then spends model time on triggers. A memory poured
+    meanwhile is missing from the cloth — yet the cloth would land NEWER than the
+    index, so an mtime test would call the stale cloth fresh and pay-forward would
+    bake it into KV. persist() re-hashes the index under the store lock and refuses
+    a cloth whose source has moved: old cloth intact, distinct outcome, no retry
+    loop of its own — re-weaving is the caller's decision."""
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    before = loom.cloth_on_disk()
+    cloth = loom.weave()                        # a snapshot of the index as it was
+    s.remember("poured-meanwhile", "a memory poured between weave and persist", "body")
+    stats = loom.persist(cloth)
+    assert stats["written"] is False
+    assert stats["refused"] == "source moved while weaving"
+    assert loom.cloth_on_disk() == before       # the old cloth is intact
+    assert loom.is_stale() is True              # and nothing pretends it is current
+    # The caller re-weaves; the fresh weave sees the poured memory and lands.
+    again = loom.write()
+    assert again["written"] is True and "refused" not in again
+    assert "poured-meanwhile" in loom.cloth_on_disk()
+    assert loom.is_stale() is False
+
+
+def test_staleness_is_judged_by_hash_not_mtime(tmp_path):
+    """A cloth NEWER than the index proves nothing — that is exactly the state a
+    mid-weave pour leaves behind. Staleness is: current index hash != the hash
+    persist() verified. The serving side must fall back to the canonical index."""
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    assert loom.is_stale() is False             # steady state: weave → not stale
+    s.remember("brand-new", "poured after the weave", "body")
+    ahead = time.time() + 3600
+    os.utime(loom.out_path, (ahead, ahead))     # cloth mtime NEWER than the index
+    assert loom.is_stale() is True
+    pf = build(s, loom)
+    assert pf.stats.get("stale") is True and pf.stats["source"] == "canonical"
+
+
+def test_a_cloth_without_a_source_record_is_not_trusted(tmp_path):
+    """A cloth written before the source record existed cannot be proven current.
+    Unprovable is served the same as stale — the canonical index is the safe
+    fallback — and one no-op re-weave heals the record."""
+    s = a_store(tmp_path, n_old=1)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    os.remove(loom.state_path)
+    assert loom.is_stale() is True
+    again = loom.write()                        # byte-identical cloth, no churn…
+    assert again["written"] is False
+    assert loom.is_stale() is False             # …but the record is healed
+    import json as _json
+    st = _json.load(open(loom.state_path, encoding="utf-8"))
+    assert st["source_sha256"] and st["cloth_sha256"]   # both ends re-recorded
+    assert isinstance(st["source_revision"], int)       # and the revision beside them
+
+
+def test_a_mutated_cloth_cannot_wear_a_valid_freshness_stamp(tmp_path):
+    """The sidecar proves the PRODUCT as well as the source: were only the index
+    hashed, a cloth corrupted or hand-edited while the index sat unchanged would
+    still say fresh — and prefill would wear the mutated map on every turn. Either
+    hash mismatching is stale; the canonical index is the fallback; one re-weave
+    heals."""
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    assert loom.is_stale() is False             # steady state unchanged
+    good = loom.cloth_on_disk()
+    assert "43.7" in good                       # the fresh line rides in full
+    with open(loom.out_path, "w", encoding="utf-8") as f:
+        f.write(good.replace("43.7", "99.9"))   # a hand-edit; the index untouched
+    assert loom.is_stale() is True
+    pf = build(s, loom)
+    assert pf.stats.get("stale") is True and pf.stats["source"] == "canonical"
+    assert "99.9" not in pf.text                # the mutation is never served
+    healed = loom.write()
+    assert healed["written"] is True
+    assert loom.cloth_on_disk() == good and loom.is_stale() is False
+
+
+def test_a_body_only_change_is_caught_by_the_revision(tmp_path):
+    """The weave's real input is wider than the index text: layer_of() reads memory
+    types and body dates. A body rewrite through the store leaves the index
+    byte-identical — no hash can see it — but bumps the store revision, and the
+    revision is part of the freshness stamp."""
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    assert loom.is_stale() is False
+    before = s.index_text()
+    s.remember("recent-thing",
+               "the run finished at 43.7 t/s after the fans went in, which was the whole point",
+               "body 2020-01-01")               # the date layer_of reads has moved
+    assert s.index_text() == before             # the index hash alone says "fresh"
+    assert loom.is_stale() is True              # the revision says the store moved
+    loom.write()
+    assert loom.is_stale() is False             # one re-weave heals
+
+
+def test_persist_refuses_on_a_mid_weave_body_change(tmp_path):
+    """Same refusal as the poured-memory case, through the counter instead of the
+    hash: a body rewritten while the loom was busy leaves the index byte-identical,
+    so only the captured revision can prove the source moved."""
+    s = a_store(tmp_path, n_old=2)
+    loom = Loom(s, scribe=None)
+    loom.write()
+    before_cloth = loom.cloth_on_disk()
+    cloth = loom.weave()
+    before = s.index_text()
+    s.remember("recent-thing",
+               "the run finished at 43.7 t/s after the fans went in, which was the whole point",
+               "body 2020-01-01")
+    assert s.index_text() == before
+    stats = loom.persist(cloth)
+    assert stats["written"] is False
+    assert stats["refused"] == "source moved while weaving"
+    assert loom.cloth_on_disk() == before_cloth
+
+
+# ── the attribution floor ───────────────────────────────────────────────────
+
+def test_a_trigger_may_not_newly_credit_the_human(tmp_path):
+    """A trigger is worn on every turn. Compression that adds 「ケンが決めた」 to a
+    line that never credited anyone manufactures authority — rejected exactly like
+    an invented number, and the mechanical trimmer takes over."""
+    s = Store(name="w", path=str(tmp_path / "w")); s.init_files()
+    loom = Loom(s, scribe=None)
+    title = "storage doctrine"
+    desc = "資産と正典はDATA2、作業の釜はDATA1に置く"
+    assert loom._acceptable(desc, title, desc)                        # the line is fine
+    assert not loom._acceptable(desc + "とケンが決めた", title, desc)   # the credit is not
+
+
+def test_a_source_that_credits_the_human_may_keep_a_crediting_trigger(tmp_path):
+    """The floor forbids NEW attribution only: when the index line itself says the
+    human decided, the trigger repeating that is compression, not invention."""
+    s = Store(name="w", path=str(tmp_path / "w")); s.init_files()
+    loom = Loom(s, scribe=None)
+    title = "storage doctrine"
+    desc = "ケンの決裁: 資産と正典はDATA2、作業はDATA1"
+    assert loom._acceptable("ケンの決裁: 資産と正典はDATA2", title, desc)
+
+
+# ── the hook faces the adaptive floors (W2b) ────────────────────────────────
+
+
+class HookScribe:
+    """A scripted scribe: answers the HOOK request for a title with fixed text."""
+    def __init__(self, cues: dict[str, str]):
+        self.cues = cues
+
+    def ask(self, system, user, **kw):
+        title = user.split("\n", 1)[0].removeprefix("title: ").strip()
+        return self.cues.get(title, "")
+
+
+def test_a_lying_hook_is_never_worn_the_mechanical_or_canonical_line_is(tmp_path):
+    """The defect W2b closes: the ledger wore the scribe's answer once it cleared the
+    numeric floor — the house store wore `d62189` for `6d62189` and ★ on lines that
+    never had them (19/67 memories, measured 2026-09-02). A hook that invents a
+    marker, cuts an identifier and re-binds a number is refused; the mechanical trim
+    (or, if that lies too, the canonical line) is worn instead, and the reason is
+    recorded on the entry."""
+    s = Store(name="f", path=str(tmp_path / "f"), label="test kura")
+    s.init_files()
+    s.remember("fresh-note", "touched today, so it is worn verbatim", "body")
+    s.remember("old-build",
+               "the old build ds4-tp8-engine-canonical ran from 12.5 GB of weights "
+               "for the whole week without a restart", "body from 2020-01-01")
+    p = s.file_of("old-build")
+    old = time.time() - 400 * 86400
+    os.utime(p, (old, old))
+    # Passes the OLD floors (grounded, no composed number) and would have been worn.
+    scribe = HookScribe({"old-build": "★the ds4-tp8 build ran from 12.5 GB"})
+    loom = Loom(s, scribe=scribe)
+    cloth = loom.weave()
+    line = next(l for l in cloth.text.splitlines() if "old-build" in l)
+    for lie in ("★", "ds4-tp8 build"):          # invented marker, cut identifier
+        assert lie not in line
+    title = "old-build"
+    desc = ("the old build ds4-tp8-engine-canonical ran from 12.5 GB of weights "
+            "for the whole week without a restart")
+    mech = loom._keep_markers(desc, loom._mechanical(desc, title))
+    entry = loom._hooks()["old-build"]
+    assert entry["hook"] in (mech, desc)        # mechanical or canonical, never the lie
+    assert entry["floor"]                       # the reason is recorded
+    assert isinstance(entry["floor"], str)
+
+
+def test_a_clean_scribe_hook_is_worn_unchanged(tmp_path):
+    """The floors are a gate, not a rewriter: an honest hook the floors accept is worn
+    exactly as the scribe wrote it, with `floor` recorded as None."""
+    s = a_store(tmp_path)
+    loom = Loom(s, scribe=HookScribe({"old-0": "an older note number 0"}))
+    cloth = loom.weave()
+    entry = loom._hooks()["old-0"]
+    assert entry["hook"] == "an older note number 0"
+    assert entry["by"] == "model"
+    assert entry["floor"] is None
+    assert "— an older note number 0" in cloth.text
+
+
+def test_the_postcondition_holds_when_the_scribe_invents_a_link(tmp_path):
+    """Without the floors, a scribe answer naming a [[link]] the line never had would
+    land in the cloth — the one layer the postcondition cannot see into, because the
+    link sits after the slug. The floors refuse it and the weave still holds."""
+    s = a_store(tmp_path)
+    loom = Loom(s, scribe=HookScribe({"old-2": "says 12.5 GB somewhere [[g]]"}))
+    raw = s.index_text()
+    cloth = loom.weave()                        # raises WeaveError if the map lies
+    assert _links_per_line(raw, loom.verbatim_after) == \
+        _links_per_line(cloth.text, loom.verbatim_after)
+    assert "[[g]]" not in cloth.text

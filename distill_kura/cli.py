@@ -3,14 +3,20 @@
     kura serve                        open the mouth (all stores, one port)
     kura stores                       what exists, which mode maps where
     kura recall "question" [-s eq]    recall by hand
+    kura glance <slug> [-s eq]        confirm one exact memory for ~150 tokens
     kura remember slug "desc" [-]     write one fact (body on stdin with `-`)
     kura annotate slug --tag landmine add tags / the three sentences to one memory
     kura profile show|draft|apply     the wide room's learned profile (draft → read → apply by hand)
-    kura tend [-s eq]                 the watcher: in the quiet hours, drain → distil → weave → tidy
+    kura tend [-s eq]                 the watcher: quiet hours — drain → distil → weave → trail → pay-forward → tidy
     kura doctor [-s eq]               health of a store (--all for every one)
     kura weave [-s eq] [--status]     re-weave the resident index (three-layer cloth)
-    kura prefill [-s eq]              print the standing block a host should inject
+    kura prefill [-s eq]            print the standing block a host should inject
+    kura trail [-s eq]              rebuild the Hot Trail appended after the map
+    kura constellation [-s eq]      the sector map: which `## ` heading holds what
+    kura edges [-s eq] [--slug S]   typed worldline edges — derived routing state
+    kura pay-forward [-s eq]          bake the map into each mouth's KV slot, save it to disk
     kura bench compress [-s eq]       what the store cost against the journal it came from
+    kura bench payforward --mouth N   what the pay-forward spine buys, priced by the mouth
     kura init <name> --path DIR       create a store and print the TOML to paste
     kura distill catchup [-s eq]      start from today: mark every journal drunk up to now
     kura distill run [-s eq]          one pass: drink → spot → gate → write drafts
@@ -27,6 +33,7 @@ import json
 import os
 import sys
 
+from .glance import glance as do_glance
 from .recall import recall as do_recall
 from .registry import Registry
 from .server import serve
@@ -64,6 +71,45 @@ def _distiller(reg: Registry, store: Store):
     return Distiller(reg, store)
 
 
+_WL_COLS = ("runnable", "target_reached", "wrong_branch", "obsolete_branch",
+            "honest_unknown", "remembered_but_unreachable", "unnecessary_opens",
+            "thinker_calls_total", "opened_mean")
+
+
+def _worldline_table(r: dict) -> str:
+    """Per resident variant, the map's size and the raw counts side by side — the
+    guide's §9 comparison in one glance. Counts, not a score: a column that went
+    up and a column that went down are meant to be read together."""
+    head = ["variant", "resident_tokens", *_WL_COLS]
+    rows = [head]
+    for name, v in r.get("variants", {}).items():
+        sm = v["summary"]
+        rows.append([name, str(v["resident_tokens"]), *[str(sm.get(c, "")) for c in _WL_COLS]])
+    widths = [max(len(row[i]) for row in rows) for i in range(len(head))]
+    lines = ["  ".join(c.ljust(widths[i]) for i, c in enumerate(row)) for row in rows]
+    lines.insert(1, "  ".join("-" * w for w in widths))
+    return (f"worldline  store={r['store']}  routing={r['routing']}  cases={r['cases']}\n"
+            + "\n".join(lines))
+
+
+def _payforward_table(r: dict) -> str:
+    """One line per condition: what the mouth said it reprocessed (prompt_n), how long
+    the call took, and what the row varied. prompt_n IS the finding — a spine is warm
+    when the number is the trail's size, cold when it is the map's."""
+    def cell(v) -> str:
+        return "—" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v))
+    head = ["condition", "prompt_n", "prompt_ms", "wall_s", "note"]
+    rows = [head] + [[x["condition"], cell(x["prompt_n"]), cell(x["prompt_ms"]),
+                      cell(x["wall_s"]), x["note"]] for x in r["rows"]]
+    widths = [max(len(row[i]) for row in rows) for i in range(len(head))]
+    lines = ["  ".join(c.ljust(widths[i]) if i < 4 else c
+                       for i, c in enumerate(row)) for row in rows]
+    lines.insert(1, "  ".join("-" * w for w in widths))
+    return (f"bench payforward  mouth={r['mouth']}  store={r['store']}  etag={r['etag']}"
+            f"  map={r['map_tokens_est']}t  trail={r['trail_tokens_est']}t ({r['trail']})\n"
+            + "\n".join(lines))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="kura", description="distilled long-term memory for agents")
     ap.add_argument("-c", "--config", help="path to kura.toml (default: ./kura.toml)")
@@ -80,6 +126,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("question")
     p.add_argument("--hops", type=int, default=1)
     p.add_argument("--top", type=int, default=3)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("glance", help="confirm one exact memory for ~150 tokens, before a full read")
+    p.add_argument("slug")
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("remember", help="write one fact")
@@ -112,12 +162,35 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("weave", help="re-weave the resident index")
     p.add_argument("--status", action="store_true", help="report layers and size, weave nothing")
+    p.add_argument("--adaptive", action="store_true",
+                   help="also run the M4 shadow (shortest safe cue per memory); implied by "
+                        "[prefill] adaptive_triggers = true")
+    p.add_argument("--adaptive-out", metavar="PATH",
+                   help="write the shadow RENDERED as a resident map to PATH (for "
+                        "`kura bench worldline --resident-file adaptive=PATH`); never the cloth")
     p.add_argument("--fresh-days", type=float)
     p.add_argument("--trigger-tokens", type=int)
     p.add_argument("--no-model", action="store_true", help="trim mechanically, call no model")
 
     p = sub.add_parser("prefill", help="print the standing index block")
     p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("trail", help="rebuild the Hot Trail — the recent-path block appended after the map")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("constellation",
+                       help="the sector map: which `## ` heading holds what, and the invariant")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("edges",
+                       help="typed worldline edges — derived routing state, read-only")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--slug", help="only this memory's outgoing and incoming edges")
+
+    p = sub.add_parser("pay-forward", help="pay the map's cold prefill forward: bake it "
+                                           "into each mouth's KV slot and save the slot to disk")
+    p.add_argument("--mouth", help="only this mouth (by [[payforward.mouths]] name)")
+    p.add_argument("--force", action="store_true", help="re-bake even when the etag says fresh")
 
     p = sub.add_parser("bench", help="measure, rather than claim")
     bsub = p.add_subparsers(dest="bcmd")
@@ -126,10 +199,42 @@ def main(argv: list[str] | None = None) -> int:
                    help="a command that reads text on stdin and prints a token count. "
                         "Without one, figures are labelled `estimated`.")
     b.add_argument("--session", help="only batches whose source key contains this")
+    b = bsub.add_parser("payforward", help="what the pay-forward spine buys, one mouth: "
+                                           "cold, restored spine + trail, changed trail, "
+                                           "changed map, warm repeat")
+    b.add_argument("--mouth", required=True, help="the [[payforward.mouths]] name to measure")
+    b.add_argument("--json", action="store_true")
+    b.add_argument("--skip-cold", action="store_true",
+                   help="skip cold-full — the whole prefill with no cache, minutes on a CPU mouth")
     b = bsub.add_parser("retention", help="is what mattered still findable?")
     b.add_argument("--questions", default="bench/fixtures/questions.json")
     b.add_argument("--hops", type=int, default=1)
     b.add_argument("--verbose", action="store_true")
+    b = bsub.add_parser("worldline", help="breadcrumb → shared world recovery (raw traces)")
+    b.add_argument("--cases", default="bench/worldline/cases.json")
+    b.add_argument("--routing", default="full", choices=["agent-only", "fastpath", "full"],
+                   help="agent-only: the model reads the map alone; fastpath: tier zero "
+                        "only, silence is silence; full: the production path")
+    b.add_argument("--hops", type=int, default=1)
+    b.add_argument("--trace", help="append JSONL traces here (default: <store>/_still/worldline-traces.jsonl)")
+    b.add_argument("--agent-url", help="agent-only measures THIS model reading the map "
+                   "alone; without it the configured thinker plays the agent")
+    b.add_argument("--agent-model", help="model name for --agent-url (default: 'agent')")
+    b.add_argument("--agent-key-env", help="NAME of the environment variable holding the "
+                   "bearer key for --agent-url (the key itself never goes on a command line)")
+    b.add_argument("--no-cues", action="store_true",
+                   help="run the fastpath tier without the callsign pre-head — the "
+                        "comparison that isolates what the shared vocabulary buys")
+    b.add_argument("--resident", default="canonical",
+                   help="resident-map variants to put the SAME cases in front of, "
+                        "comma-separated: canonical (the full index), woven (the "
+                        "production cloth, no model calls), or a name given by "
+                        "--resident-file. Default: canonical")
+    b.add_argument("--resident-file", action="append", default=[], metavar="NAME=PATH",
+                   help="a text file to wear as the resident map under NAME (repeatable) "
+                        "— how a map from a module that does not exist yet gets measured")
+    b.add_argument("--json", action="store_true",
+                   help="dump the full result with traces (default: a per-variant table)")
 
     p = sub.add_parser("init", help="create a new store")
     p.add_argument("name")
@@ -179,6 +284,74 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(_store(reg, a.store).doctor(), ensure_ascii=False, indent=1))
         return 0
 
+    if a.cmd == "constellation":
+        from . import constellation
+        st = _store(reg, a.store)
+        r = constellation.check(st)
+        if a.json:
+            print(json.dumps({**r, "sectors_detail": [
+                {"name": sec.name, "count": len(sec.slugs), "titles": sec.titles}
+                for sec in constellation.sectors(st)]}, ensure_ascii=False, indent=1))
+            return 0
+        for sec in constellation.sectors(st):
+            line = f"- {sec.name} — {len(sec.slugs)} memories"
+            if sec.titles:
+                line += f" (e.g. {' / '.join(sec.titles)})"
+            print(line)
+        print(f"invariant: sum(sector counts) = {r['covered']} memories, "
+              f"store holds {r['memories']} — "
+              f"{'ok' if r['invariant_ok'] else 'BROKEN'}")
+        return 0
+
+    if a.cmd == "edges":
+        from . import edges as edges_mod
+        st = _store(reg, a.store)
+        if a.slug:
+            rows = edges_mod.edges_of(st, a.slug)
+            if a.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=1))
+                return 0
+            for r in rows:
+                arrow = "→" if r["direction"] == "out" else "←"
+                print(f"{arrow} {r['type']} {r['other']}")
+            return 0
+        payload = edges_mod.current(st)        # read-only: the CLI never writes the cache
+        if a.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=1))
+            return 0
+        for e in payload.get("edges", []):
+            ev = f"   evidence: {e['evidence']}" if e.get("evidence") else ""
+            print(f"{e['source']} -[{e['type']}]-> {e['target']}   cue: {e['cue']}{ev}")
+        print(f"counts: {json.dumps(payload.get('counts', {}), ensure_ascii=False)}   "
+              f"unevidenced: {payload.get('unevidenced', 0)}")
+        if payload.get("dropped"):
+            print(f"dropped: {json.dumps(payload['dropped'], ensure_ascii=False)}")
+        return 0
+
+    if a.cmd == "pay-forward":
+        # Handled before the store default resolves: no `-s` means EVERY mouth, not
+        # the default store's.
+        from . import payforward
+        if a.store:
+            _store(reg, a.store)                # the shared loud unknown-store error
+        try:
+            r = payforward.run(reg, store=a.store, mouth=a.mouth, force=a.force)
+        except KeyError as e:
+            sys.exit(e.args[0])                 # a typo'd --mouth must not read as "all warm"
+        for x in r["results"]:
+            if x.get("error"):
+                print(f"⚠ mouth '{x['mouth']}': {x['did']} — {x['error']}", file=sys.stderr)
+        print(json.dumps(r, ensure_ascii=False))
+        if r["failed"] or r["locked"]:
+            # Checked FIRST: {A: baked, B: locked} must exit 1, or a scheduler that
+            # saw "worked" would never come back for B. failed is broken, locked is
+            # busy (another runner held the slot — maybe finishing an OLDER map);
+            # either way part of the fleet is not covered, and retry outranks done.
+            return 1
+        if r["worked"]:
+            return 0                            # the whole fleet is covered
+        return 2                                # every mouth VERIFIED fresh — the scheduler may rest
+
     store = _store(reg, a.store)
 
     if a.cmd == "bench":
@@ -194,23 +367,93 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(r, ensure_ascii=False, indent=1))
             # A retention run that scores badly should not look like a passing command.
             return 0 if r["score"] >= 0.9 else 1
-        sys.exit("kura bench {compress|retention}")
+        if a.bcmd == "worldline":
+            from . import worldline as wl
+            from .thinker import Endpoint
+            try:
+                files = {}
+                for spec in a.resident_file:
+                    name, sep, path = spec.partition("=")
+                    if not sep or not name or not path:
+                        raise ValueError(f"--resident-file wants NAME=PATH, got {spec!r}")
+                    files[name] = path
+                names = [n.strip() for n in a.resident.split(",") if n.strip()]
+                variants = wl.resident_variants(store, names, files,
+                                                prefill_cfg=reg.prefill_cfg_for(store))
+                thinker = reg.models_for(store).thinker
+                identity = None
+                if a.routing == "agent-only":
+                    if a.agent_url:
+                        thinker = Endpoint(url=a.agent_url, model=a.agent_model or "agent",
+                                           api_key_env=a.agent_key_env or None)
+                    identity = {"url": thinker.url, "model": thinker.model}
+                elif a.agent_url or a.agent_model:
+                    # The same refusal bench.worldline() makes: full ALWAYS runs the
+                    # configured thinker, or the routing modes stop being comparable.
+                    raise ValueError("--agent-url/--agent-model measure agent-only routing; "
+                                     f"--routing {a.routing!r} always uses the configured thinker")
+                r = wl.run(store, wl.load_cases(a.cases), routing=a.routing,
+                           thinker=thinker, fastpath_cfg=reg.fastpath_cfg_for(store),
+                           hops=a.hops,
+                           trace_path=a.trace
+                           or os.path.join(store.still, "worldline-traces.jsonl"),
+                           agent=identity, use_cues=not a.no_cues,
+                           resident_variants=variants)
+            except (ValueError, OSError) as e:
+                sys.exit(str(e))            # a mode conflict or a bad file, named, not a traceback
+            if a.json:
+                print(json.dumps(r, ensure_ascii=False, indent=1))
+            else:
+                print(_worldline_table(r))
+            # A wrong branch (an abandoned plan anchoring a case) is the one result
+            # that must never read as a passing run — and a resurrected obsolete
+            # plan is the worse form of it; nothing runnable is the other.
+            s = r["summary"]
+            return 0 if s["runnable"] and not s["wrong_branch"] and not s["obsolete_branch"] else 1
+        if a.bcmd == "payforward":
+            from . import bench_payforward as bpf
+            try:
+                r = bpf.run(reg, mouth=a.mouth, skip_cold=a.skip_cold)
+            except KeyError as e:
+                sys.exit(e.args[0])             # a typo'd --mouth must not read as a measurement
+            except OSError as e:
+                sys.exit(f"mouth {a.mouth!r} unreachable: {e}")   # exit 1, with the reason
+            if r.get("warning"):
+                print(f"⚠ {r['warning']}", file=sys.stderr)
+            if r.get("final_restore_error"):
+                print(f"⚠ {r['final_restore_error']}", file=sys.stderr)
+            if a.json:
+                print(json.dumps(r, ensure_ascii=False, indent=1))
+            else:
+                print(_payforward_table(r))
+            return 0
+        sys.exit("kura bench {compress|retention|payforward}")
 
-    if a.cmd in ("weave", "prefill"):
+    if a.cmd in ("weave", "prefill", "trail"):
         from . import prefill as prefill_mod
         cfg = dict(reg.prefill_cfg_for(store))
         if getattr(a, "fresh_days", None) is not None:
             cfg["fresh_days"] = a.fresh_days
         if getattr(a, "trigger_tokens", None) is not None:
             cfg["trigger_tokens"] = a.trigger_tokens
-        scribe = None if (a.cmd == "prefill" or a.no_model) else reg.models_for(store).scribe
+        scribe = (None if (a.cmd in ("prefill", "trail") or getattr(a, "no_model", False))
+                  else reg.models_for(store).scribe)
         loom = prefill_mod.loom_for(store, cfg, scribe=scribe)
+
+        if a.cmd == "trail":
+            t = prefill_mod.trail_for(store, cfg, loom=loom)
+            r = t.write()
+            print(json.dumps(r, ensure_ascii=False))
+            # 2 = nothing fresh to say (the trail was removed or never existed)
+            return 0 if r.get("written") else 2
 
         if a.cmd == "prefill":
             pf = prefill_mod.build(store, loom, header=cfg.get("header"),
                                    window_tokens=int(cfg.get("window_tokens", 131072)),
                                    fraction=float(cfg.get("budget_fraction", 0.05)),
-                                   hard_fraction=float(cfg.get("hard_fraction", 0.20)))
+                                   hard_fraction=float(cfg.get("hard_fraction", 0.20)),
+                                   trail=prefill_mod.trail_for(store, cfg, loom=loom),
+                                   resident_mode=cfg.get("resident_mode", "full"))
             if a.json:
                 print(json.dumps(pf.as_dict(), ensure_ascii=False))
             else:
@@ -223,6 +466,37 @@ def main(argv: list[str] | None = None) -> int:
             st = loom.weave(generate=False).stats
             print(json.dumps(st, ensure_ascii=False, indent=1))
             return 0
+        # M4: the adaptive shadow runs AFTER the production cloth is settled and never
+        # decides what it says — unless adaptive_apply has been earned by a benchmark,
+        # in which case the shortest-safe cues are worn through the loom's own override
+        # (the postcondition still applies). Old configs never reach this block.
+        adaptive_on = bool(cfg.get("adaptive_triggers")) or getattr(a, "adaptive", False)
+        if adaptive_on and a.cmd == "weave":
+            from .adaptive import DEFAULT_STEPS, Adaptive
+            ad = Adaptive(store, loom, steps=cfg.get("trigger_steps") or DEFAULT_STEPS,
+                          scribe=scribe)
+            if cfg.get("adaptive_apply"):
+                shadow = ad.shadow()
+                cloth = loom.weave(triggers=ad.triggers(shadow))
+                r = loom.persist(cloth) if hasattr(loom, "persist") else {}
+                print(json.dumps({"adaptive": shadow["summary"], "applied": True,
+                                  **({"persist": r} if r else {})}, ensure_ascii=False))
+                return 0
+            cloth = loom.weave()
+            r = loom.persist(cloth) if hasattr(loom, "persist") else {}
+            shadow = ad.shadow()
+            out_path = getattr(a, "adaptive_out", None)
+            if out_path:
+                # A rendered VARIANT for the benchmark — written where asked, never
+                # where the cloth lives, so nothing can mistake it for production.
+                if os.path.abspath(out_path) == os.path.abspath(loom.out_path):
+                    sys.exit("--adaptive-out must not be the cloth path")
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(ad.render(shadow))
+            print(json.dumps({**({"persist": r} if r else {}), "adaptive": shadow["summary"],
+                              "applied": False, **({"rendered": out_path} if out_path else {})},
+                             ensure_ascii=False))
+            return 0
         from .weave import WeaveError
         try:
             cloth = loom.fit(window_tokens=int(cfg.get("window_tokens", 131072)),
@@ -232,6 +506,14 @@ def main(argv: list[str] | None = None) -> int:
         # `fit` already wove with the model; persist exactly that text.
         stats = loom.persist(cloth)
         print(json.dumps(stats, ensure_ascii=False))
+        if stats.get("refused"):
+            # A memory was poured while the loom was working; the old cloth stands.
+            # Exit 2 (the same "re-weave" signal `prefill` uses) so a scheduler sees
+            # this as "run me again", not as "worked" — one retry is the caller's
+            # job, looping is nobody's.
+            print("⚠ the canonical index moved while weaving; nothing was written. "
+                  "Run `kura weave` again.", file=sys.stderr)
+            return 2
         if stats.get("over_budget"):
             w = stats.get("weight", {})
             print(f"⚠ the index is {stats['tokens_est']} tokens, over the "
@@ -248,7 +530,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if a.cmd == "recall":
-        d = do_recall(store, reg.models_for(store).thinker, a.question, a.hops, a.top)
+        d = do_recall(store, reg.models_for(store).thinker, a.question, a.hops, a.top,
+                      fastpath_cfg=reg.fastpath_cfg_for(store))
         if a.json:
             print(json.dumps(d, ensure_ascii=False))
         else:
@@ -256,6 +539,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"          walked: {d['walked']}  ({d['chars']} chars)\n")
             print(d["context"])
         return 0 if d["walked"] else 2
+
+    if a.cmd == "glance":
+        g = do_glance(store, a.slug)
+        if not g.get("ok"):
+            # Exact: a misspelling is a refusal in BOTH modes — JSON either way,
+            # so a script never has to parse the human format to see the error.
+            print(json.dumps(g, ensure_ascii=False))
+            return 1
+        if a.json:
+            print(json.dumps(g, ensure_ascii=False))
+        else:
+            print(g["text"])
+        return 0
 
     if a.cmd == "remember":
         body = sys.stdin.read() if a.body == "-" else a.body
@@ -285,7 +581,9 @@ def main(argv: list[str] | None = None) -> int:
             t.beat(0.0, stamp)
             print(json.dumps({"store": store.name, "done": t.done,
                               "next_ok": {k: int(v) for k, v in t.next_ok.items()}}, ensure_ascii=False))
-            return 0
+            # A tick that did no work is exit 2 ("nothing to do") — the old always-0
+            # made a scheduler that saw "worked" rest while the queue never emptied.
+            return 0 if any((t.done or {}).values()) else 2
         t.watch()
         return 0
 
@@ -348,13 +646,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if rows else 2
         if a.dcmd == "pour":
             if a.all:
-                for slug, _, _ in drafts_of(store):
+                drafts = drafts_of(store)
+                for slug, _, _ in drafts:
                     print(json.dumps(dis.pour(slug), ensure_ascii=False))
-                return 0
+                # No drafts is "nothing to do" — the docstring's exit 2 — or a
+                # scheduler sees success and never comes back.
+                return 2 if not drafts else 0
             if not a.slug:
                 sys.exit("give a slug or --all")
-            print(json.dumps(dis.pour(a.slug), ensure_ascii=False))
-            return 0
+            r = dis.pour(a.slug)
+            print(json.dumps(r, ensure_ascii=False))
+            return 0 if r.get("ok") else 1
         if a.dcmd == "drain":
             r = dis.drain(a.n)
             print(json.dumps(r, ensure_ascii=False))

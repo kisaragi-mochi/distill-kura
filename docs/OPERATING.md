@@ -57,6 +57,41 @@ changes (unless `yield_on_return = false` — an editor on its own seat), and ke
 track's output in `_still/tend.log`. `distill night` still exists for a bare
 one-pass-when-quiet loop, but `tend` is the one to run.
 
+## Deploying means proving it
+
+**Issuing a restart command is not evidence the new build is serving. (`build_id` is a launch stamp — what the launcher claimed — not a code attestation; it is exactly enough to catch a stale survivor holding the port).** The night this
+section was written, a restart "succeeded" — and an old process, bound to `0.0.0.0`,
+kept the port and served three deploys' worth of stale code while `/health` answered
+`ok: true` the whole time. Two habits close that hole:
+
+**Stamp the build at launch, and make `/health` the postcondition.**
+
+```ini
+# in kura.service, [Service]
+Environment=KURA_BUILD_ID=<commit>     # else /health says "unknown", which is honest
+```
+
+```bash
+systemctl --user restart kura
+curl -s localhost:8085/health | python3 -c \
+  'import json,sys; h=json.load(sys.stdin); print(h["build_id"], h["pid"], h["started_at"])'
+```
+
+The deploy is done when `build_id` matches the commit you just shipped — not before.
+`/health` also names the package `version`, the `pid`, `started_at`, the `module_path`
+actually imported and the `config_path` actually loaded: enough to tell "the process I
+just started" from "a survivor of three deploys ago". These fields are volatile on
+purpose, and safe where they are — `/health` is never part of a prefix-cached surface.
+
+**Kill by port, not by interface.** The survivor lived because it was bound to
+`0.0.0.0` while the kill was filtered on `127.0.0.1` — the filter matched nothing, the
+restart started a second process, and the old one kept winning the port:
+
+```bash
+ss -ltnp 'sport = :8085'    # see WHO holds the port, however it bound
+fuser -k 8085/tcp           # reap the holder by port, not by address match
+```
+
 ## Keeping the resident map current
 
 The map the agent wears is only as good as its last weave.
@@ -95,6 +130,23 @@ If the map will not fit: lower `trigger_tokens`, narrow `pinned_types`, shorten
 `fresh_days`, raise `budget_fraction` if the window can afford it — or split the store,
 which is the honest answer past a few hundred memories.
 
+### When the map alone is over the ceiling: the constellation
+
+`[prefill] resident_mode` picks what the agent wears. `full` (the default) is
+today's map; `auto` keeps the map while it fits and wears the *constellation* only
+when the map alone is over the hard ceiling; `constellation` wears it always. The
+constellation is a map of SECTORS — the index's own `## ` headings, no model, no
+clustering — one line per sector: its memory count and up to three example titles.
+It says plainly that a memory not named may still exist inside a sector, which is
+why it is not the map and `map_shown` stays false while it is worn.
+
+Every memory lands in exactly one sector (first index line wins; the rest are
+`UNSECTIONED`), and the invariant `sum(sector counts) == memories` is checked in
+code. Inspect it with `kura constellation` (`--json` for the counts), or watch
+`constellation.unsectioned` in `kura doctor` — a large unsectioned count is the cue
+to add `## ` headings to `MEMORY.md`. The trail still rides after the block when it
+fits, and a constellation that will not fit itself degrades to the honest stub.
+
 **Never** hand-edit the woven cloth. It is derived; the next weave overwrites it. Edit
 the canonical `MEMORY.md`, or the memory itself, and re-weave.
 
@@ -103,6 +155,93 @@ the canonical `MEMORY.md`, or the memory itself, and re-weave.
 Write the memory with `kura remember` on a `direct-allowed` store, or let the distiller
 produce it.
 
+## Paying the map forward
+
+A fresh map is minutes of cold prefill on a slow mouth — measured on one machine (320B
+pure-CPU llama.cpp, 16,444-token map): 796 s to bake, 283 ms to save the slot (1.5 GB
+on NVMe), 655 ms to restore it after killing and rebooting the server, and the first
+turn after the restore reprocessed 18 prompt tokens. `kura pay-forward` pays that bake
+once, in the quiet hours, and keeps it on disk.
+
+The mouth must be a llama.cpp server started with `--slot-save-path` — without it the
+save fails (loudly, with this flag named in the error) and every run pays the bake
+again:
+
+```bash
+llama-server -m model.gguf --slot-save-path /var/lib/llama/slots ...
+```
+
+```toml
+[[payforward.mouths]]
+name = "cpu-mouth"
+url = "http://127.0.0.1:8014"   # server BASE — the slots API lives beside /v1, not under it
+store = "main"                  # whose map this mouth wears
+# slot = 0                      # the llama.cpp slot saved from / restored into
+# model = "local"               # alias for the one-token probe call
+# api_key_env = "MOUTH_KEY"     # read from the environment, never stored here
+```
+
+`kura tend` already runs it as a track after each weave. By hand, the shape is the
+same as the weave's:
+
+```bash
+kura distill drain && kura weave && kura pay-forward
+```
+
+Exit codes follow the house convention, with failure checked first: 1 = ANY mouth
+failed or was busy — even when others worked, because a run that baked A but found B
+locked must be retried for B, not rested on; 0 = something was baked or restored and
+the whole fleet is covered; 2 = every mouth fresh — VERIFIED fresh, with a restore
+and a one-token probe, never assumed. Busy (`skipped-locked`) is deliberately not
+fresh: a held slot lock proves another runner exists, not that it is warming your
+etag (it may be finishing an older map), so it is transient and a scheduler retries.
+A failure is loud, labeled, and never advances `_still/payforward.json`; the ledger
+itself takes a second, millisecond-held lock for its read-modify-write, because two
+mouths of one store hold two different slot locks and share one ledger file.
+
+A mouth restart wakes up cold; the slot file makes warming it a sub-second restore, so
+hang a oneshot off the mouth's unit rather than waiting for the next weave:
+
+```ini
+# ~/.config/systemd/user/kura-payforward.service
+[Unit]
+Description=distill-kura pay-forward
+After=llama-mouth.service
+BindsTo=llama-mouth.service
+
+[Service]
+Type=oneshot
+Environment=KURA_CONFIG=%h/kura/kura.toml
+ExecStart=/usr/bin/python3 -m distill_kura.cli pay-forward
+SuccessExitStatus=2
+
+[Install]
+WantedBy=llama-mouth.service
+```
+
+`SuccessExitStatus=2` because "every mouth fresh" is the good outcome, not a failure.
+
+Old slot files are not pruned: the slots API can save and restore a filename but
+cannot list the directory, so pruning from here would be a guess about files it cannot
+see. They scale with map length times the model's KV width (that 16k-token map was
+1.5 GB), so sweep `--slot-save-path` by hand when it grows.
+
+### Measuring it: `kura bench payforward`
+
+```bash
+kura bench payforward --mouth cpu-mouth            # add --skip-cold on a CPU mouth
+```
+
+One row per condition; the number that matters is `prompt_n` — the mouth's OWN count
+of prompt tokens it reprocessed, not our estimate. Reading it: `restore-spine+trail`
+near `trail_tokens_est` means the spine is warm; `trail-changed` smaller still means
+only the tail moved; `map-changed-first-line` back near `cold-full` is the volatile-
+header proof — one character at the front re-prices everything behind it;
+`warm-repeat` small means the prefix cache is doing its job with no disk involved.
+If no slot file exists for the current etag, a `bake-spine` row appears first (the
+pay-forward bake, paid once). Exit 0 unless the mouth is unreachable (1, with the
+reason); the store is never written and the mouth is left warm on the current spine.
+
 ## Scheduling by hand, and exit codes
 
 ```bash
@@ -110,6 +249,8 @@ kura distill run    # 0 = did work, 2 = nothing worth drinking
 kura distill drain  # 0 = poured or tossed something, 2 = no drafts
 kura distill tidy   # 0 = repaired a line, 2 = index is clean
 kura prefill        # 0 = a current cloth was served, 2 = no cloth or it is stale
+kura pay-forward    # 1 = ANY mouth failed or was busy — retry, even if others worked;
+                    # 0 = worked, whole fleet covered; 2 = every mouth VERIFIED fresh
 ```
 
 **Exit 2 means "there was nothing to do".** A scheduler must distinguish it from
@@ -315,3 +456,43 @@ There is no authentication. The default bind is `127.0.0.1`. If it must be reach
 from elsewhere, put a reverse proxy with auth in front; do not add a half-built auth
 layer to the server. Remember that a kura is a fairly intimate document — it holds what
 someone decided, what annoyed them, and what they came back to.
+
+
+## The adaptive shadow (M4)
+
+Turn it on per store or globally with `[prefill] adaptive_triggers = true` and run
+`kura weave` as usual; the production cloth is unchanged, and `_still/adaptive.json`
+gains one record per trigger-layer memory. Read `summary.saved_tokens` for the size of
+the prize and `summary.reasons` for what stands between you and it — "ambiguous" means
+a neighbour, "not offered" means the scribe gave no cue at that rung, "negation
+dropped" / "number re-bound" / "retirement word dropped" mean the cue lied. The
+scribe is called once per memory and never again while the line is unchanged; the
+verdicts are recomputed on every weave, which is why a shadow is cheap to keep on.
+
+To benchmark it, render the shadow into a map (`Adaptive(store, loom).render()`; a
+CLI flag arrives with the M4 benchmark step) and hand it to
+`kura bench worldline --routing agent-only --resident canonical,woven,adaptive
+--resident-file adaptive=/path/to/map.md`. Promote (`adaptive_apply = true`) only when
+that table shows no new wrong or obsolete branch and no rise in
+`remembered_but_unreachable` — the memory that exists but cannot be reached.
+
+
+## Typed worldline edges (M7)
+
+`kura edges` prints the typed edges the store implies — `continues`, `next`,
+`supersedes`, `rejected`, `blocked-by` — derived from each memory's own `[[links]]`
+and the cue words on the same line, never written into a memory. `--slug S` narrows to
+one memory; `--json` gives the whole payload with `counts`, `unevidenced` and
+`dropped`.
+
+Read `unevidenced` first: it counts `supersedes`/`rejected`/`blocked-by` claims that
+were dropped because the source memory has no verified evidence manifest (or none with
+the class the type demands — USER for the first two, USER/TOOL/ACT for `blocked-by`).
+A store that distills through the gate accrues edges; a hand-written store accrues
+only `continues`/`next`, and that difference is the report working, not a fault.
+
+The edges live in one derived cache, `_still/edges.json`, and are rebuilt whenever the
+store moves; delete it freely. `kura glance` shows up to three as `RELATIONS:` under
+its token target, the Hot Trail gains `↳ source continues → target` lines for fresh
+breadcrumbs only, and `kura bench worldline` reports `edge_says_obsolete` per trace.
+`kura doctor` carries the edge counts on its health line.

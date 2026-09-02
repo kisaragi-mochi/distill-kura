@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -159,7 +160,92 @@ def test_a_draft_crediting_the_human_without_evidence_is_never_poured(tmp_path):
         assert "bad" not in store.slugs()
         # and the drain agrees: it tosses it without even asking the model
         out = d.drain()
-        assert out["tossed"] == 1 and out["poured"] == 0
+        assert out["quarantined"] == 1 and out["poured"] == 0
+    finally:
+        srv.shutdown()
+
+
+def _compose_one(d, source, slug_line, body_line, quote):
+    """One composed draft, with the scribe answering exactly what the test needs.
+    compose() is the only place a slug is made, so a slug test has to go through it."""
+    d._current_source = source
+    d.scribe = lambda task, u, max_tokens=0: (                    # type: ignore[method-assign]
+        f"SLUG: {slug_line}\nTITLE: Archive\n"
+        f"DESC: the archive lives on the slow disk, the fast one stays scratch\n"
+        f"BODY:\n{body_line}\n")
+    return d.compose({"topic": "archive", "kind": "project", "why": "where the archive lives",
+                      "evidence": [{"class": "USER", "text": quote}], "classes": ["USER"]})
+
+
+def test_a_fix_with_no_body_leaves_the_draft_unpoured(tmp_path):
+    """A FIX says the text as staged goes past its evidence. With no replacement BODY
+    there is nothing to fix it WITH — and pouring it anyway files exactly the sentence
+    the judge objected to. It stays staged for the next drain to judge cold."""
+    srv, reg, store, _ = build(tmp_path)
+    try:
+        d = Distiller(reg, store)
+        d.run(chunks=1)
+        p = os.path.join(d.drafts_dir, "archive-on-slow-disk.md")
+        before = open(p, encoding="utf-8").read()
+        d.scribe = lambda task, u, max_tokens=0: (                # type: ignore[method-assign]
+            "FIX\nreason: the last sentence goes past the evidence\n")
+        out = d.drain()
+        assert out["poured"] == 0 and out["fixed"] == 0 and out["tossed"] == 0
+        assert out["fix_unparsed"] == 1 and out["left"] == 1
+        assert open(p, encoding="utf-8").read() == before      # not touched, not re-signed
+        assert "archive-on-slow-disk" not in store.slugs()
+    finally:
+        srv.shutdown()
+
+
+def test_a_slug_with_no_ascii_still_lands_as_a_usable_draft(tmp_path):
+    """The slug sanitiser keeps ASCII only: a store written in Japanese used to compose
+    memories whose name reduced to the empty string, so every one of them was the same
+    file. The fallback name has to be usable, stable, and its own."""
+    srv, reg, store, jdir = build(tmp_path)
+    try:
+        d = Distiller(reg, store)
+        src = str(jdir / "session.jsonl")
+        c = _compose_one(d, src, "書庫は遅いディスクへ",
+                         "The archive goes on the slow disk. The fast disk stays scratch.",
+                         "put the archive on the slow disk")
+        assert c and re.fullmatch(r"[a-z0-9][a-z0-9-]*", c["slug"])
+        assert _compose_one(d, src, "書庫は遅いディスクへ", "x", "y")["slug"] == c["slug"]
+        other = _compose_one(d, src, "速いディスクは作業用", "x", "y")["slug"]
+        assert other != c["slug"]                 # two nameless slugs are not one memory
+        p = d.stage(c, src)
+        assert os.path.basename(p) == c["slug"] + ".md"
+        # the mark signs the name, so the fallback name has to pour under itself
+        assert d.pour(c["slug"])["ok"]
+        assert c["slug"] in store.slugs()
+    finally:
+        srv.shutdown()
+
+
+def test_two_drafts_with_one_slug_both_survive(tmp_path):
+    """Staging straight to `<slug>.md` overwrote a gate-passed draft with no trace when
+    two candidates sanitised to the same name. The second one takes a numbered name —
+    signed under that name, so the next drain judges it instead of quarantining it."""
+    srv, reg, store, jdir = build(tmp_path)
+    try:
+        d = Distiller(reg, store)
+        src = str(jdir / "session.jsonl")
+        quote = "put the archive on the slow disk"
+        a = _compose_one(d, src, "archive", "The archive goes on the slow disk.", quote)
+        pa = d.stage(a, src)
+        b = _compose_one(d, src, "archive", "The fast disk is scratch space.", quote)
+        pb = d.stage(b, src)
+        assert (os.path.basename(pa), os.path.basename(pb)) == ("archive.md", "archive.2.md")
+        assert (a["slug"], b["slug"]) == ("archive", "archive.2")
+        assert "The archive goes on the slow disk." in open(pa, encoding="utf-8").read()
+        # a fresh distiller talks to the fake server again, which answers POUR
+        out = Distiller(reg, store).drain()
+        assert out["quarantined"] == 0 and out["poured"] == 2 and out["left"] == 0
+        # two memories, not one written twice — the store spells the numbered name
+        # its own way, and both bodies are still there
+        assert {"archive", "archive-2"} <= set(store.slugs())
+        assert "The archive goes on the slow disk." in store.read("archive")
+        assert "The fast disk is scratch space." in store.read("archive-2")
     finally:
         srv.shutdown()
 

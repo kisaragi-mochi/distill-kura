@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -143,7 +144,7 @@ def test_tags_and_sentences_travel_from_candidate_to_store(tmp_path):
     # the manifest says why each claiming tag exists, and why one does not
     ref = [l for l in draft.splitlines() if "evidence_manifest:" in l][0].split("sha256:")[1].strip()
     man = json.load(open(os.path.join(store.path, "_evidence", ref + ".json")))
-    assert man["gate_version"] == 2
+    assert man["gate_version"] == 6
     assert man["tags"] == ["decision", "emotion-carried", "entrusted"]
     assert man["tag_evidence"]["entrusted"]["quote"].endswith("remember that")
     assert man["tags_refused"]["expired"] == "reserved for the forgetting pass; a model may not assign it"
@@ -370,3 +371,184 @@ def test_the_prompts_rank_by_charter_not_by_a_universal_list():
         t = getattr(prompts, name).lower()
         for w in ("score", "salience", "priority_", "rank by", "more important than"):
             assert w not in t, (name, w)
+
+
+# ── the door behind the last writer (round-three review) ────────────────────
+#
+# A judge's FIX rewrites the body last of all — and used to be re-signed without
+# re-verification. Now the mark is a proof of having passed the floor.
+
+def test_a_fix_that_invents_a_number_is_refused(tmp_path):
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE,
+               "draw the last line": "FIX\nreason: sharpen it\nBODY:\nreached 99 TPS on the slow disk"})
+    r = d.run(chunks=1)
+    assert r["drafts"] == ["archive-on-slow-disk"]
+    before = open(os.path.join(d.drafts_dir, "archive-on-slow-disk.md"), encoding="utf-8").read()
+    out = d.drain()
+    after = open(os.path.join(d.drafts_dir, "archive-on-slow-disk.md"), encoding="utf-8").read()
+    assert out["poured"] == 0 and out["fixed"] == 0 and out["left"] == 1
+    assert after == before                       # not rewritten, not re-signed
+    assert not store.read("archive-on-slow-disk")
+
+
+def test_a_fix_that_stays_inside_the_evidence_pours(tmp_path):
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE,
+               "draw the last line": "FIX\nreason: tighten\nBODY:\nthe archive lives on the slow disk"})
+    r = d.run(chunks=1)
+    assert r["drafts"] == ["archive-on-slow-disk"]
+    out = d.drain()
+    assert out["fixed"] == 1 and out["poured"] == 1
+    assert "slow disk" in store.read_exact("archive-on-slow-disk")
+
+
+def _corrupt_manifest(store, slug):
+    import glob as _g
+    fm = store.frontmatter(slug) if store.read(slug) else {}
+    ref = fm.get("evidence_manifest", "")
+    if ref.startswith("sha256:"):
+        p = os.path.join(store.path, "_evidence", ref[7:] + ".json")
+    else:
+        p = sorted(_g.glob(os.path.join(store.path, "_evidence", "*.json")))[0]
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(" ")          # still valid JSON; the bytes no longer hash to the name
+    return p
+
+
+def test_a_fix_over_a_tampered_manifest_fails_closed(tmp_path):
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE,
+               "draw the last line": "FIX\nreason: tighten\nBODY:\nthe archive lives on the slow disk"})
+    r = d.run(chunks=1)
+    assert r["drafts"] == ["archive-on-slow-disk"]
+    import glob as _g
+    with open(sorted(_g.glob(os.path.join(store.path, "_evidence", "*.json")))[0], "a") as f:
+        f.write(" ")
+    out = d.drain()
+    assert out["fixed"] == 0 and out["poured"] == 0 and out["left"] == 1
+
+
+def test_doctor_reports_a_tampered_manifest(tmp_path):
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE, "draw the last line": "POUR\nreason: fine"})
+    d.run(chunks=1)
+    assert d.drain()["poured"] == 1
+    assert store.doctor()["tampered_manifest"] == []
+    _corrupt_manifest(store, "archive-on-slow-disk")
+    assert store.doctor()["tampered_manifest"] == ["archive-on-slow-disk"]
+
+
+# ── round five: identity is signed too ──────────────────────────────────────
+
+def test_a_renamed_draft_loses_its_mark(tmp_path):
+    # A signed 12-gpu draft renamed to another slug used to pour under the new
+    # identity — the mark signed the text but never the name.
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE, "draw the last line": "POUR\nreason: fine"})
+    r = d.run(chunks=1)
+    assert r["drafts"] == ["archive-on-slow-disk"]
+    os.rename(os.path.join(d.drafts_dir, "archive-on-slow-disk.md"),
+              os.path.join(d.drafts_dir, "stolen-name.md"))
+    out = d.pour("stolen-name")
+    assert not out["ok"] and "gate mark" in out["why"]
+    assert not store.read("stolen-name")
+
+
+def test_a_slug_with_an_invented_number_is_refused(tmp_path):
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    bad_scribe = ("SLUG: 99-gpu-archive\nTITLE: Archive disk\nDESC: the archive on the slow disk\n"
+                  "BODY:\nthe archive lives on the slow disk\n")
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": bad_scribe, "draw the last line": "POUR\nreason: fine"})
+    r = d.run(chunks=1)
+    assert not r.get("drafts")        # the slug is surface; the floor refused it
+
+
+# ── round six: the mark signs the envelope, and the judge is not a mint ─────
+
+def test_a_renamed_draft_cannot_be_laundered_through_fix(tmp_path):
+    # v5 closed rename→POUR; the bypass was rename→FIX→re-sign→POUR.
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE,
+               "draw the last line": "FIX\nreason: tighten\nBODY:\nthe archive lives on the slow disk"})
+    assert d.run(chunks=1)["drafts"] == ["archive-on-slow-disk"]
+    os.rename(os.path.join(d.drafts_dir, "archive-on-slow-disk.md"),
+              os.path.join(d.drafts_dir, "stolen-name.md"))
+    out = d.drain()
+    assert out["fixed"] == 0 and out["poured"] == 0 and out["quarantined"] == 1
+    assert not store.read("stolen-name")
+    import glob as _g
+    assert _g.glob(os.path.join(store.path, "_still", "quarantine", "stolen-name*.md"))
+
+
+def test_a_kind_flip_breaks_the_mark(tmp_path):
+    # kind decides pinned status in the resident map — it is signed now.
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE, "draw the last line": "POUR\nreason: fine"})
+    assert d.run(chunks=1)["drafts"] == ["archive-on-slow-disk"]
+    p = os.path.join(d.drafts_dir, "archive-on-slow-disk.md")
+    raw = open(p, encoding="utf-8").read()
+    open(p, "w", encoding="utf-8").write(raw.replace("kind: project", "kind: user", 1))
+    out = d.pour("archive-on-slow-disk")
+    assert not out["ok"] and "gate mark" in out["why"]
+
+
+def test_a_manifest_pointer_swap_breaks_the_mark(tmp_path):
+    # Swapping to a DIFFERENT validly-hashed manifest forged provenance; signed now.
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE, "draw the last line": "POUR\nreason: fine"})
+    assert d.run(chunks=1)["drafts"] == ["archive-on-slow-disk"]
+    import hashlib as _hl
+    blob = json.dumps({"quotes": [], "source_key": "somewhere:else"})
+    other = _hl.sha256(blob.encode()).hexdigest()
+    open(os.path.join(store.path, "_evidence", other + ".json"), "w").write(blob)
+    p = os.path.join(d.drafts_dir, "archive-on-slow-disk.md")
+    raw = open(p, encoding="utf-8").read()
+    swapped = re.sub(r"evidence_manifest: sha256:[0-9a-f]{64}",
+                     "evidence_manifest: sha256:" + other, raw, count=1)
+    open(p, "w", encoding="utf-8").write(swapped)
+    out = d.pour("archive-on-slow-disk")
+    assert not out["ok"] and "gate mark" in out["why"]
+
+
+def test_a_straight_pour_verifies_the_manifests_bytes(tmp_path):
+    # The mark stays valid when the FILE is corrupted (the pointer is unchanged) —
+    # so pour itself must re-hash the manifest before the memory exists.
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE, "draw the last line": "POUR\nreason: fine"})
+    assert d.run(chunks=1)["drafts"] == ["archive-on-slow-disk"]
+    import glob as _g
+    with open(sorted(_g.glob(os.path.join(store.path, "_evidence", "*.json")))[0], "a") as f:
+        f.write(" ")
+    out = d.pour("archive-on-slow-disk")
+    assert not out["ok"] and "manifest" in out["why"]

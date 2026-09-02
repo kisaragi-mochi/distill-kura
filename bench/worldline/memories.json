@@ -1,0 +1,32 @@
+{
+  "comment": "The fixture store for the worldline cases: synthetic memories in the same spirit as bench/fixtures (publishable, nothing from any real house). Seed a fresh store with `distill_kura.worldline.seed(store, path)` and every shipped case is runnable. description = the index line the resident map is woven from, so it is what the agent recognizes by. tags 'superseded' marks a memory the house threw away.",
+  "memories": [
+    {"slug": "freetoken-hybrid", "description": "FreeToken CPU hybrid — the all-hands CPU/GPU cooperative inference push", "body": "Run the experts on CPU, attention on one GPU. Everyone on deck.", "tags": ["decision"]},
+    {"slug": "exl3-cpu", "description": "EXL3 with experts offloaded to CPU: 36 tok/s on one small card", "body": "Sibling of the hybrid push."},
+    {"slug": "exl3-quantization", "description": "EXL3 quantization ladder — 2.05 bpw survives, 1.6 does not", "body": "Measured per layer."},
+    {"slug": "gguf-quantization", "description": "GGUF quantization notes: Q2_K is the floor for the big MoE", "body": "Older route; still used for CPU-only boxes."},
+    {"slug": "sazanami-pcie-audit", "description": "SAZANAMI PCIe audit — which slot is which card, and the free x8", "body": "Serial → slot table."},
+    {"slug": "pcie-audit-findings", "description": "PCIe instability root cause: a riser reseated, link retrained at gen3", "body": "Found on the audit's second pass."},
+    {"slug": "lab-infra-budget", "description": "the intelligence-stockpile budget — what the lab may spend on machines this year", "body": "Callsign: 知性備蓄部門."},
+    {"slug": "distill-kura-wal", "description": "the store's write-ahead log: a memory is on disk before it is in the index", "body": "Decided yesterday."},
+    {"slug": "weave-revision", "description": "the three-point freshness proof: source, product, revision", "body": "Why the cloth carries the store revision."},
+    {"slug": "weave-cas", "description": "the cloth's compare-and-swap: persist refuses when the index moved", "body": "Neighbour of weave-revision; different question."},
+    {"slug": "gate-envelope-v6", "description": "gate envelope v6 — what a signed draft must carry", "body": "The distiller's contract."},
+    {"slug": "ds4-gpu-bringup", "description": "DS4 GPU bring-up — the dequant LUT guard fix, and where it stopped", "body": "Last progress: layer 40 matches, layer 41 does not."},
+    {"slug": "inference-backend-choice", "description": "which inference backend serves the house model — the current pick and the one before it", "body": "Went vLLM → own engine → back."},
+    {"slug": "old-abandoned-plan", "description": "the early sqlite-first draft, abandoned before the store existed", "body": "Thrown away. Kept for the record only.", "tags": ["superseded"]},
+    {"slug": "memory-store-layout", "description": "where memories live on disk: one markdown file per memory, index beside them", "body": "The layout that replaced the sqlite draft."},
+    {"slug": "sqlite-first-draft", "description": "the withdrawn plan to keep memories in sqlite", "body": "Withdrawn. Superseded by memory-store-layout.", "tags": ["superseded"]},
+    {"slug": "storage-tiering-doctrine", "description": "the storage tiers: fast disk is scratch, slow disk is the archive, NAS is cold", "body": "Revised once already."},
+    {"slug": "gpu-power-measure", "description": "measured the board's idle draw", "body": "tool said 311 W"},
+    {"slug": "lna-options-hedge", "description": "the options hedge: how the desk covers a long book over a weekend", "body": "Trading side. Not an inference topic."},
+    {"slug": "cpu-editor-doctrine", "description": "why a small CPU model is the editor and the big GPU model only thinks", "body": "Chairs stop being fought over."},
+    {"slug": "tool-evidence-doctrine", "description": "a number is stored only with the tool output that produced it", "body": "Estimates are labelled as such."},
+    {"slug": "fan-install-throughput", "description": "fan install throughput — 43.7 tok/s after the DIMM fans went in (was 12.4)", "body": "The number to quote."},
+    {"slug": "fan-install-dimm-side", "description": "fan install, DIMM side — measure the memory temperature too, not only the GPU", "body": "Raised again after a gap."},
+    {"slug": "archive-on-slow-disk", "description": "archive on the slow disk — the morning rule, later replaced", "body": "Superseded the same day by archive-on-nas.", "tags": ["superseded"]},
+    {"slug": "archive-on-nas", "description": "archive on the NAS — the slow disk gets reformatted next week", "body": "Current rule."},
+    {"slug": "zenin-yakyu", "description": "全員野球 — 家の合言葉。手が空いている者は全員この一件へ", "body": "The house callsign for the all-hands push."},
+    {"slug": "kaki-no-ki", "description": "柿の木の剪定 — 庭の柿を落とす時期と枝の残し方", "body": "Garden. Japanese only, on purpose."}
+  ]
+}

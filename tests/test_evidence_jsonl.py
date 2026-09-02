@@ -6,6 +6,8 @@ import os
 import sys
 import threading
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from distill_kura.distill.pipeline import Distiller, MIN_DRINK   # noqa: E402
@@ -14,10 +16,14 @@ from distill_kura.distill.sources import (                  # noqa: E402
     MAX_LINE,
     MAX_SEG,
     MAX_TOOL,
+    SCAN_LIMIT,
+    SOURCES,
     ClaudeCodeSource,
     EvidenceJsonlSource,
     IntakeReport,
     Segment,
+    Source,
+    call_sip,
     discover_all,
     source_for,
 )
@@ -49,6 +55,76 @@ def _write(path, *events, trailing_partial: str | None = None):
         if trailing_partial is not None:
             f.write(trailing_partial)
 
+
+# One irreversibly-oversized line: MAX_LINE+1 detection read + at most SCAN_LIMIT scan.
+_PER_ATTEMPT_BYTE_CAP = SCAN_LIMIT + MAX_LINE + 1
+# Resumed scan continues from saved cursor — no second detection read.
+_PER_RESUME_BYTE_CAP = SCAN_LIMIT
+
+
+def _track_readline_bytes(path, monkeypatch) -> list[int]:
+    """Bytes consumed via readline() per open/close, for one target file."""
+    consumed: list[int] = []
+    real_open = open
+    abspath = os.path.abspath(str(path))
+
+    def open_wrapper(open_path, mode="r", *args, **kwargs):
+        fh = real_open(open_path, mode, *args, **kwargs)
+        if os.path.abspath(str(open_path)) == abspath and "b" in mode:
+            total = 0
+            base_readline = fh.readline
+
+            def readline(size=-1):
+                nonlocal total
+                chunk = base_readline(size)
+                if chunk:
+                    total += len(chunk)
+                return chunk
+
+            fh.readline = readline
+            base_close = fh.close
+
+            def close():
+                consumed.append(total)
+                return base_close()
+
+            fh.close = close
+        return fh
+
+    monkeypatch.setattr("builtins.open", open_wrapper)
+    return consumed
+
+
+def _sip_past_huge_prefix(src, path, start, limit, *, bound_end=None, max_rounds=200):
+    """Repeat sip until segments appear (progressive oversized-line discard)."""
+    pos = start
+    for _ in range(max_rounds):
+        kwargs: dict = {}
+        if bound_end is not None:
+            kwargs["bound_end"] = bound_end
+        segs, pos = src.sip(path, pos, limit, **kwargs)
+        if segs:
+            return segs, pos
+    raise AssertionError("sip stuck scanning an oversized prefix")
+
+
+def _clear_scan_state(*sources: EvidenceJsonlSource) -> None:
+    seen: set[int] = set()
+    for src in sources:
+        sid = id(src)
+        if sid in seen:
+            continue
+        seen.add(sid)
+        with src._scan_lock:
+            src._scan_cursors.clear()
+
+
+@pytest.fixture(autouse=True)
+def _evidence_scan_state_isolation():
+    singleton = SOURCES.get("evidence")
+    _clear_scan_state(EvidenceJsonlSource(), singleton if isinstance(singleton, EvidenceJsonlSource) else EvidenceJsonlSource())
+    yield
+    _clear_scan_state(EvidenceJsonlSource(), singleton if isinstance(singleton, EvidenceJsonlSource) else EvidenceJsonlSource())
 
 # ── classification ──────────────────────────────────────────────────────────
 
@@ -343,7 +419,7 @@ def _blob(tag: str, n: int = 3500) -> str:
 def _distiller(tmp_path, journal_dir, chunk_chars=4000):
     st = Store(name="s", path=str(tmp_path / "s"))
     st.init_files()
-    models = Models.from_config({"thinker": {"url": "http://127.0.0.1:9/v1", "model": "none"}})
+    models = Models.from_config({})
     reg = Registry(stores={"s": st}, modes={}, models=models, default="s",
                    raw={"distill": {"journals": {"evidence": str(journal_dir)}}})
     return Distiller(reg, st, chunk_chars=chunk_chars), st
@@ -415,6 +491,17 @@ def test_sip_one_resume_does_not_redrink_or_skip(tmp_path):
     assert d.marks.read()[first[2]] == p.stat().st_size
 
 
+def test_evidence_claim_bound_is_where_the_read_stops(tmp_path):
+    p = tmp_path / "bound.evidence.jsonl"
+    events = [_event("USER", _blob(f"b{i}"), event_id=f"e{i}") for i in range(6)]
+    _write(p, *events)
+    src = EvidenceJsonlSource()
+    for budget in (500, 4000, 20_000):
+        end, _ = src.claim_bound(str(p), 0, budget)
+        _, stop = src.sip(str(p), 0, budget)
+        assert end == stop
+
+
 def test_parallel_claims_reserve_disjoint_complete_records(tmp_path):
     jr = tmp_path / "jr"
     jr.mkdir()
@@ -423,16 +510,22 @@ def test_parallel_claims_reserve_disjoint_complete_records(tmp_path):
     _write(p, *events)
     d, st = _distiller(tmp_path, jr, chunk_chars=4000)
     first = d.marks.claim([str(p)], 4000, MIN_DRINK)
+    assert first is not None
+    path_a, start_a, end_a, src_a = first
+    key = src_a.key(str(p))
+    reserved_a = d.marks.read()[key]
     second = d.marks.claim([str(p)], 4000, MIN_DRINK)
-    assert first is not None and second is not None
-    assert first[1] < second[1]
-    assert first[3] <= second[1]          # reserved end of A is B's start
-    assert second[3] > second[1]
+    assert second is not None
+    path_b, start_b, end_b, src_b = second
+    reserved_b = d.marks.read()[key]
+    assert start_a < start_b
+    assert reserved_a <= start_b
+    assert reserved_b > start_b
     # sip of each reservation drinks only that stretch
     src = EvidenceJsonlSource()
-    a, a_end = src.sip(first[0], first[1], 4000, until=first[3])
-    b, b_end = src.sip(second[0], second[1], 4000, until=second[3])
-    assert a_end == first[3] and b_end == second[3]
+    a, a_end = call_sip(src, path_a, start_a, 4000, bound_end=reserved_a)
+    b, b_end = call_sip(src, path_b, start_b, 4000, bound_end=reserved_b)
+    assert a_end == reserved_a and b_end == reserved_b
     assert {s.text[:2] for s in a}.isdisjoint({s.text[:2] for s in b})
     d.marks.advance(src.key(str(p)), a_end)
     d.marks.advance(src.key(str(p)), b_end)
@@ -511,51 +604,464 @@ def test_intake_write_failure_does_not_break_sip_one(tmp_path):
     assert [s.text[:1] for s in got[0]] == ["a", "b"]
 
 
-def _claude_line(text: str) -> str:
-    return json.dumps(
-        {"type": "user", "message": {"content": [{"type": "text", "text": text}]}},
-        separators=(",", ":"),
-    ) + "\n"
+# ── Luna rework: reserved end, legacy sip, bounded tail ─────────────────────
+
+class _LegacySource(Source):
+    """Pre-existing custom adapter: sip(path, start, limit_chars) only."""
+    name = "legacy"
+
+    def matches(self, path: str) -> bool:
+        return path.endswith(".legacy.txt")
+
+    def key(self, path: str) -> str:
+        return "legacy:" + os.path.abspath(path)
+
+    def discover(self, root: str) -> list[str]:
+        return []
+
+    def sip(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int]:
+        with open(path, "rb") as f:
+            f.seek(start)
+            data = f.read(limit_chars)
+        return [Segment("USER", data.decode(errors="replace"))], start + len(data)
+
+    def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
+        end = min(os.path.getsize(path), start + budget_chars)
+        return end, max(0, end - start)
 
 
-def test_claude_claim_then_sip_does_not_skip_unread_bytes(tmp_path):
-    """Compact Claude JSONL, budget 200: claim_bound reserved 440 (2.2× bytes)
-    while sip(... until=440) stopped at 378 after the semantic char budget.
-    advance(max) then left 440 and skipped the next record's first 62 bytes.
+def test_call_sip_legacy_three_arg_source_ignores_report(tmp_path):
+    p = tmp_path / "x.legacy.txt"
+    p.write_bytes(b"hello world")
+    src = _LegacySource()
+    segs, stop = call_sip(src, str(p), 0, 5, report=IntakeReport())
+    assert len(segs) == 1 and segs[0].text == "hello"
+    assert stop == 5
 
-    The real claim → sip(until=reserved) → advance path must drink KEEP-ME-NEXT.
-    """
-    p = tmp_path / "s.jsonl"
-    first = _claude_line("A" * 67)
-    second = _claude_line("B" * 179)
-    later = _claude_line("KEEP-ME-NEXT")
-    after = _claude_line("KEEP-ME-AFTER")
-    p.write_text(first + second + later + after, encoding="utf-8")
-    drunk = len(first.encode()) + len(second.encode())
-    assert drunk == 378
-    assert int(200 * 2.2) == 440
-    assert drunk < 440 < p.stat().st_size
 
-    src = ClaudeCodeSource()
-    marks = Watermarks(str(tmp_path / "watermark.json"))
-    claimed = marks.claim([str(p)], 200, min_chars=1)
+def test_sip_one_with_legacy_three_arg_source(tmp_path, monkeypatch):
+    legacy = _LegacySource()
+    jr = tmp_path / "jr"
+    jr.mkdir()
+    p = jr / "note.legacy.txt"
+    p.write_bytes(b"abcdefghij")
+    d, st = _distiller(tmp_path, jr, chunk_chars=4)
+    monkeypatch.setattr("distill_kura.distill.pipeline.MIN_DRINK", 1)
+    monkeypatch.setattr(d, "files", lambda session=None: [str(p)])
+    real_source_for = source_for
+
+    def fake_source_for(path):
+        return legacy if legacy.matches(path) else real_source_for(path)
+
+    monkeypatch.setattr("distill_kura.distill.sources.source_for", fake_source_for)
+    monkeypatch.setattr("distill_kura.distill.watermark.source_for", fake_source_for)
+    got = d.sip_one()
+    assert got is not None
+    segs, _, key = got
+    assert segs[0].text == "abcd"
+    assert d.marks.read()[key] == 4
+
+
+def test_first_sip_respects_reserved_end_after_second_claim(tmp_path):
+    """Adversarial: claim, append, second claim, first sip — no overlap or skip."""
+    jr = tmp_path / "jr"
+    jr.mkdir()
+    p = jr / "j.evidence.jsonl"
+    events = [_event("USER", _blob(f"c{i}"), event_id=f"e{i}") for i in range(4)]
+    _write(p, *events)
+    d, _ = _distiller(tmp_path, jr, chunk_chars=4000)
+    first = d.marks.claim([str(p)], 4000, MIN_DRINK)
+    assert first is not None
+    path_a, start_a, end_a, src_a = first
+    key = src_a.key(str(p))
+    with open(p, "ab") as f:
+        for i in range(4):
+            f.write((json.dumps(_event("USER", _blob(f"late{i}"), event_id=f"late{i}"))
+                     + "\n").encode())
+    second = d.marks.claim([str(p)], 4000, MIN_DRINK)
+    assert second is not None
+    path_b, start_b, end_b, src_b = second
+    assert start_b == end_a
+    src = EvidenceJsonlSource()
+    a, a_end = call_sip(src, path_a, start_a, 4000, bound_end=end_a)
+    b, b_end = call_sip(src, path_b, start_b, 4000, bound_end=end_b)
+    assert a_end == end_a <= start_b
+    assert b_end == end_b
+    assert {s.text[:4] for s in a}.isdisjoint({s.text[:4] for s in b})
+    d.marks.advance(key, a_end)
+    d.marks.advance(key, b_end)
+    assert d.marks.read()[key] == max(a_end, b_end)
+
+
+def test_unterminated_oversized_tail_stays_bounded_per_attempt(tmp_path, monkeypatch):
+    p = tmp_path / "tail.evidence.jsonl"
+    p.write_bytes(b"x" * (MAX_LINE * 10))
+    consumed = _track_readline_bytes(p, monkeypatch)
+    src = EvidenceJsonlSource()
+    segs, pos = src.sip(str(p), 0, 10_000)
+    assert segs == [] and pos == 0
+    assert consumed and consumed[0] <= _PER_ATTEMPT_BYTE_CAP
+    segs2, pos2 = src.sip(str(p), 0, 10_000)
+    assert segs2 == [] and pos2 == 0
+    assert len(consumed) == 2 and consumed[1] <= _PER_RESUME_BYTE_CAP
+
+
+def test_completed_oversized_line_then_valid_event(tmp_path):
+    p = tmp_path / "mix.evidence.jsonl"
+    huge = (b'{"schema_version": 1, "event_id": "e", "session_id": "s", "turn_id": "t", '
+            b'"class": "USER", "text": "' + (b"A" * (MAX_LINE + 50))
+            + b'", "timestamp": "2026-08-27T00:00:00Z"}\n')
+    good = (json.dumps(_event("USER", "after", event_id="ok")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(good)
+    segs, end = EvidenceJsonlSource().sip(str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "after"
+    assert end == p.stat().st_size
+
+
+def test_unterminated_tail_larger_than_scan_limit_stays_bounded(tmp_path, monkeypatch):
+    """Garbage tail with no newline: capped per attempt, watermark unchanged."""
+    p = tmp_path / "tail.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 50_000))
+    consumed = _track_readline_bytes(p, monkeypatch)
+    src = EvidenceJsonlSource()
+    segs, pos = src.sip(str(p), 0, 10_000)
+    assert segs == [] and pos == 0
+    assert consumed and consumed[0] <= _PER_ATTEMPT_BYTE_CAP
+    segs2, pos2 = src.sip(str(p), 0, 10_000)
+    assert segs2 == [] and pos2 == 0
+    assert len(consumed) == 2 and consumed[1] <= _PER_RESUME_BYTE_CAP
+
+
+def test_unterminated_json_tail_larger_than_scan_limit_stays_bounded(tmp_path, monkeypatch):
+    """Unterminated JSON-shaped tail: same bounded cap, no prefix escape hatch."""
+    p = tmp_path / "json-tail.evidence.jsonl"
+    p.write_bytes(b'{"schema_version": 1, "event_id": "e"' + b"x" * (SCAN_LIMIT + 50_000))
+    consumed = _track_readline_bytes(p, monkeypatch)
+    src = EvidenceJsonlSource()
+    segs, pos = src.sip(str(p), 0, 10_000)
+    assert segs == [] and pos == 0
+    assert consumed and consumed[0] <= _PER_ATTEMPT_BYTE_CAP
+    segs2, pos2 = src.sip(str(p), 0, 10_000)
+    assert segs2 == [] and pos2 == 0
+    assert len(consumed) == 2 and consumed[1] <= _PER_RESUME_BYTE_CAP
+
+
+def test_oversized_discard_resumes_from_cursor_not_byte_zero(tmp_path, monkeypatch):
+    """Second sip continues the saved scan cursor instead of rereading from pos 0."""
+    p = tmp_path / "resume-scan.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 50_000))
+    consumed = _track_readline_bytes(p, monkeypatch)
+    src = EvidenceJsonlSource()
+    src.sip(str(p), 0, 10_000)
+    src.sip(str(p), 0, 10_000)
+    assert len(consumed) == 2
+    assert consumed[0] <= _PER_ATTEMPT_BYTE_CAP
+    assert consumed[1] <= _PER_RESUME_BYTE_CAP
+    assert consumed[0] > consumed[1]
+
+
+def test_completed_nonjson_oversized_line_past_scan_limit_then_valid_event(tmp_path):
+    """Completed non-JSON line longer than 2×SCAN_LIMIT must not block later evidence."""
+    p = tmp_path / "xline.evidence.jsonl"
+    huge = b"x" * (2 * SCAN_LIMIT + 50_000) + b"\n"
+    good = (json.dumps(_event("USER", "after", event_id="ok")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(good)
+    src = EvidenceJsonlSource()
+    segs, end = _sip_past_huge_prefix(src, str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "after"
+    assert end == p.stat().st_size
+
+
+def test_completed_oversized_line_past_scan_limit_then_valid_event(tmp_path):
+    """Completed invalid line longer than 2×SCAN_LIMIT must not block later evidence."""
+    p = tmp_path / "past-scan.evidence.jsonl"
+    prefix = (b'{"schema_version": 1, "event_id": "e", "session_id": "s", "turn_id": "t", '
+              b'"class": "USER", "text": "')
+    suffix = b'", "timestamp": "2026-08-27T00:00:00Z"}\n'
+    text_len = 2 * SCAN_LIMIT - len(prefix) - len(suffix) + 50_000
+    huge = prefix + (b"A" * text_len) + suffix
+    assert len(huge) > 2 * SCAN_LIMIT and huge.endswith(b"\n")
+    good = (json.dumps(_event("USER", "after", event_id="ok")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(good)
+    src = EvidenceJsonlSource()
+    segs, end = _sip_past_huge_prefix(src, str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "after"
+    assert end == p.stat().st_size
+
+
+def test_claim_bound_eventually_passes_min_drink_past_huge_prefix(tmp_path):
+    """Skipped-byte span from progressive discard must satisfy MIN_DRINK."""
+    p = tmp_path / "claim-past.evidence.jsonl"
+    huge = b"x" * (2 * SCAN_LIMIT + 50_000) + b"\n"
+    good = (json.dumps(_event("USER", _blob("enough"), event_id="ok")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(good)
+    src = EvidenceJsonlSource()
+    claimed = None
+    for _ in range(30):
+        end, approx = src.claim_bound(str(p), 0, 4000)
+        if end > 0 and approx >= MIN_DRINK:
+            claimed = (end, approx)
+            break
+        src.sip(str(p), 0, 4000)
     assert claimed is not None
-    path, start, claimed_src, reserved = claimed
-    assert claimed_src.name == "claude"
-    assert start == 0
-    assert reserved == drunk
-    segs, nxt = src.sip(path, start, 200, until=reserved)
-    assert nxt == reserved == drunk
-    assert [s.text for s in segs] == ["A" * 67, "B" * 179]
-    marks.advance(src.key(str(p)), nxt)
-    assert marks.read()[src.key(str(p))] == drunk
+    end, approx = claimed
+    segs, sip_end = src.sip(str(p), 0, 4000, bound_end=end)
+    assert len(segs) == 1 and segs[0].text.startswith("enough")
+    assert sip_end == end == p.stat().st_size
 
-    claimed2 = marks.claim([str(p)], 200, min_chars=1)
-    assert claimed2 is not None
-    assert claimed2[1] == drunk
-    segs2, nxt2 = src.sip(claimed2[0], claimed2[1], 200, until=claimed2[3])
-    marks.advance(src.key(str(p)), nxt2)
-    texts = [s.text for s in segs2]
-    assert "KEEP-ME-NEXT" in texts
-    assert "KEEP-ME-AFTER" in texts
-    assert marks.read()[src.key(str(p))] == p.stat().st_size
+
+def test_completed_oversized_valid_event_then_unterminated_tail(tmp_path):
+    """Luna composite: skip huge line, drink valid event, stop before open tail."""
+    p = tmp_path / "luna.evidence.jsonl"
+    huge = b"x" * (MAX_LINE + 100) + b"\n"
+    good = (json.dumps(_event("USER", "middle", event_id="mid")) + "\n").encode()
+    tail = b"x" * (SCAN_LIMIT + 50_000)
+    p.write_bytes(huge + good + tail)
+    src = EvidenceJsonlSource()
+    segs, pos = _sip_past_huge_prefix(src, str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "middle"
+    assert pos == len(huge) + len(good)
+    segs2, pos2 = src.sip(str(p), pos, 10_000)
+    assert segs2 == [] and pos2 == pos
+
+
+def test_completed_oversized_past_scan_limit_respects_bound_end(tmp_path):
+    """Skip a completed oversized line inside the reservation; do not drink past it."""
+    p = tmp_path / "bound-scan.evidence.jsonl"
+    prefix = (b'{"schema_version": 1, "event_id": "e", "session_id": "s", "turn_id": "t", '
+              b'"class": "USER", "text": "')
+    suffix = b'", "timestamp": "2026-08-27T00:00:00Z"}\n'
+    text_len = 2 * SCAN_LIMIT - len(prefix) - len(suffix) + 50_000
+    huge = prefix + (b"A" * text_len) + suffix
+    in_bound = (json.dumps(_event("USER", "inside", event_id="in")) + "\n").encode()
+    outside = (json.dumps(_event("USER", "outside", event_id="out")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(in_bound)
+        f.write(outside)
+    bound_end = len(huge) + len(in_bound)
+    src = EvidenceJsonlSource()
+    segs, end = _sip_past_huge_prefix(src, str(p), 0, 10_000, bound_end=bound_end)
+    assert len(segs) == 1 and segs[0].text == "inside"
+    assert end == bound_end
+    segs2, end2 = src.sip(str(p), bound_end, 10_000)
+    assert len(segs2) == 1 and segs2[0].text == "outside"
+    assert end2 == p.stat().st_size
+
+
+def test_discard_scan_state_resets_on_truncation(tmp_path):
+    """Truncation/replacement clears cached scan cursors for that inode."""
+    p = tmp_path / "trunc.evidence.jsonl"
+    old_size = SCAN_LIMIT + 5000
+    p.write_bytes(b"x" * old_size)
+    src = EvidenceJsonlSource()
+    _, pos1 = src.sip(str(p), 0, 10_000)
+    assert pos1 == 0
+    st = p.stat()
+    stale_key = EvidenceJsonlSource._scan_key(str(p), 0, st.st_dev, st.st_ino)
+    with src._scan_lock:
+        assert stale_key in src._scan_cursors
+    good = (json.dumps(_event("USER", "fresh", event_id="f")) + "\n").encode()
+    p.write_bytes(good)
+    segs, end = src.sip(str(p), 0, 10_000)
+    with src._scan_lock:
+        assert stale_key not in src._scan_cursors
+    assert len(segs) == 1 and segs[0].text == "fresh"
+    assert end == len(good)
+
+
+def test_progressive_cursor_survives_append_growth(tmp_path, monkeypatch):
+    """Append growth must not invalidate the unreserved progressive scan cursor."""
+    p = tmp_path / "grow.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 50_000))
+    consumed = _track_readline_bytes(p, monkeypatch)
+    src = EvidenceJsonlSource()
+    _, pos1 = src.sip(str(p), 0, 10_000)
+    assert pos1 == 0
+    first_pass = consumed[-1]
+    with open(p, "ab") as f:
+        f.write(b"y" * 1000)
+    _, pos2 = src.sip(str(p), 0, 10_000)
+    assert pos2 == 0
+    second_pass = consumed[-1]
+    assert second_pass <= _PER_RESUME_BYTE_CAP
+    assert first_pass > second_pass
+
+
+def test_claim_append_one_byte_reserved_sip_returns_valid_evidence(tmp_path):
+    """claim_bound past a huge prefix, append one byte, sip(bound_end) must not skip."""
+    p = tmp_path / "claim-append.evidence.jsonl"
+    huge = b"x" * (2 * SCAN_LIMIT + 50_000) + b"\n"
+    good = (json.dumps(_event("USER", _blob("reserved"), event_id="ok")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(good)
+    src = EvidenceJsonlSource()
+    marks = Watermarks(str(tmp_path / "marks.json"))
+    claimed = None
+    for _ in range(30):
+        result = marks.claim([str(p)], 4000, MIN_DRINK)
+        if result is not None:
+            claimed = result
+            break
+        src.sip(str(p), 0, 4000)
+    assert claimed is not None
+    path, start, reserved, _ = claimed
+    assert start == 0
+    with open(p, "ab") as f:
+        f.write(b"z")
+    segs, sip_end = src.sip(path, start, 4000, bound_end=reserved)
+    assert len(segs) == 1 and segs[0].text.startswith("reserved")
+    assert sip_end == reserved == p.stat().st_size - 1
+    assert marks.read()[src.key(str(p))] == reserved
+
+
+def test_inode_replacement_resets_scan_cursor(tmp_path):
+    """A new file at the same path (new inode) must not inherit a stale cursor."""
+    p = tmp_path / "replace.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 5000))
+    src = EvidenceJsonlSource()
+    src.sip(str(p), 0, 10_000)
+    st_old = p.stat()
+    key_old = EvidenceJsonlSource._scan_key(str(p), 0, st_old.st_dev, st_old.st_ino)
+    with src._scan_lock:
+        assert key_old in src._scan_cursors
+    good = (json.dumps(_event("USER", "replaced", event_id="r")) + "\n").encode()
+    p.unlink()
+    p.write_bytes(good)
+    st_new = p.stat()
+    key_new = EvidenceJsonlSource._scan_key(str(p), 0, st_new.st_dev, st_new.st_ino)
+    assert key_new != key_old
+    segs, end = src.sip(str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "replaced"
+    assert end == len(good)
+    with src._scan_lock:
+        assert key_old not in src._scan_cursors
+
+
+def test_same_inode_rewrite_resets_scan_cursor(tmp_path):
+    """Same-inode content rewrite at line_start clears a saved progressive cursor."""
+    p = tmp_path / "rewrite.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 5000))
+    src = EvidenceJsonlSource()
+    src.sip(str(p), 0, 10_000)
+    st = p.stat()
+    key = EvidenceJsonlSource._scan_key(str(p), 0, st.st_dev, st.st_ino)
+    with src._scan_lock:
+        assert key in src._scan_cursors
+    good = (json.dumps(_event("USER", "rewritten", event_id="w")) + "\n").encode()
+    p.write_bytes(good)
+    segs, end = src.sip(str(p), 0, 10_000)
+    with src._scan_lock:
+        assert key not in src._scan_cursors
+    assert len(segs) == 1 and segs[0].text == "rewritten"
+    assert end == len(good)
+
+
+def test_same_size_same_head_rewrite_resets_scan_cursor(tmp_path):
+    """Same inode, size, and head anchor: generation change must not reuse cursor."""
+    p = tmp_path / "same-size.evidence.jsonl"
+    old_size = SCAN_LIMIT + 5000
+    p.write_bytes(b"x" * old_size)
+    src = EvidenceJsonlSource()
+    segs1, pos1 = src.sip(str(p), 0, 10_000)
+    assert segs1 == [] and pos1 == 0
+    st = p.stat()
+    key = EvidenceJsonlSource._scan_key(str(p), 0, st.st_dev, st.st_ino)
+    with src._scan_lock:
+        assert key in src._scan_cursors
+    good = (json.dumps(_event("USER", "found", event_id="f")) + "\n").encode()
+    huge = b"x" * (old_size - len(good) - 1) + b"\n"
+    assert len(huge) + len(good) == old_size
+    assert huge[:16] == b"x" * 16
+    p.write_bytes(huge + good)
+    segs2, end = src.sip(str(p), 0, 10_000)
+    with src._scan_lock:
+        assert key not in src._scan_cursors
+    assert len(segs2) == 1 and segs2[0].text == "found"
+    assert end == old_size
+
+
+def test_same_size_rewrite_resets_even_when_mtime_restored(tmp_path):
+    """Restoring mtime cannot hide a same-size rewrite; ctime generation still resets."""
+    p = tmp_path / "mtime-restore.evidence.jsonl"
+    old_size = SCAN_LIMIT + 5000
+    p.write_bytes(b"x" * old_size)
+    src = EvidenceJsonlSource()
+    src.sip(str(p), 0, 10_000)
+    old_st = p.stat()
+    good = (json.dumps(_event("USER", "ctime", event_id="c")) + "\n").encode()
+    huge = b"x" * (old_size - len(good) - 1) + b"\n"
+    p.write_bytes(huge + good)
+    os.utime(p, ns=(old_st.st_atime_ns, old_st.st_mtime_ns))
+    assert p.stat().st_mtime_ns == old_st.st_mtime_ns
+    assert p.stat().st_ctime_ns != old_st.st_ctime_ns
+    segs, end = src.sip(str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "ctime"
+    assert end == old_size
+
+
+def test_append_growth_near_cursor_mutation_resets_scan_cursor(tmp_path, monkeypatch):
+    """Growth that mutates bytes near the saved cursor must not reuse it."""
+    p = tmp_path / "mutate.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 50_000))
+    consumed = _track_readline_bytes(p, monkeypatch)
+    src = EvidenceJsonlSource()
+    src.sip(str(p), 0, 10_000)
+    first_pass = consumed[-1]
+    with src._scan_lock:
+        entry = next(iter(src._scan_cursors.values()))
+        cursor_pos = entry.pos
+    with open(p, "r+b") as f:
+        f.seek(cursor_pos - 1)
+        f.write(b"y")
+        f.seek(0, 2)
+        f.write(b"z" * 1000)
+    _, pos = src.sip(str(p), 0, 10_000)
+    assert pos == 0
+    second_pass = consumed[-1]
+    # Reset restarts detection + progressive scan; resume would read far less.
+    assert second_pass >= first_pass - (MAX_LINE + 2)
+
+
+def test_scan_state_is_instance_local(tmp_path):
+    """Two instances do not share progressive scan cursors."""
+    p = tmp_path / "local.evidence.jsonl"
+    p.write_bytes(b"x" * (SCAN_LIMIT + 5000))
+    a = EvidenceJsonlSource()
+    b = EvidenceJsonlSource()
+    a.sip(str(p), 0, 10_000)
+    with a._scan_lock:
+        assert a._scan_cursors
+    with b._scan_lock:
+        assert not b._scan_cursors
+
+
+def test_scan_state_cap_evicts_without_breaking_reserved_sip(tmp_path):
+    """Eviction restarts unreserved scans but reserved sips stay correct."""
+    src = EvidenceJsonlSource()
+    src._SCAN_STATE_CAP = 2
+    paths = []
+    for i in range(3):
+        p = tmp_path / f"cap{i}.evidence.jsonl"
+        p.write_bytes(b"x" * (SCAN_LIMIT + 1000))
+        paths.append(p)
+        src.sip(str(p), 0, 10_000)
+    with src._scan_lock:
+        assert len(src._scan_cursors) <= 2
+    huge = b"x" * (2 * SCAN_LIMIT + 10_000) + b"\n"
+    good = (json.dumps(_event("USER", "after-cap", event_id="c")) + "\n").encode()
+    p = tmp_path / "reserved.evidence.jsonl"
+    p.write_bytes(huge + good)
+    bound_end = len(huge) + len(good)
+    segs, end = src.sip(str(p), 0, 10_000, bound_end=bound_end)
+    assert len(segs) == 1 and segs[0].text == "after-cap"
+    assert end == bound_end

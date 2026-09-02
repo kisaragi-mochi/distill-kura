@@ -27,11 +27,12 @@ model = "local"
 # ── the rooms ─────────────────────────────────────────────────────────────
 # Each store's charter is the byte-identical head of every distiller prompt for that
 # store, so the room's purpose is what the brain, scribe and pourer read first.
+# No charter path is named: the charter lives at <store path>/charter.md by default,
+# which the README's copy step puts there — so this config works from any directory.
 
 [stores.research]
 path = "~/kura/research"
 label = "Research — what became known"
-charter = "examples/rooms/research/charter.md"
 write_policy = "distiller-only"
 [stores.research.distill]
 inherit_global_journals = false
@@ -42,7 +43,6 @@ dsh = "~/dsh/sessions/work-research"
 [stores.develop]
 path = "~/kura/develop"
 label = "Develop — how it was made to work"
-charter = "examples/rooms/develop/charter.md"
 write_policy = "distiller-only"
 [stores.develop.distill]
 inherit_global_journals = false
@@ -53,7 +53,6 @@ dsh = "~/dsh/sessions/work-develop"
 [stores.manage]
 path = "~/kura/manage"
 label = "Manage — what it changed in the plan"
-charter = "examples/rooms/manage/charter.md"
 write_policy = "distiller-only"
 [stores.manage.distill]
 inherit_global_journals = false
@@ -64,7 +63,6 @@ dsh = "~/dsh/sessions/work-manage"
 [stores.eq]
 path = "~/kura/eq"
 label = "EQ — what was felt, and what settled it"
-charter = "examples/rooms/eq/charter.md"
 write_policy = "distiller-only"
 [stores.eq.distill]
 inherit_global_journals = false
@@ -75,7 +73,6 @@ dsh = "~/dsh/sessions/work-eq"
 [stores.user]
 path = "~/kura/user"
 label = "USER — the person, over time"
-charter = "examples/rooms/user/charter.md"
 write_policy = "distiller-only"
 # `profile.md` beside the charter is read after it when present — see the charter
 # and docs/OPERATING.md "The wide room". It is never written by a model on its own.

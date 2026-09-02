@@ -48,6 +48,11 @@ With no config at all, `$KURA_DIR` (or `./memory`) becomes a single store named
     fresh_days = 14                      # memories touched this recently keep full lines
     pinned_types = ["feedback", "user"]  # these types always keep full lines
     trigger_tokens = 24                  # budget for one trimmed line
+
+    [[payforward.mouths]]                # a mouth `kura pay-forward` bakes the map into
+    name = "cpu-mouth"
+    url = "http://127.0.0.1:8014"        # llama.cpp server BASE (slots API lives beside /v1)
+    store = "main"                       # whose map this mouth wears
 """
 from __future__ import annotations
 
@@ -57,6 +62,7 @@ from dataclasses import dataclass, field
 
 from .store import Store
 from .thinker import Models
+from .prefill import RESIDENT_MODES
 
 CONFIG_CANDIDATES = ("kura.toml", os.path.expanduser("~/.config/distill-kura/kura.toml"))
 
@@ -64,10 +70,10 @@ CONFIG_CANDIDATES = ("kura.toml", os.path.expanduser("~/.config/distill-kura/kur
 # otherwise; extensions use an `x_` prefix so they are visibly not ours.
 STORE_KEYS = {"path", "label", "readonly", "write_policy", "persona", "charter",
               "model_profile"}
-NESTED_KEYS = {"distill", "prefill"}
+NESTED_KEYS = {"distill", "prefill", "fastpath"}
 _TYPES = {"path": str, "label": str, "readonly": bool, "write_policy": str,
           "persona": str, "charter": str, "model_profile": str,
-          "distill": dict, "prefill": dict}
+          "distill": dict, "prefill": dict, "fastpath": dict}
 # The nested tables need checking too: `inherit_global_journals = "false"` is a STRING,
 # therefore truthy, so a store inherited the global intake it had explicitly declined.
 _DISTILL_TYPES = {"inherit_global_journals": bool, "journals": dict, "language": str,
@@ -77,7 +83,102 @@ _DISTILL_TYPES = {"inherit_global_journals": bool, "journals": dict, "language":
                   "idle_min": (int, float), "backoff_min": (int, float), "yield_on_return": bool}
 _PREFILL_TYPES = {"window_tokens": int, "budget_fraction": float, "hard_fraction": float,
                   "fresh_days": (int, float), "pinned_types": list, "trigger_tokens": int,
-                  "verbatim_after": str, "cloth_path": str, "header": str}
+                  "verbatim_after": str, "cloth_path": str, "header": str,
+                  "trail_tokens": int,
+                  # M4 adaptive minimum recognition trigger — SHADOW by default: candidates
+                  # are generated and judged, the production cloth keeps trigger_tokens
+                  # until a benchmark says otherwise. An untouched old config changes nothing.
+                  "adaptive_triggers": bool, "adaptive_apply": bool, "trigger_steps": list,
+                  # M6: what the resident block wears when the full map is over the ceiling.
+                  "resident_mode": str}
+# M6 resident modes, imported so there is one list: `full` (today's map), `auto`
+# (map while it fits, constellation over the ceiling), `constellation` (always).
+# Tier zero of recall (`fastpath.py`). `gate` is the honesty bar: a hit below it is
+# silence, and silence goes to the thinker.
+_FASTPATH_TYPES = {"enabled": bool, "gate": (int, float), "cues": bool}
+# One mouth `kura pay-forward` bakes the resident map into (`payforward.py`). `url` is
+# the llama.cpp-compatible server's BASE — the slots API lives beside /v1, not under it
+# — and `store` names whose map the mouth wears.
+_MOUTH_TYPES = {"name": str, "url": str, "store": str, "slot": int, "model": str,
+                "api_key_env": str}
+_MOUTH_REQUIRED = ("name", "url", "store")
+# [models.<role>] and [model_profiles.<p>.<role>]. Every other table is checked at
+# load; these were not, so `api_key_ev = "KEY"` (typo) was silently dropped and
+# requests left unauthenticated, and `timeout = "120"` crashed at call time — the
+# silently-ignored field that looks exactly like a working one.
+_MODEL_ROLES = {"thinker", "brain", "scribe"}
+_MODEL_TYPES = {"url": str, "model": str, "api_key_env": str, "timeout": (int, float),
+                "temperature": (int, float), "effort": str, "thinking": bool,
+                "dialect": str, "extra": dict}
+
+
+def _check_models(where: str, cfg) -> None:
+    if not cfg:
+        return                           # no [models] at all: thinker defaults apply
+    if not isinstance(cfg, dict):
+        raise ValueError(f"[{where}] must be a table of roles ({sorted(_MODEL_ROLES)}), "
+                         f"got {type(cfg).__name__}")
+    for role, rc in cfg.items():
+        if role not in _MODEL_ROLES:
+            raise ValueError(f"[{where}] has unknown role {role!r}. "
+                             f"Known: {sorted(_MODEL_ROLES)}.")
+        if not isinstance(rc, dict):
+            raise ValueError(f"[{where}.{role}] must be a table, got {type(rc).__name__}")
+        unknown = {k for k in rc if k not in _MODEL_TYPES and not k.startswith("x_")}
+        if unknown:
+            raise ValueError(f"[{where}.{role}] has unknown key(s) {sorted(unknown)}. "
+                             f"Known: {sorted(_MODEL_TYPES)}.")
+        _check_table(f"{where}.{role}", rc, _MODEL_TYPES)
+        d = rc.get("dialect")
+        if d is not None and d not in ("vllm", "openai", "generic"):
+            raise ValueError(f"[{where}.{role}] dialect must be vllm, openai or generic, "
+                             f"got {d!r}")
+
+
+def mouth_base(url: str) -> str:
+    """A mouth's normalized server base — together with the slot id, its PHYSICAL
+    identity. Every other url in kura.toml carries `/v1`, so that slip is certain to
+    happen here; the slots API lives BESIDE /v1, not under it, so the suffix is
+    stripped rather than punished."""
+    u = str(url).rstrip("/")
+    if u.endswith("/v1"):
+        u = u[: -len("/v1")].rstrip("/")
+    return u
+
+
+def _check_adaptive(section: str, t: dict) -> None:
+    """The adaptive-trigger keys, refused loudly when they cannot mean what they say:
+    steps that are not ascending ints would silently reorder the ladder; a step above
+    trigger_tokens would "shorten" to something longer than the legacy budget; and
+    `adaptive_apply` without `adaptive_triggers` is a switch wired to nothing."""
+    steps = t.get("trigger_steps")
+    if steps is not None:
+        if not steps or any(not isinstance(x, int) or isinstance(x, bool) or x <= 0 for x in steps):
+            raise ValueError(f"[{section}] trigger_steps must be a non-empty list of positive ints")
+        if steps != sorted(set(steps)):
+            raise ValueError(f"[{section}] trigger_steps must be strictly ascending: {steps}")
+        cap = t.get("trigger_tokens", 24)
+        if steps[-1] != cap:
+            # The last rung IS the legacy budget: a ladder that ends below it can never
+            # offer the size production wears today, and one that ends above it would
+            # call a longer cue "shorter".
+            raise ValueError(f"[{section}] trigger_steps must end at trigger_tokens={cap}, "
+                             f"got {steps}")
+    if t.get("adaptive_apply") and not t.get("adaptive_triggers"):
+        raise ValueError(f"[{section}] adaptive_apply=true needs adaptive_triggers=true")
+
+
+def _check_prefill(section: str, t: dict) -> None:
+    """The [prefill] table's shape AND its enumerated values. A `resident_mode`
+    outside the three names would either raise inside `prefill.build` on every
+    request or be quietly read as `full` — named at load, like every other bad
+    config value."""
+    _check_table(section, t, _PREFILL_TYPES)
+    _check_adaptive(section, t)
+    rm = t.get("resident_mode")
+    if rm is not None and rm not in RESIDENT_MODES:
+        raise ValueError(f"[{section}] resident_mode must be one of "
+                         f"{list(RESIDENT_MODES)}, got {rm!r}")
 
 
 def _check_table(where: str, table: dict, types: dict) -> None:
@@ -99,7 +200,8 @@ def _check_table(where: str, table: dict, types: dict) -> None:
 def _check_types(name: str, sc: dict) -> None:
     _check_table(f"stores.{name}", sc, _TYPES)
     _check_table(f"stores.{name}.distill", sc.get("distill") or {}, _DISTILL_TYPES)
-    _check_table(f"stores.{name}.prefill", sc.get("prefill") or {}, _PREFILL_TYPES)
+    _check_prefill(f"stores.{name}.prefill", sc.get("prefill") or {})
+    _check_table(f"stores.{name}.fastpath", sc.get("fastpath") or {}, _FASTPATH_TYPES)
 
 
 def _real(path: str) -> str:
@@ -163,6 +265,60 @@ def _check_paths(stores: dict[str, Store], raw: dict) -> None:
                     f"text as the human's words. Move the journal root outside the store.")
 
 
+def _check_mouths(raw: dict, stores: dict[str, Store]) -> None:
+    """Validate `[[payforward.mouths]]` at load, the way [fastpath] and the store
+    tables are: a bad mouth throws with the offending value named, because a silently
+    skipped mouth looks exactly like a fleet that is warm."""
+    pf = raw.get("payforward") or {}
+    unknown = {k for k in pf if k != "mouths" and not k.startswith("x_")}
+    if unknown:
+        raise ValueError(f"[payforward] has unknown key(s) {sorted(unknown)}. "
+                         f"Known: ['mouths']. Use an `x_`-prefixed name for your own "
+                         f"extensions.")
+    mouths = pf.get("mouths") or []
+    if not isinstance(mouths, list):
+        raise ValueError(f"[payforward] mouths must be an array of tables "
+                         f"([[payforward.mouths]]), got {type(mouths).__name__}")
+    seen: set[str] = set()
+    phys: dict[tuple[str, int], str] = {}
+    for i, m in enumerate(mouths):
+        where = f"payforward.mouths[{i}]"
+        if not isinstance(m, dict):
+            raise ValueError(f"[{where}] must be a table ([[payforward.mouths]])")
+        for k in _MOUTH_REQUIRED:
+            if not m.get(k):
+                raise ValueError(f"[{where}] needs `{k}`")         # fail loudly at load
+        unknown = {k for k in m if k not in _MOUTH_TYPES and not k.startswith("x_")}
+        if unknown:
+            raise ValueError(f"[{where}] has unknown key(s) {sorted(unknown)}. "
+                             f"Known: {sorted(_MOUTH_TYPES)}. "
+                             f"Use an `x_`-prefixed name for your own extensions.")
+        _check_table(where, m, _MOUTH_TYPES)
+        if isinstance(m.get("slot"), int) and m["slot"] < 0:
+            raise ValueError(f"[{where}] slot must be >= 0, got {m['slot']}")
+        name = str(m["name"])
+        if name in seen:
+            raise ValueError(f"[payforward] two mouths named {name!r}: the state file "
+                             f"is keyed on the name, so the second would wear the "
+                             f"first one's record of what was baked.")
+        seen.add(name)
+        # The NAME is the state key, but the PHYSICAL identity is (base url, slot):
+        # two names pointed at one slot would race on its KV, each runner saving over
+        # the other's map — and the state files would both claim success.
+        ident = (mouth_base(m["url"]), int(m.get("slot", 0)))
+        if ident in phys:
+            raise ValueError(f"[{where}] and mouth {phys[ident]!r} are the same "
+                             f"physical slot ({ident[0]}, slot {ident[1]}). Two names "
+                             f"for one slot race on its KV; give each mouth its own "
+                             f"slot, or keep one entry.")
+        phys[ident] = name
+        if m["store"] not in stores:
+            # A mode name is refused too, deliberately: a mouth is standing hardware
+            # wearing ONE store's map, not a session-level selector.
+            raise ValueError(f"[{where}] store = {m['store']!r} is not a configured "
+                             f"store. Known: {sorted(stores)}")
+
+
 @dataclass
 class Registry:
     stores: dict[str, Store]
@@ -217,7 +373,8 @@ class Registry:
             d = os.environ.get("KURA_DIR", os.path.abspath("memory"))
             stores["main"] = Store(name="main", path=d, label=os.environ.get("KURA_LABEL", "kura"))
         _check_table("distill", raw.get("distill") or {}, _DISTILL_TYPES)
-        _check_table("prefill", raw.get("prefill") or {}, _PREFILL_TYPES)
+        _check_prefill("prefill", raw.get("prefill") or {})
+        _check_table("fastpath", raw.get("fastpath") or {}, _FASTPATH_TYPES)
         srv = raw.get("server") or {}
         default = srv.get("default") or next(iter(stores))
         if default not in stores:
@@ -235,11 +392,15 @@ class Registry:
                     f"selector {m!r} would resolve to the store, not this mode. "
                     f"Rename one of them.")
         _check_paths(stores, raw)
+        _check_mouths(raw, stores)
         models_cfg = raw.get("models")
         if not models_cfg and os.environ.get("KURA_THINKER_URL"):      # legacy env
             models_cfg = {"thinker": {"url": os.environ["KURA_THINKER_URL"],
                                       "model": os.environ.get("KURA_THINKER_MODEL", "default")}}
+        _check_models("models", models_cfg)
         profiles = {}
+        for pname, pcfg in (raw.get("model_profiles") or {}).items():
+            _check_models(f"model_profiles.{pname}", pcfg)
         for pname, pcfg in (raw.get("model_profiles") or {}).items():
             # Models.from_config chains thinker -> brain -> scribe, so a role missing at
             # the head lands on Endpoint()'s built-in default. A profile defining only
@@ -259,10 +420,23 @@ class Registry:
                 # store's whole index reaches a model it was never meant to see.
                 raise ValueError(f"[stores.{n}] model_profile = {want!r} is not defined. "
                                  f"Known profiles: {sorted(profiles)}")
+        # Port is coerced nowhere else silently: `8085.9` truncated to 8085 and
+        # `true` became 1, both accepted — every other value in this file is
+        # type-checked at load with the offender named.
+        port_raw = os.environ.get("KURA_PORT", srv.get("port", 8085))
+        if isinstance(port_raw, bool) or not isinstance(port_raw, (int, str)):
+            raise ValueError(f"[server] port must be an integer, got {type(port_raw).__name__} "
+                             f"({port_raw!r})")
+        if isinstance(port_raw, str):
+            if not (port_raw.strip().isascii() and port_raw.strip().isdigit()):
+                raise ValueError(f"[server] port must be an integer, got {port_raw!r}")
+            port = int(port_raw)
+        else:
+            port = port_raw
         return cls(stores=stores, modes=modes, models=Models.from_config(models_cfg),
                    profiles=profiles,
                    default=default, host=srv.get("host", "127.0.0.1"),
-                   port=int(os.environ.get("KURA_PORT", srv.get("port", 8085))),
+                   port=port,
                    config_path=path, raw=raw)
 
     # ── lookups ──────────────────────────────────────────────────────────
@@ -314,6 +488,25 @@ class Registry:
         own = store.extra.get("prefill")
         return {**cfg, **own} if isinstance(own, dict) else cfg
 
+    @property
+    def payforward_mouths(self) -> list[dict]:
+        """The mouths `kura pay-forward` serves, defaults applied. Validated at load,
+        so a mouth returned here is complete and names a real store."""
+        return [{"name": str(m["name"]), "url": str(m["url"]), "store": str(m["store"]),
+                 "slot": int(m.get("slot", 0)), "model": str(m.get("model", "default")),
+                 "api_key_env": m.get("api_key_env")}
+                for m in (self.raw.get("payforward") or {}).get("mouths") or []]
+
+    @property
+    def fastpath_cfg(self) -> dict:
+        return dict(self.raw.get("fastpath") or {})
+
+    def fastpath_cfg_for(self, store: Store) -> dict:
+        """Global `[fastpath]`, overridden per store by `[stores.<name>.fastpath]`."""
+        cfg = self.fastpath_cfg
+        own = store.extra.get("fastpath")
+        return {**cfg, **own} if isinstance(own, dict) else cfg
+
     def describe(self) -> dict:
         return {
             "default": self.default,
@@ -325,5 +518,7 @@ class Registry:
             "models": self.models.describe(),
             "model_profiles": sorted(self.profiles),
             "prefill": self.prefill_cfg,
+            "fastpath": self.fastpath_cfg,
+            "payforward": {"mouths": self.payforward_mouths},
             "config": self.config_path,
         }

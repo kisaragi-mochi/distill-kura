@@ -6,7 +6,8 @@ Layout of a store directory::
       MEMORY.md        the index: one line per memory, written as a *recognition trigger*
       <slug>.md        one memory = one fact, with YAML-ish frontmatter
       _study/*.md      optional long-form notes (also indexed and walkable)
-      _still/          the distiller's workshop (drafts, watermarks, read log) — never indexed
+      _still/          the distiller's workshop (drafts, watermarks, read log,
+                       the write-ahead log and the revision counter) — never indexed
       persona.json     optional: who the agent *is* when it lives with this store
       charter.md       optional: the text every worker of this store reads first
 
@@ -35,6 +36,20 @@ INDEX = "MEMORY.md"
 # own charter was being counted as a memory the moment one was written — it appeared in
 # `doctor` as unindexed and would have been walked by recall.
 RESERVED = {INDEX, "charter.md", "README.md", "persona.json", "profile.md"}
+
+# What a memory's file may be called, asked in ONE place. `_write` refused reserved
+# slugs and the WAL judged its targets by a second, looser pattern of its own, so a
+# name `_write` could never have produced — `MEMORY.md`, `charter.md` — was a legal
+# WAL target: replay would have overwritten a store-kept file on the strength of an
+# intent nobody could have written honestly. Both doors ask this now, so the two
+# answers cannot drift apart again.
+_MEMORY_FILE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.md$")
+
+
+def is_memory_file(name: str) -> bool:
+    """True when `name` is a file name a memory of a store may carry."""
+    return (isinstance(name, str) and bool(_MEMORY_FILE.match(name))
+            and name not in RESERVED and name[:-3].upper() != "MEMORY")
 
 
 class InvalidSlug(ValueError):
@@ -156,7 +171,16 @@ class Store:
             raise ValueError(f"[stores.{self.name}] write_policy must be one of "
                              f"{list(WRITE_POLICIES)}, got {self.write_policy!r}")
         if self.readonly is not None:
-            # Honour the documented meaning, not the old behaviour.
+            # Honour the documented meaning, not the old behaviour — but never let
+            # the deprecated key SILENTLY WEAKEN a policy already set: `readonly =
+            # false` used to turn a `frozen` store into a fully writable one,
+            # signalled by nothing. Tightening (readonly = true → distiller-only)
+            # keeps its documented meaning.
+            if self.readonly is False and self.write_policy != DIRECT_ALLOWED:
+                raise ValueError(
+                    f"[stores.{self.name}] readonly=false would silently change "
+                    f"write_policy={self.write_policy!r} to 'direct-allowed'. "
+                    f"Set write_policy on its own (readonly is deprecated).")
             self.write_policy = DISTILLER_ONLY if self.readonly else DIRECT_ALLOWED
         if self.persona is None and os.path.exists(os.path.join(self.path, "persona.json")):
             self.persona = os.path.join(self.path, "persona.json")
@@ -166,7 +190,7 @@ class Store:
             self.charter = os.path.join(self.path, "charter.md")
         elif self.charter:
             self.charter = os.path.realpath(os.path.expanduser(self.charter))
-        self._titles: dict[str, str] | None = None
+        self._titles: tuple[tuple[int, int, int], dict[str, str]] | None = None
         self._slugs_cache: tuple[tuple[int, int], frozenset[str]] | None = None
 
     @property
@@ -249,6 +273,20 @@ class Store:
         (`- topic — [A](a.md)/[B](b.md)`), and a prefix rule drops them all."""
         return re.sub(r"<!--.*?-->", "", text, flags=re.S)
 
+    @staticmethod
+    def _commented_lines(text: str) -> set[int]:
+        """Indices of the lines an HTML comment touches.
+
+        For the writer, which cannot work on `_uncommented()` text: it rebuilds the
+        index line by line and must keep the comments byte for byte. A line the
+        comment touches is left alone rather than edited or matched, so the format
+        hint's example link cannot be mistaken for a memory's entry."""
+        hidden: set[int] = set()
+        for m in re.finditer(r"<!--.*?-->", text, flags=re.S):
+            hidden.update(range(text.count("\n", 0, m.start()),
+                                text.count("\n", 0, m.end()) + 1))
+        return hidden
+
     def slug_set(self) -> frozenset[str]:
         """The names this store will answer to — nothing else, ever.
 
@@ -282,15 +320,28 @@ class Store:
 
     def titles(self) -> dict[str, str]:
         """index display title (lowercased) → slug. Models sometimes answer with the
-        title rather than the slug; we accept both."""
-        if self._titles is None:
-            self._titles = {}
+        title rather than the slug; we accept both.
+
+        Stamped against the index file the way `slug_set()` is stamped against the
+        directory. The map used to be built once and dropped only by whichever writer
+        remembered to drop it, so an index rewritten by anyone else — a tidy in the
+        distiller's process, a hand edit — left `resolve()` snapping answers onto
+        titles the index no longer carries. Rebuilding is a regex over one small file;
+        the inode is in the stamp because every index replace lands a new one."""
+        try:
+            st = os.stat(self.index_path)
+            stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            stamp = (0, 0, 0)
+        if self._titles is None or self._titles[0] != stamp:
+            built: dict[str, str] = {}
             # Every link on the line, not just the first: one line often carries a
             # small family of related memories.
             for t, slug in re.findall(r"\[([^\]]+)\]\(([^)]+)\.md\)",
                                       self._uncommented(self.index_text())):
-                self._titles.setdefault(t.strip().lower(), slug.strip())
-        return self._titles
+                built.setdefault(t.strip().lower(), slug.strip())
+            self._titles = (stamp, built)
+        return self._titles[1]
 
     @staticmethod
     def _clean(name: str) -> str:
@@ -355,12 +406,27 @@ class Store:
         return self._open(s) if s else ""
 
     def frontmatter(self, slug: str) -> dict:
-        """The leading `---` block, flattened. `type` is lifted out of `metadata:` when
-        it is nested there, because that is where the writer puts it and every caller
-        wants it at the top level. Not a YAML parser — a memory's frontmatter is four
-        or five plain `key: value` lines by construction, and pulling in a parser for
-        that would add a dependency to a project that has none."""
-        text = self.read(slug)
+        """The leading `---` block, flattened. Read through the fuzzy resolver, like
+        `read()`."""
+        return self._frontmatter_of(self.read(slug))
+
+    def frontmatter_exact(self, slug: str) -> dict:
+        """The frontmatter of exactly the file named, with no fuzzy snapping.
+
+        For the writer, which carries an existing memory's metadata into a rewrite. Read
+        fuzzily, a name that is NOT a memory of this store — an escaping symlink, which
+        `slug_set()` excludes and `_open()` refuses — landed on the nearest neighbour by
+        word overlap, and the new memory was born wearing that neighbour's session id,
+        tags and curation."""
+        return self._frontmatter_of(self._open(slug))
+
+    @staticmethod
+    def _frontmatter_of(text: str) -> dict:
+        """`type` is lifted out of `metadata:` when it is nested there, because that is
+        where the writer puts it and every caller wants it at the top level. Not a YAML
+        parser — a memory's frontmatter is four or five plain `key: value` lines by
+        construction, and pulling in a parser for that would add a dependency to a
+        project that has none."""
         if not text.startswith("---"):
             return {}
         end = text.find("\n---", 3)
@@ -390,7 +456,11 @@ class Store:
         and that is an ordinary answer, not an error. A `tags:` line that cannot be read
         is ALSO an empty answer here — and a line in `doctor()`, so the rot is visible
         rather than quietly treated as 'untagged'."""
-        raw = self.frontmatter(slug).get("tags")
+        return self._tags_of(self.frontmatter(slug))
+
+    @staticmethod
+    def _tags_of(fm: dict) -> tuple[str, ...]:
+        raw = fm.get("tags")
         if not raw:
             return ()
         try:
@@ -411,7 +481,10 @@ class Store:
 
     def annotations(self, slug: str) -> dict[str, str]:
         """`belongs_because` / `keep` / `may_fade` — only the ones present."""
-        fm = self.frontmatter(slug)
+        return self._annotations_of(self.frontmatter(slug))
+
+    @staticmethod
+    def _annotations_of(fm: dict) -> dict[str, str]:
         return {k: fm[k] for k in ANNOTATION_KEYS if fm.get(k)}
 
     def mtime(self, slug: str) -> float:
@@ -499,18 +572,37 @@ class Store:
     # with a file handle and an accident, not a principal with the filesystem.
     def gate_key(self) -> bytes:
         path = os.path.join(self.still, "gate.key")
-        try:
-            with open(path, "rb") as f:
-                key = f.read()
-            if len(key) >= 32:
-                return key
-        except OSError:
-            pass
-        key = secrets.token_bytes(32)
-        os.makedirs(self.still, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(key)
+        for attempt in (1, 2):
+            try:
+                with open(path, "rb") as f:
+                    key = f.read()
+            except FileNotFoundError:
+                key = None
+            if key is not None:
+                if len(key) >= 32:
+                    return key
+                # A short or empty key is corruption. Regenerating here would
+                # orphan every signature in the store in one silent stroke —
+                # the one repair that must never be automatic.
+                raise RuntimeError(
+                    f"gate key at {path} is {len(key)} bytes (needs 32+). "
+                    "Refusing to regenerate: a new key orphans every existing "
+                    "mark. Restore the key from backup, or move it aside "
+                    "DELIBERATELY and re-stage the drafts.")
+            os.makedirs(self.still, exist_ok=True)
+            try:
+                # First writer wins; a concurrent first-boot loses the race and
+                # reads the winner's key instead of minting a second one.
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, "wb") as f:
+                f.write(secrets.token_bytes(32))
+            # Loop once more to READ what we (or a racer) wrote — one code path.
+        with open(path, "rb") as f:
+            key = f.read()
+        if len(key) < 32:
+            raise RuntimeError(f"gate key at {path} unreadable after creation")
         return key
 
     def _curation_mark(self, slug: str, tags: tuple[str, ...], annotations: dict) -> str:
@@ -582,9 +674,27 @@ class Store:
             if not fm_raw:
                 return {"ok": False, "error": f"{s} has no frontmatter to annotate"}
             fm = self.frontmatter(s)
-            have = self.tags(s)
+            # Reading through tags() hides an unreadable tags line (it returns () by
+            # design, for doctor); writing that () back would ERASE the tags. An
+            # unreadable line is a refusal, not a haircut.
+            raw_tags = fm.get("tags")
+            if raw_tags:
+                try:
+                    have = normalize_tags(raw_tags)
+                except InvalidTag as e:
+                    return {"ok": False, "error": f"{s}'s existing tags are unreadable "
+                                                  f"({e}); fix them before annotating"}
+            else:
+                have = ()
             new_tags = normalize_tags(tuple(have) + add)
-            new_ann = {**self.annotations(s), **{k: v for k, v in (annotations or {}).items() if v}}
+            # Sign what will ROUND-TRIP, not what arrived: the renderer flattens
+            # newlines and the parser strips the ends, so a sentence with a
+            # trailing space was signed as-written, read back stripped, and the
+            # memory wore `tampered` forever — from one keystroke of whitespace.
+            new_ann = {**self.annotations(s),
+                       **{k: str(v).replace("\n", " ").strip()
+                          for k, v in (annotations or {}).items()
+                          if str(v).replace("\n", " ").strip()}}
             new_meta = {**{k: v for k, v in fm.items()
                            if k not in ("name", "description", "type", "tags", "curation_mark")
                            and k not in ANNOTATION_KEYS},
@@ -597,10 +707,12 @@ class Store:
                                     body, new_meta, new_tags, new_ann)
             if rendered == text:
                 return {"ok": True, "slug": s, "changed": False, "tags": list(new_tags)}
-            tmp = self.file_of(s) + f".tmp.{os.getpid()}"
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(rendered)
-            os.replace(tmp, self.file_of(s))
+            # One canonical file: the atomic replace suffices without the WAL (no
+            # second file to fall out of step with). The revision still moves —
+            # bumped first, for the reason `_bump_revision` gives.
+            self._bump_revision()
+            self._replace_file(self.file_of(s), rendered.encode("utf-8"))
+            self._fsync_dir(self.path)
             return {"ok": True, "slug": s, "changed": True, "tags": list(new_tags)}
 
     @staticmethod
@@ -622,29 +734,47 @@ class Store:
         return self.remember_direct(slug, description, body, type_, hook, title)
 
     @contextmanager
-    def _locked(self):
+    def _locked(self, replay: bool = True):
         """One writer at a time, per store.
 
         A memory and its index line are two files. Without a lock, two writers
         interleave and the second one's read-modify-write of `MEMORY.md` drops the
         first's line: the memory exists and nothing points at it, which makes it
         invisible to recall — the failure `doctor()` reports as `not_in_index`, after
-        the fact. Cheap enough to take on every write."""
+        the fact. Cheap enough to take on every write.
+
+        The lock is also where crash replay lives, and the placement is load-bearing:
+        replay applies a leftover transaction's FINAL bytes, so it must run before any
+        new mutation — a write that landed first would be silently overwritten by the
+        older promise. Every mutation goes through here, so replay cannot be forgotten.
+        `replay=False` is for `doctor()` alone, which replays explicitly to report it."""
         os.makedirs(self.still, exist_ok=True)
         with open(os.path.join(self.still, "store.lock"), "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             try:
+                if replay:
+                    self._wal_replay()
                 yield
             finally:
                 fcntl.flock(lk, fcntl.LOCK_UN)
 
     def _write_index(self, text: str) -> None:
         """Replace the index atomically. A crash mid-append used to leave a half-written
-        line in the one file that is read on every single turn."""
-        tmp = self.index_path + f".tmp.{os.getpid()}"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp, self.index_path)
+        line in the one file that is read on every single turn.
+
+        One canonical file changes here (tidy's path), so the atomic replace suffices
+        and the WAL ceremony would buy nothing — a WAL exists to keep TWO files in
+        step, and there is no second file to fall out of step with. The revision still
+        moves: a tidied index is a mutation a consumer must notice."""
+        self._bump_revision()
+        self._replace_file(self.index_path, text.encode("utf-8"))
+        self._fsync_dir(self.path)
+        # A rewritten index re-titles memories; the title map must not outlive it or
+        # resolve() answers with names the index no longer carries. Dropped here for
+        # this object; what actually guarantees it is the stamp in `titles()`, since
+        # the writer is often some other process entirely.
+        self._titles = None
+        self._slugs_cache = None
 
     def _still_ourselves(self) -> bool:
         """The directory we were constructed against is still that directory.
@@ -655,6 +785,201 @@ class Store:
         policy becomes a writable alias of a protected one. Cheap to re-check, so it is
         re-checked on the way into every write."""
         return os.path.realpath(self.path) == self.path
+
+    # ── durability plumbing ──────────────────────────────────────────────
+    @staticmethod
+    def _fsync_dir(path: str) -> None:
+        """Make a rename in `path` durable. Best-effort: some filesystems (CIFS)
+        cannot fsync a directory, and refusing a write over that would trade a
+        crash window for an outage — the atomic replace itself still holds."""
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    def _replace_file(self, target: str, data: bytes) -> None:
+        """Write-fsync-rename. The fsync BEFORE the rename matters: without it a
+        power loss can leave the new name pointing at unwritten bytes — an empty
+        memory with a correct filename, worse than the old content."""
+        tmp = target + f".tmp.{os.getpid()}"
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+
+    # ── the revision counter ─────────────────────────────────────────────
+    #
+    # `_still/revision`: one integer, moved forward once per committed canonical
+    # mutation — a poured or rewritten memory, an annotation, a tidied index. It
+    # exists so a consumer (the weave, a cache) can ask "did anything change?"
+    # without hashing the store. Monotonic, never wound back. 0 means "no counted
+    # mutation yet", which a store from before the counter also honestly answers.
+    @property
+    def _revision_path(self) -> str:
+        return os.path.join(self.still, "revision")
+
+    def revision(self) -> int:
+        try:
+            return int(open(self._revision_path, encoding="utf-8").read().strip())
+        except (OSError, ValueError):
+            return 0
+
+    def _set_revision(self, n: int) -> None:
+        os.makedirs(self.still, exist_ok=True)
+        self._replace_file(self._revision_path, f"{n}\n".encode("utf-8"))
+        self._fsync_dir(self.still)
+
+    def _bump_revision(self) -> int:
+        """For the single-file changes that do not go through the WAL
+        (`_write_index` from tidy, `_annotate`). Bumped BEFORE the canonical
+        replace: a crash in between over-announces — a consumer re-reads an
+        unchanged file, wasted work — where the other order under-announces, and
+        a changed file behind a stale number keeps serving the old map until an
+        unrelated write happens to bump it."""
+        n = self.revision() + 1
+        self._set_revision(n)
+        return n
+
+    # ── the transaction: promise first, then keep it ─────────────────────
+    #
+    # `_write` changes two canonical files. Each replace was atomic; the PAIR was
+    # not, and the old comment here said so out loud — a crash between them left a
+    # memory nothing pointed at (`not_in_index`, found after the fact). The fix is
+    # a write-ahead log: under the lock, the final bytes of every file the change
+    # will touch land in `_still/wal/<txid>/` and are fsynced BEFORE any canonical
+    # file moves. From that moment the change is a promise that survives power
+    # loss, and replay is idempotent because the payloads ARE the final state, not
+    # diffs. A transaction whose promise is incomplete — missing payload, hash
+    # mismatch, unreadable intent — promised nothing: it is moved to
+    # `_still/wal-quarantine/` and named by `doctor()` as `broken_wal`. Never
+    # rolled back, never guessed at.
+
+    @property
+    def _wal_dir(self) -> str:
+        return os.path.join(self.still, "wal")
+
+    @property
+    def _wal_quarantine(self) -> str:
+        return os.path.join(self.still, "wal-quarantine")
+
+    def _commit(self, slug: str, op: str, targets: dict[str, bytes]) -> int:
+        """Commit one canonical change — the final bytes of each file — through
+        the WAL. Must be called under `_locked()`. Returns the new revision."""
+        rev = self.revision() + 1
+        txid = f"{time.time_ns():020d}-{os.getpid()}"
+        txdir = os.path.join(self._wal_dir, txid)
+        os.makedirs(txdir)
+        files = []
+        for i, target in enumerate(sorted(targets)):
+            pname = f"payload-{i}"
+            with open(os.path.join(txdir, pname), "wb") as f:
+                f.write(targets[target])
+                f.flush()
+                os.fsync(f.fileno())
+            files.append({"payload": pname, "target": target,
+                          "sha256": hashlib.sha256(targets[target]).hexdigest()})
+        intent = {"txid": txid, "slug": slug, "op": op, "next_revision": rev, "files": files}
+        # The intent is written LAST: its presence, with every hash checking out, is
+        # what makes the promise binding. A crash before this point promised nothing
+        # (the leftover is quarantined, loudly, with canonical files untouched).
+        with open(os.path.join(txdir, "intent.json"), "w", encoding="utf-8") as f:
+            json.dump(intent, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        self._fsync_dir(txdir)
+        self._fsync_dir(self._wal_dir)
+        self._apply(txdir, intent)
+        return rev
+
+    def _apply(self, txdir: str, intent: dict) -> None:
+        """Keep the promise: memory file first, index second, revision third, then
+        clear the WAL entry. The same order on commit and on replay, so a crash at
+        ANY point re-runs to the same final state."""
+        for e in sorted(intent["files"], key=lambda e: e["target"] == INDEX):
+            with open(os.path.join(txdir, e["payload"]), "rb") as f:
+                data = f.read()
+            self._replace_file(os.path.join(self.path, e["target"]), data)
+        # max(): a replay of an already-applied transaction must not wind back.
+        self._set_revision(max(self.revision(), int(intent["next_revision"])))
+        self._fsync_dir(self.path)
+        for fn in os.listdir(txdir):
+            os.unlink(os.path.join(txdir, fn))
+        os.rmdir(txdir)
+        self._fsync_dir(self._wal_dir)
+
+    def _wal_intact(self, txdir: str) -> dict | None:
+        """The parsed intent when the transaction is complete and true; None when
+        anything fails to check out. The intent is DATA, not authority: a target
+        `_write` could never have produced — a path, a reserved name — marks the
+        transaction broken rather than being applied."""
+        try:
+            with open(os.path.join(txdir, "intent.json"), encoding="utf-8") as f:
+                intent = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(intent, dict) or not isinstance(intent.get("files"), list) \
+                or not intent["files"]:
+            return None
+        if not isinstance(intent.get("next_revision"), int) or intent["next_revision"] < 1:
+            return None
+        for e in intent["files"]:
+            if not isinstance(e, dict):
+                return None
+            target, payload, sha = e.get("target"), e.get("payload"), e.get("sha256")
+            if not (isinstance(target, str) and isinstance(payload, str) and isinstance(sha, str)):
+                return None
+            # The index or a memory, judged by the same predicate `_write` refuses
+            # slugs with: anything else is a name no honest commit could have written.
+            if target != INDEX and not is_memory_file(target):
+                return None
+            if not contained(self.path, os.path.join(self.path, target)):
+                return None
+            if os.path.basename(payload) != payload:
+                return None
+            try:
+                with open(os.path.join(txdir, payload), "rb") as f:
+                    data = f.read()
+            except OSError:
+                return None
+            if hashlib.sha256(data).hexdigest() != sha:
+                return None
+        return intent
+
+    def _wal_replay(self) -> dict:
+        """Finish what a crash interrupted. Must run under the lock, BEFORE any new
+        mutation (see `_locked`). An intact transaction is applied and cleared; a
+        broken one goes to `_still/wal-quarantine/` with its payloads kept for a
+        person to inspect — deleting the debris would delete the only evidence."""
+        wal = self._wal_dir
+        report: dict = {"replayed": [], "quarantined": []}
+        if not os.path.isdir(wal):
+            return report
+        for txid in sorted(os.listdir(wal)):
+            txdir = os.path.join(wal, txid)
+            intent = self._wal_intact(txdir)
+            if intent is None:
+                os.makedirs(self._wal_quarantine, exist_ok=True)
+                dest = os.path.join(self._wal_quarantine, txid)
+                if os.path.exists(dest):     # quarantined before under this name: keep both
+                    dest += f".{time.time_ns()}"
+                os.replace(txdir, dest)
+                self._fsync_dir(self._wal_quarantine)
+                self._fsync_dir(wal)
+                report["quarantined"].append(os.path.basename(dest))
+                continue
+            self._apply(txdir, intent)
+            report["replayed"].append(txid)
+        if report["replayed"]:
+            self._titles = None
+            self._slugs_cache = None
+        return report
 
     def _write(self, slug: str, description: str, body: str, type_: str = "project",
                hook: str | None = None, title: str | None = None,
@@ -671,7 +996,7 @@ class Store:
         slug = re.sub(r"[^a-z0-9-]+", "-", slug.lower()).strip("-")
         if not slug:
             return {"ok": False, "error": "slug required"}
-        if f"{slug}.md" in RESERVED or slug.upper() == "MEMORY":
+        if not is_memory_file(f"{slug}.md"):
             return {"ok": False, "error": f"'{slug}' is a reserved file name in a store"}
         # Tags are validated BEFORE anything is touched. A bad tag refused after the body
         # was written would leave a memory without the tags its writer believes it has.
@@ -688,9 +1013,11 @@ class Store:
         # shell, and silently rewriting a body corrupts exactly the memories that carry
         # the most detail. Escaping belongs to whoever renders a template, at render time.
         os.makedirs(self.path, exist_ok=True)
-        # Memory file and index line are one change. Serialise it, and replace the index
-        # atomically, so a crash or a concurrent writer cannot leave a memory that
-        # nothing points at (invisible to recall) or a half-written index line.
+        # Memory file and index line are one change. Serialise it, decide BOTH files'
+        # final bytes, and commit them through the WAL (`_commit`): the old pair of
+        # atomic replaces was atomic per file and not per change, and a crash between
+        # them left a memory nothing pointed at — the `not_in_index` wound `doctor()`
+        # could only report after the fact. Now it is repaired on the next write.
         with self._locked():
             path = self.file_of(slug)
             existed = os.path.exists(path)
@@ -702,13 +1029,16 @@ class Store:
             kept_tags: tuple[str, ...] = ()
             kept_ann: dict[str, str] = {}
             if existed:
-                kept = {k: v for k, v in self.frontmatter(slug).items()
+                # Exactly this file, never the fuzzy resolver: what is inherited here is
+                # decided by the name on disk, not by the nearest neighbour.
+                fm = self.frontmatter_exact(slug)
+                kept = {k: v for k, v in fm.items()
                         if k not in ("name", "description", "type", "tags", "curation_mark")
                         and k not in ANNOTATION_KEYS}
                 # Tags and annotations survive a body rewrite the same way: a caller
                 # that does not mention them has not asked to remove them.
-                kept_tags = self.tags(slug)
-                kept_ann = self.annotations(slug)
+                kept_tags = self._tags_of(fm)
+                kept_ann = self._annotations_of(fm)
             merged = {**kept, **(meta or {})}
             # The first evidence manifest is the memory's origin. Later pours (an
             # EXTENDS) bring their own manifest and must not erase where the memory
@@ -719,20 +1049,32 @@ class Store:
             all_ann = {**kept_ann, **{k: v for k, v in (annotations or {}).items() if v}}
             if signed and (all_tags or all_ann):
                 merged["curation_mark"] = self._curation_mark(slug, all_tags, all_ann)
-            tmp = path + f".tmp.{os.getpid()}"
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(self._render(slug, description, type_, body, merged, all_tags, all_ann))
-            os.replace(tmp, path)
-            self._titles = None
-            self._slugs_cache = None
+            rendered = self._render(slug, description, type_, body, merged, all_tags, all_ann)
 
+            # The index's final text is decided BEFORE anything on disk moves —
+            # the WAL needs the complete final bytes of every file the change
+            # touches, or replay would have to guess.
             d1 = (hook or description).replace("\n", " ").strip()
             t1 = (title or "").replace("\n", " ").strip()
+            if not d1:
+                # An empty trigger wrote `- [](slug.md) — ` into MEMORY.md: a line
+                # no later write can match, so the rot persisted until hand-edited.
+                return {"ok": False, "error": "a memory needs a description "
+                                              "(the index trigger line)"}
             cur = self.index_text()
+            # The index is judged with its HTML comments stripped, everywhere. The raw
+            # text carries the format hint, and the hint carries an EXAMPLE link: a
+            # store whose comment happens to name this slug looked "already indexed",
+            # so the real entry line was never written and the memory was invisible to
+            # recall — present on disk, unreachable by name.
+            entries = self._uncommented(cur)
+            commented = self._commented_lines(cur)
+            new_index: str | None = None
             if existed and d1:
                 out, hit = [], False
-                for l in cur.splitlines():
-                    m = re.match(rf"- \[([^\]]+)\]\({re.escape(slug)}\.md\) — (.+)", l)
+                for i, l in enumerate(cur.splitlines()):
+                    m = (None if i in commented else
+                         re.match(rf"- \[([^\]]+)\]\({re.escape(slug)}\.md\) — (.+)", l))
                     if m and not hit:
                         out.append(f"- [{t1 if 0 < len(t1) <= 40 else m.group(1)}]"
                                    f"({slug}.md) — {d1}")
@@ -740,15 +1082,25 @@ class Store:
                     else:
                         out.append(l)
                 if hit:
-                    self._write_index("\n".join(out) + "\n")
-                    return {"ok": True, "slug": slug, "created": False, "indexed": "updated"}
-            if f"({slug}.md)" not in cur:
-                # Title must be a name one can say aloud — never a truncated description.
-                t1 = t1 if 0 < len(t1) <= 40 else (d1 if len(d1) <= 34 else slug)
-                sep = "" if (not cur or cur.endswith("\n")) else "\n"
-                self._write_index(f"{cur}{sep}- [{t1}]({slug}.md) — {d1}\n")
-                return {"ok": True, "slug": slug, "created": not existed, "indexed": True}
-            return {"ok": True, "slug": slug, "created": not existed, "indexed": False}
+                    new_index = "\n".join(out) + "\n"
+                    result = {"ok": True, "slug": slug, "created": False, "indexed": "updated"}
+            if new_index is None:
+                if f"({slug}.md)" not in entries:
+                    # Title must be a name one can say aloud — never a truncated description.
+                    t1 = t1 if 0 < len(t1) <= 40 else (d1 if len(d1) <= 34 else slug)
+                    sep = "" if (not cur or cur.endswith("\n")) else "\n"
+                    new_index = f"{cur}{sep}- [{t1}]({slug}.md) — {d1}\n"
+                    result = {"ok": True, "slug": slug, "created": not existed, "indexed": True}
+                else:
+                    result = {"ok": True, "slug": slug, "created": not existed, "indexed": False}
+
+            targets = {f"{slug}.md": rendered.encode("utf-8")}
+            if new_index is not None:
+                targets[INDEX] = new_index.encode("utf-8")
+            self._commit(slug, "write", targets)
+            self._titles = None
+            self._slugs_cache = None
+            return result
 
     # ── the learned profile (optional; the wide room's growing understanding) ──
     #
@@ -807,10 +1159,13 @@ class Store:
             return {"alive": False, "why": "no watcher has ever run here"}
         try:
             d = json.load(open(p, encoding="utf-8"))
-        except (OSError, ValueError):
+            # A heartbeat that parses as JSON but is not the expected shape (a list,
+            # a string "at") used to escape this try as AttributeError/ValueError
+            # and take `doctor` down with it — the one diagnostic that reports it.
+            age = time.time() - float(d.get("at") or 0)
+            pid = int(d.get("pid") or 0)
+        except (OSError, ValueError, AttributeError, TypeError):
             return {"alive": False, "why": "heartbeat unreadable"}
-        age = time.time() - float(d.get("at") or 0)
-        pid = int(d.get("pid") or 0)
         alive = age < stale_after_s
         if alive and pid:
             try:
@@ -848,7 +1203,43 @@ class Store:
         return out
 
     # ── health ───────────────────────────────────────────────────────────
+    def load_manifest_verified(self, hexdigest: str) -> dict | None:
+        """Content-addressed means the NAME is the hash of the bytes — prove it on
+        every read. A manifest that fails the re-hash is corruption (or worse) and
+        is treated as absent: fail closed, never trust a valid-looking JSON on the
+        strength of its filename alone."""
+        if not re.fullmatch(r"[0-9a-f]{64}", hexdigest or ""):
+            return None          # the verified loader defines what a digest IS
+        path = os.path.join(self.path, "_evidence", hexdigest + ".json")
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return None
+        if hashlib.sha256(raw).hexdigest() != hexdigest:
+            return None
+        try:
+            man = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return man if isinstance(man, dict) else None
+
     def doctor(self) -> dict:
+        from . import fastpath          # local: fastpath is a layer ON TOP of this API
+        from . import constellation     # local: reads the index; nothing it needs moves
+        from . import edges as _edges   # local: derived state; reads the store, writes nothing
+        # Crash debris first: an intact WAL transaction is a promise the store must
+        # keep before its files are judged, and doctor is often the first thing run
+        # after a bad night — waiting for "the first mutation" to replay would have
+        # doctor describe a store that is about to change under it. Replayed HERE so
+        # it can be reported (`_locked` replays silently); the lock is only taken
+        # when there is something to do, so a healthy doctor stays write-free.
+        wal_report: dict = {"replayed": [], "quarantined": []}
+        if os.path.isdir(self._wal_dir) and os.listdir(self._wal_dir):
+            with self._locked(replay=False):
+                wal_report = self._wal_replay()
+        broken_wal = (sorted(os.listdir(self._wal_quarantine))
+                      if os.path.isdir(self._wal_quarantine) else [])
         files = {s: self.read(s) for s in self.slugs()}
         out: dict[str, set[str]] = {}
         back: dict[str, set[str]] = {}
@@ -868,15 +1259,33 @@ class Store:
         # operator — so the reason is surfaced here, where someone is looking for it.
         invalid_tags = {n: why for n in files if (why := self.tag_problems(n))}
         missing_manifest = []
+        tampered_manifest = []
+        invalid_manifest_pointer = []
         for n in files:
             fm = self.frontmatter(n)
-            ref = fm.get("evidence_manifest", "")
-            if ref.startswith("sha256:") and not os.path.exists(
-                    os.path.join(self.path, "_evidence", ref[7:] + ".json")):
-                missing_manifest.append(n)
+            # Every provenance pointer is audited, not just the newest one:
+            # evidence_manifest moves with each EXTENDS, origin_manifest is pinned,
+            # recurred_manifest marks another occasion — any of them broken is a
+            # hole in the story of why this memory exists.
+            for key, val in fm.items():
+                if not key.endswith("_manifest"):
+                    continue
+                if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(val)):
+                    if n not in invalid_manifest_pointer:
+                        invalid_manifest_pointer.append(n)   # a pointer that is not even a digest
+                    continue
+                hexd = str(val)[7:]
+                if not os.path.exists(os.path.join(self.path, "_evidence", hexd + ".json")):
+                    if n not in missing_manifest:
+                        missing_manifest.append(n)
+                elif self.load_manifest_verified(hexd) is None:
+                    if n not in tampered_manifest:
+                        tampered_manifest.append(n)
         body_tokens = sum(estimate(self._split(t)[1]) for t in files.values())
         cur = {n: self.curation_state(n) for n in files}
         unsigned = sorted(n for n, c in cur.items() if c == "unsigned")
+        con = constellation.check(self)
+        edge_map = _edges.current(self)
         return {
             "store": self.name,
             "path": self.path,
@@ -897,7 +1306,25 @@ class Store:
             # The fitted estimator, not len//2: chars/2 is biased 8-23% LOW against real
             # tokenizers, and low is the direction that silently overflows a window.
             "index_tokens_est": estimate(idx),
+            # The constellation (M6): how many sectors the index's own `## ` headings
+            # make, and how many memories no heading covers. The line a store over
+            # the resident ceiling leans on — its sector map is worn instead of the
+            # full index, and a large UNSECTIONED count is the cue to add headings.
+            "constellation": {"sectors": con["sectors"], "unsectioned": con["unsectioned"]},
+            # Typed worldline edges (M7): derived, marked, rebuilt from the store —
+            # counted here so a derivation that went quiet is visible in health.
+            "edges": {"counts": edge_map.get("counts", {}),
+                      "unevidenced": edge_map.get("unevidenced", 0)},
+            # The store's mutation counter, and the crash accounting: what this very
+            # call finished (`wal_replayed`) and what no one may finish (`broken_wal`
+            # — quarantined promises whose payloads failed their hashes; a person
+            # decides what to do with those, the code never guesses).
+            "revision": self.revision(),
+            "wal_replayed": wal_report["replayed"],
+            "broken_wal": broken_wal,
             "invalid_tags": invalid_tags,
+            "tampered_manifest": tampered_manifest,
+            "invalid_manifest_pointer": invalid_manifest_pointer,
             "missing_manifest": sorted(missing_manifest),
             "tagged": sum(1 for n in files if self.tags(n)),
             # Who wrote the curation. `tampered` is always named. `unsigned` is named
@@ -922,6 +1349,9 @@ class Store:
                 "unit": None, "limit": None, "pressure": None,
             },
             "learned_profile": self.profile_state(),
+            # Tier zero of recall: built-or-not, how fresh, and how big its heads are.
+            # `built: false` before the first recall is the normal lazy state.
+            "fastpath": fastpath.doctor_info(self),
             "tending": self.tend_state(),
             "write_policy": self.write_policy,
             "model_profile": self.model_profile,

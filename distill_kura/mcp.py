@@ -41,6 +41,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -64,9 +65,11 @@ It is not a search index of documents: it holds distilled facts — decisions th
 made, measurements that were taken, landmines that will recur — one fact per memory,
 linked to each other.
 
-· Call kura_recall whenever the question touches what was decided, measured, or done
-  here before. Recall works by MEANING, so ask it in plain language; the words need not
-  match anything.
+· See a memory you recognise on the resident map, or a name in the conversation?
+  Confirm it with kura_glance first — an exact one-memory check, and usually all you
+  need; kura_read opens the whole text only when the detail matters.
+· Cannot tell WHICH memory is meant? Call kura_recall — it works by MEANING, so ask it
+  in plain language; the words need not match anything.
 · An empty result means it is not remembered YET. Say so plainly. Never fill the gap
   with a plausible invention — a confident guess about this household is the one failure
   mode this memory exists to prevent.
@@ -104,13 +107,42 @@ def _bound_note() -> str:
 
 TOOLS: list[dict] = [
     {
+        "name": "kura_glance",
+        "description": (
+            f"Confirm ONE memory from {LABEL} by its slug — the exact index line, the "
+            "verified KEEP sentence and its [[links]], targeting ~150 tokens (the "
+            "recognition line and KEEP are never cut; links are trimmed first). Call it "
+            "when you recognise a slug on the resident map or from recall and want to be "
+            "sure it is the right memory before reading the whole thing. An unknown slug "
+            "simply says there is no memory by that name — a confirmation, not a search."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"slug": {"type": "string", "description": "Memory slug, without .md"},
+                           "store": {"type": "string", "description": "Which kura. Omit for the current one."}},
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "kura_read",
+        "description": (
+            f"Read one whole memory from {LABEL} by its slug (e.g. 'storage-doctrine'). "
+            "Use after kura_glance (or kura_recall) when a summary is not enough and you "
+            "need the full text."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"slug": {"type": "string", "description": "Memory slug, without .md"},
+                           "store": {"type": "string", "description": "Which kura. Omit for the current one."}},
+            "required": ["slug"],
+        },
+    },
+    {
         "name": "kura_recall",
         "description": (
             f"Recall from {LABEL} — long-term memory retrieved by MEANING rather than keyword, "
-            "then following [[links]] between memories. Call it whenever the question touches "
-            "past decisions, measurements, people, machines, or anything done before — prefer "
-            "it over guessing. An empty result means it is simply not remembered yet: say so "
-            "plainly and never fill the gap with invention." + _bound_note()),
+            "then following [[links]] between memories. Use it when you cannot tell WHICH "
+            "memory the question is about — the fallback when no slug on the map or in the "
+            "conversation clearly fits, not the first door. An empty result means it is "
+            "simply not remembered yet: say so plainly and never fill the gap with invention." + _bound_note()),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -122,18 +154,6 @@ TOOLS: list[dict] = [
                           "description": "Which kura to ask (store or mode name). Omit for the current one."},
             },
             "required": ["question"],
-        },
-    },
-    {
-        "name": "kura_read",
-        "description": (
-            f"Read one whole memory from {LABEL} by its slug (e.g. 'storage-doctrine'). "
-            "Use after kura_recall when a summary is not enough and you need the full text."),
-        "inputSchema": {
-            "type": "object",
-            "properties": {"slug": {"type": "string", "description": "Memory slug, without .md"},
-                           "store": {"type": "string", "description": "Which kura. Omit for the current one."}},
-            "required": ["slug"],
         },
     },
     {
@@ -274,7 +294,26 @@ def call_tool(name: str, args: dict) -> str:
 
     if name == "kura_read":
         slug = urllib.parse.quote((args.get("slug") or "").strip())
-        d = http("GET", f"/memory/{slug}" + _q(store))
+        try:
+            d = http("GET", f"/memory/{slug}" + _q(store))
+        except urllib.error.HTTPError as e:
+            # A missing slug is the server's 404, not an outage — the tool's own
+            # description promises what an unknown slug means, so say that instead of
+            # "[cannot reach the kura] HTTPError 404" (which sent the model hunting
+            # for a broken server).
+            if e.code == 404:
+                return f"(no memory called {args.get('slug')!r} in {store or 'the default kura'})"
+            raise
+        return d.get("text") or f"(no memory called {args.get('slug')!r} in {store or 'the default kura'})"
+
+    if name == "kura_glance":
+        slug = urllib.parse.quote((args.get("slug") or "").strip())
+        try:
+            d = http("GET", f"/glance/{slug}" + _q(store))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return f"(no memory called {args.get('slug')!r} in {store or 'the default kura'})"
+            raise
         return d.get("text") or f"(no memory called {args.get('slug')!r} in {store or 'the default kura'})"
 
     if name == "kura_map":
@@ -291,7 +330,10 @@ def call_tool(name: str, args: dict) -> str:
                   **{k: args[k] for k in ("belongs_because", "keep", "may_fade") if args.get(k)}})
         if WRITE_LOG:
             try:
-                os.makedirs(os.path.dirname(WRITE_LOG), exist_ok=True)
+                # A bare filename has no directory component; os.makedirs("") raised
+                # FileNotFoundError, which the except swallowed, so write-logging
+                # silently never happened.
+                os.makedirs(os.path.dirname(WRITE_LOG) or ".", exist_ok=True)
                 with open(WRITE_LOG, "a", encoding="utf-8") as f:
                     f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                                         "store": store, "args": args, "result": d},
@@ -321,6 +363,10 @@ def main() -> None:
         try:
             m = json.loads(line)
         except ValueError:
+            continue
+        if not isinstance(m, dict):
+            # A valid-JSON non-object line (e.g. `[1, 2]` or `42`) has no .get and
+            # used to raise AttributeError here, killing the whole bridge process.
             continue
         mid, method = m.get("id"), m.get("method", "")
         params = m.get("params") or {}

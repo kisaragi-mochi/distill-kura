@@ -15,7 +15,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 from distill_kura.registry import Registry     # noqa: E402
 from distill_kura.store import Store           # noqa: E402
-from distill_kura.tend import Tender           # noqa: E402
+from distill_kura import tend as tendmod   # noqa: E402
+from distill_kura.tend import TRACKS, Tender   # noqa: E402
 
 
 def build(tmp_path, **distill):
@@ -99,8 +100,85 @@ def test_the_humans_return_stops_a_running_track_unless_told_not_to(tmp_path):
 def test_work_is_counted_and_launches_are_not(tmp_path):
     reg, st, cfg, j = build(tmp_path)
     t = Tender(reg, st, cfg, idle_min=10)
-    assert set(t.done) == {"poured", "tossed", "fixed", "drafts", "woven", "tidied"}
+    assert set(t.done) == {"poured", "tossed", "fixed", "drafts", "woven",
+                           "trailed", "paid", "tidied"}
     assert not any(k.endswith("_runs") or "launch" in k for k in t.done)
+
+
+def test_payforward_is_scheduled_after_a_weave_and_only_then(tmp_path):
+    """The map cannot have changed without a weave, so the payforward track waits for
+    one — and runs once per weave, not once per tick (a mouth restart is the systemd
+    hook's job, not the watcher's)."""
+    reg, st, cfg, j = build(tmp_path)
+    t = Tender(reg, st, cfg, idle_min=10)
+    now = time.time()
+    for track in ("drain", "distill", "tidy"):
+        t.next_ok[track] = now + 9999           # only the question at hand remains
+    assert t.choose(now) is None                # no weave yet → no payforward
+    t._woven_this_silence = True
+    assert t.choose(now) == "trail"             # the trail follows the weave FIRST
+    t._trailed_this_silence = True
+    assert t.choose(now) == "payforward"
+    t._paid_this_silence = True
+    assert t.choose(now) is None                # once per weave, not once per tick
+
+
+def test_a_pour_does_not_leave_the_trail_absent_forever(tmp_path):
+    """The reviewer's scenario, end to end at the choose() level: a pour retires
+    the trail (the revision moved), the watcher weaves — and the very next track
+    must be the trail, or 'the current path' goes absent until a human runs
+    `kura trail` by hand. The trail is model-free: this maintenance is cheap."""
+    import subprocess as sp
+    reg, st, cfg, j = build(tmp_path, backoff_min=20)
+    old = time.time() - 3600
+    os.utime(j, (old, old))
+    t = Tender(reg, st, cfg, idle_min=10)
+    # a real trail on disk (the store needs a fresh memory to have one), then a
+    # store mutation retires it
+    from distill_kura.prefill import loom_for, trail_for
+    st.remember_direct("todays-work", "the seed the trail will show",
+                       f"dated {time.strftime('%Y-%m-%d')}")
+    cfgp = reg.prefill_cfg_for(st)
+    assert trail_for(st, cfgp, loom=loom_for(st, cfgp)).write()["written"] is True
+    st.remember_direct("poured-while-watching", "a memory poured in the quiet", "body")
+    assert trail_for(st, cfgp, loom=loom_for(st, cfgp)).is_stale() is True
+    now = time.time()
+    for track in ("drain", "distill", "tidy"):
+        t.next_ok[track] = now + 9999
+    t._woven_this_silence = True                # the weave that follows a pour
+    assert t.choose(now) == "trail"
+    assert "trail" in t._cmd("trail")
+
+
+def test_a_trail_past_its_own_horizon_is_rebuilt_in_the_quiet(tmp_path):
+    """Time alone retires a trail — the fresh window slides with no store write.
+    The quiet cycle checks the trail's own proof and rebuilds it, cheaply."""
+    reg, st, cfg, j = build(tmp_path)
+    from distill_kura.prefill import loom_for, trail_for
+    st.remember_direct("todays-work", "the seed the trail will show",
+                       f"dated {time.strftime('%Y-%m-%d')}")
+    cfgp = reg.prefill_cfg_for(st)
+    tr = trail_for(st, cfgp, loom=loom_for(st, cfgp))
+    assert tr.write()["written"] is True
+    sv = tr._state()
+    sv["valid_until"] = time.time() - 1         # the horizon has passed
+    json.dump(sv, open(tr.state_path, "w"))
+    t = Tender(reg, st, cfg, idle_min=10)
+    now = time.time()
+    for track in ("drain", "distill", "tidy"):
+        t.next_ok[track] = now + 9999
+    assert t.choose(now) == "trail"
+
+
+def test_an_absent_trail_is_not_a_per_chore(tmp_path):
+    """No trail file + no weave = nothing to maintain: the time check only
+    rebuilds a trail that EXISTS (the after-weave path is what creates one)."""
+    reg, st, cfg, j = build(tmp_path)
+    t = Tender(reg, st, cfg, idle_min=10)
+    now = time.time()
+    for track in ("drain", "distill", "tidy"):
+        t.next_ok[track] = now + 9999
+    assert t.choose(now) is None, "an absent trail is honest absence, not a chore"
 
 
 def test_doctor_reports_a_dead_watcher(tmp_path):
@@ -123,10 +201,13 @@ def test_cli_once_runs_a_tick_and_exits(tmp_path):
     e = {**os.environ, "PYTHONPATH": ROOT}
     p = subprocess.run([sys.executable, "-m", "distill_kura.cli", "-c", cfg, "-s", "m", "tend", "--once"],
                        capture_output=True, text=True, env=e, timeout=300)
-    assert p.returncode == 0, p.stderr
+    # The dead thinker leaves no drafts, so the tick did no work — that is exit 2
+    # ("nothing to do"), which the always-0 return used to hide from schedulers.
+    assert p.returncode == 2, p.stderr
     last = [l for l in p.stdout.splitlines() if l.startswith("{")][-1]
     out = json.loads(last)
     assert out["store"] == "m" and "done" in out
+    assert not any(out["done"].values())            # nothing was poured or fixed
     assert os.path.exists(os.path.join(st.still, "tend.log"))
 
 
@@ -166,3 +247,118 @@ def test_catchup_starts_from_today_without_losing_further_marks(tmp_path):
     d.marks.advance(key, marks[key] + 10_000)       # someone is further along
     d.catch_up()
     assert d.marks.read()[key] == marks[key] + 10_000   # never pulled backwards
+
+
+def _stub(t, rc, out=""):
+    """Make the next track exit with `rc` after printing `out` — the exit code is the
+    only thing the watcher reads, so a two-line script stands in for any track."""
+    t._cmd = lambda track: [sys.executable, "-c",                     # type: ignore
+                            f"print({out!r});raise SystemExit({rc})"]
+
+
+def _only_payforward(t):
+    """Rest every other track and put the silence one weave-and-trail in, so choose()
+    has exactly one question left: does the map still need paying forward?"""
+    for track in ("drain", "distill", "tidy", "trail"):
+        t.next_ok[track] = time.time() + 9999
+    t._woven_this_silence = True
+    t._trailed_this_silence = True
+
+
+def test_a_failed_payforward_is_retried_on_the_next_tick_of_the_same_silence(tmp_path):
+    """The flag belongs to the outcome, not the launch. Set at launch, a pay-forward
+    that failed (a mouth down) or lost the lock (another runner holds the slot — both
+    exit 1) was not tried again until the next weave or the next human return: the
+    map stayed cold for the rest of the quiet, exactly when the mouth needed it."""
+    reg, st, cfg, j = build(tmp_path, backoff_min=20)
+    old = time.time() - 3600
+    os.utime(j, (old, old))
+    t = Tender(reg, st, cfg, idle_min=10)
+    _only_payforward(t)
+    _stub(t, 1)
+    stamp = t.tick(0.0)
+    assert t.proc_track == "payforward"
+    assert t._paid_this_silence is False, "a launch settles nothing"
+    t.proc.wait(timeout=120)
+    t.reap()
+    assert t._paid_this_silence is False, "a failure must not suppress the retry"
+    # it may retry, but not spin: the same backoff every other track rests under
+    assert t.next_ok["payforward"] > time.time() + 19 * 60
+    assert t.choose(time.time()) is None                # resting, not forgotten
+    t.next_ok["payforward"] = 0.0                       # the rest is over
+    t.tick(stamp)
+    assert t.proc_track == "payforward"
+    t.kill("test over")
+
+
+def test_a_fresh_or_successful_payforward_is_not_retried_in_the_same_silence(tmp_path):
+    """Exit 2 = every mouth verified fresh, exit 0 = the fleet is warm. Either way the
+    silence is served and the next tick must not launch it again."""
+    reg, st, cfg, j = build(tmp_path, backoff_min=20)
+    old = time.time() - 3600
+    os.utime(j, (old, old))
+    for rc, out, paid in ((2, "", 0), (0, '{"worked": 2}', 2)):
+        t = Tender(reg, st, cfg, idle_min=10)
+        _only_payforward(t)
+        _stub(t, rc, out)
+        stamp = t.tick(0.0)
+        assert t.proc_track == "payforward"
+        t.proc.wait(timeout=120)
+        t.reap()
+        assert t._paid_this_silence is True, f"rc={rc} serves the silence"
+        assert t.done["paid"] == paid           # work is counted, launches are not
+        t.next_ok["payforward"] = 0.0           # even with no rest left to hide behind
+        t.tick(stamp)
+        assert t.proc is None, f"rc={rc} must not run twice in one silence"
+
+
+def test_a_weave_that_wrote_nothing_does_not_pass_for_a_woven_map(tmp_path):
+    """`weave` exits 2 when the index moved under it and nothing was written. That is
+    a re-weave signal, not a new map — the trail and the mouths must not be sent off
+    to follow it."""
+    reg, st, cfg, j = build(tmp_path, backoff_min=20)
+    old = time.time() - 3600
+    os.utime(j, (old, old))
+    t = Tender(reg, st, cfg, idle_min=10)
+    _stub(t, 2)
+    t.start("weave"); t.proc.wait(timeout=120); t.reap()
+    assert t._woven_this_silence is False and t.done["woven"] == 0
+    _stub(t, 0, '{"tokens_est": 10}')
+    t.start("weave"); t.proc.wait(timeout=120); t.reap()
+    assert t._woven_this_silence is True and t.done["woven"] == 1
+
+
+def test_the_humans_return_lowers_every_per_silence_flag(tmp_path):
+    """One table, one reset: a flag added to a track but forgotten in the reset would
+    outlive its silence and the chore would never run again."""
+    reg, st, cfg, j = build(tmp_path)
+    old = time.time() - 3600
+    os.utime(j, (old, old))
+    t = Tender(reg, st, cfg, idle_min=10)
+    flags = [tr.flag for tr in TRACKS.values() if tr.flag]
+    assert len(flags) == 4                              # weave, trail, payforward, tidy
+    for f in flags:
+        setattr(t, f, True)
+    stamp = t.tick(0.0)
+    with open(j, "a", encoding="utf-8") as fh:
+        fh.write("\n")                                  # the human types
+    t.tick(stamp)
+    assert not any(getattr(t, f) for f in flags)
+    t.kill("test over")
+
+
+def test_a_track_is_declared_in_exactly_one_place(tmp_path):
+    """The bug this table prevents: knowledge of a track split across a name tuple, a
+    command dict, the `done` keys and an elif ladder, so a new track (or a moved flag)
+    could be right in three places and wrong in the fourth."""
+    reg, st, cfg, j = build(tmp_path)
+    t = Tender(reg, st, cfg)
+    assert list(TRACKS) == ["drain", "distill", "weave", "trail", "payforward", "tidy"]
+    for name, tr in TRACKS.items():
+        assert tr.name == name
+        assert t._cmd(name)[-len(tr.argv):] == list(tr.argv)   # the command
+        assert set(tr.tally) <= set(t.done)                    # the done keys
+        assert name in t.next_ok                               # the backoff slot
+        if tr.flag:
+            assert getattr(t, tr.flag) is False                # the per-silence flag
+    assert not hasattr(tendmod, "heartbeat"), "the dead wrapper: doctor reads tend_state"

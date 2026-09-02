@@ -8,6 +8,9 @@
 host = "127.0.0.1"     # no auth: keep it on loopback unless you add one in front
 port = 8085
 default = "main"       # which kura answers when a request names none
+# Launch with KURA_BUILD_ID=<commit> and GET /health echoes it (plus pid, start time,
+# and the code path actually imported) — the deploy postcondition. A restart command
+# is not evidence the new build is serving; docs/OPERATING.md "Deploying means proving it".
 
 
 # ── models ──────────────────────────────────────────────────────────────────
@@ -137,12 +140,42 @@ trigger_tokens = 24         # budget for one compressed line, in tokens, not cha
 # [stores.eq.prefill]
 # fresh_days = 30
 
+# ── the fast path ───────────────────────────────────────────────────────────
+# Tier zero of recall: a deterministic five-head recognizer over the index. A DIRECT
+# question — one that names a memory by slug, title or its own rare words — is answered
+# in well under a millisecond and the thinker is not called at all (so a direct question
+# still finds its memory when the thinker is down). Anything less than a strong, clear
+# winner falls through to the thinker unchanged: silence is the honest answer for a
+# paraphrase, and judging by meaning stays the model's job.
+
+[fastpath]
+enabled = true
+gate = 1.0            # honesty bar for the top hit; raise it to make tier zero shyer
+
+# Per-store overrides work here too:
+# [stores.eq.fastpath]
+# enabled = false
+
+# ── pay it forward ──────────────────────────────────────────────────────────
+# Bake the resident map into a slow mouth's KV cache in the quiet hours, so the first
+# turn after a re-weave — or a mouth restart — is warm. The mouth is a llama.cpp
+# server started with --slot-save-path. Measured on one machine (320B pure-CPU,
+# 16,444-token map): bake 796 s, save 283 ms (1.5 GB slot file), restore after a
+# reboot 655 ms. `kura pay-forward` runs it; `kura tend` runs it after each weave.
+#
+# [[payforward.mouths]]
+# name = "cpu-mouth"
+# url = "http://127.0.0.1:8014"   # server BASE: the slots API lives beside /v1, not under it
+# store = "main"                  # whose map this mouth wears
+# slot = 0                        # the llama.cpp slot saved from / restored into
+# model = "local"                 # alias for the one-token probe call
+# api_key_env = "MOUTH_KEY"       # read from the environment, never stored here
+
 # ── the distiller ───────────────────────────────────────────────────────────
 # Where the raw material comes from. Keys are source adapters:
 #   claude = a directory of Claude Code .jsonl transcripts
 #   dsh    = a DSH sessions directory (session.jsonl.zstd; needs the `zstd` binary)
 #   text   = a directory of .md/.txt/.log notes
-#   evidence = classified .evidence.jsonl (schema_version 1; USER/SELF/ACT/TOOL; RFC3339 timestamp)
 
 [distill]
 language = "English"        # the language memories are WRITTEN in
@@ -162,6 +195,7 @@ yield_on_return = true      # stop a running track when the journal changes. Set
 
 [distill.journals]
 claude = "~/.claude/projects/my-project"
+# evidence = "~/journals"   # classified .evidence.jsonl (USER/SELF/ACT/TOOL)
 # dsh  = "~/dsh/sessions"
 # text = "~/notes"
 

@@ -86,10 +86,17 @@ def test_recur_reads_the_origin_not_the_latest_extension(tmp_path):
     reg = Registry(stores={"m": s}, modes={}, models=models, default="m", raw={})
     d = Distiller(reg, s)
     os.makedirs(d._evidence_dir(), exist_ok=True)
-    for h, key in (("a" * 64, "claude:first.jsonl"), ("b" * 64, "claude:second.jsonl")):
-        open(os.path.join(d._evidence_dir(), h + ".json"), "w").write(json.dumps({"source_key": key}))
-    s.pour_verified("x", "d", "body", meta={"evidence_manifest": "sha256:" + "a" * 64})
-    s.pour_verified("x", "d", "body\n\nmore", meta={"evidence_manifest": "sha256:" + "b" * 64})
+    # Content-addressed for real: the verified loader re-hashes the bytes, so a
+    # fixture manifest must be named by its own hash like a genuine one.
+    import hashlib as _hl
+    refs = {}
+    for key in ("claude:first.jsonl", "claude:second.jsonl"):
+        blob = json.dumps({"source_key": key})
+        h = _hl.sha256(blob.encode()).hexdigest()
+        open(os.path.join(d._evidence_dir(), h + ".json"), "w").write(blob)
+        refs[key] = h
+    s.pour_verified("x", "d", "body", meta={"evidence_manifest": "sha256:" + refs["claude:first.jsonl"]})
+    s.pour_verified("x", "d", "body\n\nmore", meta={"evidence_manifest": "sha256:" + refs["claude:second.jsonl"]})
     assert d._origin_key("x") == "claude:first.jsonl"
 
 
@@ -260,3 +267,63 @@ def test_extension_heading_date_is_the_journals_not_the_models(tmp_path):
     # a heading with no date at all gets the date put in front
     d.scribe = lambda task, u, max_tokens=0: "SECTION: ## the verdict log\nBODY:\nnew fact\n"   # type: ignore
     assert d._compose_extension(c)["body"].startswith("## 2026-08-20 the verdict log")
+
+
+# ── round four: the index-line rewriter wears the floor ──────────────────────
+
+def test_tidy_cannot_invent_a_number_into_the_index(tmp_path):
+    store = Store(name="m", path=str(tmp_path / "m")); store.init_files()
+    store.remember_direct("gpu-notes", "tiny", "the machine ran with its usual boards")
+    models = Models.from_config({"thinker": {"url": "http://127.0.0.1:9/v1", "model": "none"}})
+    reg = Registry(stores={"m": store}, modes={}, models=models, default="m", raw={})
+    d = Distiller(reg, store)
+    d.scribe = lambda task, u, max_tokens=0: "TITLE: 99-GPU rig\nDESC: a proper trigger about the boards"  # type: ignore
+    r = d.tidy()
+    assert r["fixed"] == 0
+    assert "99-GPU" not in store.index_text()
+
+
+def test_tidy_may_cite_the_memorys_own_numbers(tmp_path):
+    store = Store(name="m", path=str(tmp_path / "m")); store.init_files()
+    store.remember_direct("gpu-notes", "tiny", "the machine ran with 12 boards")
+    models = Models.from_config({"thinker": {"url": "http://127.0.0.1:9/v1", "model": "none"}})
+    reg = Registry(stores={"m": store}, modes={}, models=models, default="m", raw={})
+    d = Distiller(reg, store)
+    d.scribe = lambda task, u, max_tokens=0: "TITLE: 12-board rig\nDESC: a proper trigger about the boards"  # type: ignore
+    r = d.tidy()
+    assert r["fixed"] == 1
+    assert "12-board rig" in store.index_text()
+
+
+# ── round five: tidy merges under the lock instead of writing its snapshot ──
+
+def test_tidy_does_not_erase_a_memory_poured_while_it_thought(tmp_path):
+    store = Store(name="m", path=str(tmp_path / "m")); store.init_files()
+    store.remember_direct("gpu-notes", "tiny", "the machine ran with 12 boards")
+    models = Models.from_config({"thinker": {"url": "http://127.0.0.1:9/v1", "model": "none"}})
+    reg = Registry(stores={"m": store}, modes={}, models=models, default="m", raw={})
+    d = Distiller(reg, store)
+
+    def racing_scribe(task, u, max_tokens=0):
+        # A pour lands while the model is composing the new line.
+        store.remember_direct("landed-mid-tidy", "a proper trigger line about landing", "body two")
+        return "TITLE: 12-board rig\nDESC: a proper trigger about the boards"
+    d.scribe = racing_scribe  # type: ignore
+    r = d.tidy()
+    assert r["fixed"] == 1 and r["skipped_stale"] == 0
+    idx = store.index_text()
+    assert "landed-mid-tidy" in idx            # the racer survived
+    assert "12-board rig" in idx               # and the tidy still landed
+
+
+def test_doctor_audits_every_manifest_pointer(tmp_path):
+    s = Store(name="m", path=str(tmp_path / "m"), write_policy="distiller-only"); s.init_files()
+    s.pour_verified("x", "a proper description line", "body",
+                    meta={"origin_manifest": "sha256:" + "c" * 64})
+    assert s.doctor()["missing_manifest"] == ["x"]
+
+
+def test_verified_loader_defines_what_a_digest_is(tmp_path):
+    s = Store(name="m", path=str(tmp_path / "m")); s.init_files()
+    assert s.load_manifest_verified("../../../etc/passwd") is None
+    assert s.load_manifest_verified("deadbeef") is None

@@ -16,7 +16,7 @@ SCRIPT = {
          "why": "a decision about where the archive lives",
          "quotes": ["[USER] put the archive on the slow disk"]},
     ]),
-    "walked past": "[]",
+    "WALKED PAST": "[]",
     "actually NEW": "NEW\nthe store has nothing about disks",
     "INDEX of everything remembered": '["archive-on-slow-disk"]',
     "You write the final memory": (

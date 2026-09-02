@@ -11,8 +11,9 @@ library only; no vector database, no embeddings, no framework.
 
 ```
         ┌── recall ──────────────────────────────────────────────┐
-        │  question → whole index in one prompt → picked slugs   │
-        │           → walk [[links]] → the neighbourhood         │  ~0.4 s
+        │  question → names a memory? → deterministic hit   ~2 ms│
+        │      else → whole index in one prompt → picked slugs   │
+        │           → walk [[links]] → the neighbourhood   ~0.4 s│
         └────────────────────────────────────────────────────────┘
         ┌── distil ──────────────────────────────────────────────┐
         │  journal → classed evidence → candidates → GATE        │
@@ -53,6 +54,61 @@ thrown away. A number with no `[TOOL]` behind it is stripped. Text crediting the
 with a decision, when no `[USER]` quote survived, is refused at the last gate. Ideas are
 welcome — they go to a seed file, never to the store, and graduate only when later
 evidence confirms them.
+
+---
+
+## Tier zero: recognition before intelligence
+
+The recall above is the right tool for a question that shares no words with its
+memory. It is the wrong tool for a question that *names* what it wants — and in a
+working session, most questions do. A blind 40-question benchmark on a live
+317-memory store split exactly along that line: the direct questions needed no
+intelligence at all, and everything else needed all of it.
+
+So before the thinker runs, a deterministic recognizer gets one look. The design is
+transposed from the n-gram embedding table inside Qwen3.8-Flash-Next — many hash
+heads voting over one table, behind a gate — onto the index:
+
+- **Five heads**, each an independent recognition channel: exact name; IDF-weighted
+  word tokens (identifiers, ports, katakana runs); character 3-grams with
+  **stop-grams** (a gram present in over a fifth of the store drowns in its own
+  collisions, so it is dropped); character 2-grams; and the head of each body.
+- **Coverage scoring** — each head's vote is normalized by what it could possibly
+  have reached for *this* question, so one lucky rare gram cannot fake confidence.
+- **An honesty gate** — a hit is returned only when the top score clears an absolute
+  bar *and* beats the runner-up by margin. Anything less and the fast path says
+  nothing; the question falls through to the thinker, unchanged.
+
+Blind-tested — the examiner wrote the 40 questions from the index alone, never
+seeing the implementation — against the live store over HTTP:
+
+| question type | tier zero | thinker tier |
+|---|---|---|
+| direct (14) | **14/14, median 2.3 ms** | 14/14, ~900 ms |
+| paraphrase (10) | silent → falls through | 10/10 |
+| semantic bridge (10) | silent → falls through | 10/10 |
+| not in the store (6) | **6/6 refused** | 0/6 refused |
+| wrong answers, whole set | **0** | — |
+
+What that buys:
+
+- **The everyday case stops paying the intelligent price for a lookup.** Direct
+  recall drops from ~900 ms to ~2 ms, and the fall-through tax on every other
+  question is about 2 ms.
+- **It knows what it does not know.** Zero wrong answers across the set is the
+  gate working, not the heads being clever — everything uncertain goes to the
+  model. On the six questions whose answers were *not* in the store, tier zero
+  refused all six; the thinker tier answered something every time. Refusal is a
+  feature this project keeps having to buy back.
+- **A direct question now survives the thinker being down.** Recall used to
+  degrade straight to word overlap; the named memory comes back regardless.
+- **Every reply says which tier answered** — `how: "fastpath"`,
+  `fastpath_verdict`, `fastpath_ms` — so a slow answer is never a mystery.
+
+Configured under `[fastpath]` (`enabled`, on by default; `gate`), per-store
+overridable like everything else. The row it will never win: a question that
+shares no surface with its memory. That is the thinker's job, and the gate exists
+to hand it over rather than guess.
 
 ---
 
@@ -185,7 +241,66 @@ better map, and tells you where the weight is.
 The MCP `instructions` field is a `MAY` in the spec, and a 9,000-token index cannot
 travel through a 2KB cap regardless, so this project does not pretend otherwise.
 
+### Pay it forward
+
+Byte-stability makes a prefix cache *hold*; it does not make the first turn cheap.
+After a re-weave changes the map, the next turn pays the whole cold prefill — and on a
+slow mouth that is minutes, not milliseconds. A llama.cpp server started with
+`--slot-save-path` can save a slot's KV to disk and load it back, so the cold turn can
+be paid once, in the quiet hours, and kept across restarts:
+
+```bash
+kura pay-forward      # every [[payforward.mouths]] entry; -s / --mouth narrow, --force re-bakes
+```
+
+Measured on one machine (a 320B pure-CPU llama.cpp mouth, 16,444-token map): the bake
+796 s; the save 283 ms (1.5 GB on NVMe); the server killed, rebooted, and the restore
+655 ms — after which the first turn reprocessed 18 prompt tokens. A 13-minute cold
+turn became a 0.7-second restore. The name is the film's: the cold turn is paid
+forward, so the next turn — whoever's it is — receives it warm.
+
+The slot filename carries the map's etag (`kura-<store>-<etag…>.bin`), so the files are
+content-addressed: a fresh etag is *proven*, not assumed — a restore shows the file
+still exists, a one-token probe reads `timings.prompt_n`, small means warm — and exits
+2, nothing to do; a changed etag tries the restore first anyway (a file left by a lost
+state or a parallel runner is still the right bytes) and only then bakes, saves, and
+records `_still/payforward.json`. A mouth that cannot be reached is a loud, labeled
+skip, never a crash and never a state advance. Old slot files are not pruned — the
+slots API can save and restore a filename but cannot list the directory — and they are
+not small (KV width × map length: that 16k-token map was 1.5 GB), so sweep the
+directory by hand. `kura tend` runs this as a track after each weave; the recipe,
+including the systemd shape for mouth restarts, is in `docs/OPERATING.md`.
+
 ---
+
+### The shortest cue that still recognises (M4, shadow)
+
+A trigger line is paid on every turn. The question is not how short it can be cut but
+how short it can be while the reader still thinks "ah, THAT one" — and not its
+neighbour. With
+
+```toml
+[prefill]
+trigger_tokens = 24            # the legacy budget, still what production wears
+adaptive_triggers = true       # generate and judge shorter candidates (shadow)
+adaptive_apply = false         # nothing enters the cloth until a benchmark earns it
+trigger_steps = [8, 12, 16, 24]
+```
+
+`kura weave` also writes `_still/adaptive.json`: per memory, a candidate per rung,
+the shortest one that passes every floor the production trigger passes (plus the ones
+a shorter cue newly needs — a number tied to a different unit, a dropped negation or
+retirement word, a cut identifier) AND is recognised alone by the recognizer with the
+callsign pre-head and the body off, and `why_not_shorter` for each rung refused. A
+verified callsign is judged by its receipt, not by word overlap. Candidates are
+cached per memory; the verdicts are recomputed every time, because whether a cue is
+ambiguous depends on every neighbour. Falling back to 24, or to the line itself, is a
+measurement — that memory needs that many tokens.
+
+Promotion is a benchmark's decision, not a flag's: `kura bench worldline --resident
+canonical,woven --resident-file adaptive=<rendered map>` under `--routing
+agent-only`, read per category, with no increase in wrong or obsolete branches and
+no rise in `remembered_but_unreachable`. Until then the shadow only watches.
 
 ## Modes: more than one kura
 
@@ -273,8 +388,10 @@ call fail on `undefined.prepare`. The plugin therefore declares the package as a
 physical duplicate can still require deduplication; see the install checks in
 [`examples/dsh-presets/`](examples/dsh-presets/).
 
-Leave `allowSwitch` at its default and the agent also gets `kura_use`, so it can move
-between kura mid-conversation without a preset change. Tools: `kura_recall`,
+`allowSwitch` has no fixed default: it follows `store`. A preset that names a store is
+bound to it — no `kura_use`, no drifting mid-conversation — and only an explicit
+`allowSwitch: true` reopens that door. Name no store and the session is free: every
+tool takes a `store` argument and `kura_use` switches for the session. Tools: `kura_recall`,
 `kura_read`, `kura_doctor`, `kura_list`, `kura_use`, and `kura_remember` (only when the
 store is writable). Full wiring, including the MCP bridge and the `isolate` realm rule
 for service rows, is in [`examples/dsh-presets/`](examples/dsh-presets/).
@@ -350,7 +467,11 @@ that wait an hour (`timeout=3600`) on purpose.
 
 **If the thinker is down, recall does not go silent** — it falls back to word overlap
 and labels the answer `how=words`, which the tools surface as `⚠ degraded`. Quiet
-degradation is worse than degradation.
+degradation is worse than degradation. And before either tier runs, a deterministic
+recognizer (`[fastpath]`, on by default) answers DIRECT questions — ones that name a
+memory — in under a millisecond with `how=fastpath`, thinker up or not; anything it is
+not sure of falls through unchanged, and every reply says what it did in
+`fastpath_verdict` / `fastpath_ms`.
 
 ### Unattended: `kura tend`
 
@@ -371,7 +492,9 @@ moves the marks forward, so it can never lose progress.
 "Quiet" is the newest journal file's mtime. After `idle_min` (10) of silence it drains
 waiting drafts (the editor reads each one cold: pour / fix / toss), or runs one
 distilling pass when there are none; when something was poured it re-weaves the
-resident map once; and it tidies the index once per silence. A track that had nothing
+resident map once, then pays the fresh map forward into the registered mouths (a cheap
+verified skip when the weave changed nothing); and it tidies the index once per
+silence. A track that had nothing
 to do exits 2 and rests for `backoff_min` (20), so an empty journal does not spin. It
 counts work — poured, tossed, fixed, drafted — never launches. Every track's output is
 kept in `_still/tend.log`. And it writes a heartbeat that `kura doctor` reads
@@ -565,7 +688,7 @@ rather than collapsing every cause into a silent `None`.
 ## Tests
 
 ```bash
-python3 -m pytest tests -q                              # 145 tests, no model required
+python3 -m pytest tests -q                              # 346 tests, no model required
 cd dsh-plugin && npm test                               # 24 more for the plugin
 ```
 

@@ -38,6 +38,45 @@ from .store import Store
 from .tokens import estimate
 
 
+def worldline(reg: Registry, store: Store, cases_path: str, routing: str = "full",
+              hops: int = 1, trace_path: str | None = None,
+              agent_url: str | None = None, agent_model: str | None = None,
+              use_cues: bool = True) -> dict:
+    """Can the house return to the right shared world from a small breadcrumb?
+
+    Raw traces, no composite score — see `distill_kura/worldline.py` and
+    `bench/worldline/README.md`. The resident context is what the agent actually
+    wears: the woven cloth when current, the canonical index otherwise.
+
+    `agent_url` names the conversation model that plays the agent in agent-only
+    mode (agent-only measures the MODEL's recognition, and the recorded identity
+    must always be the endpoint actually asked). Without it the configured
+    thinker plays the agent and is recorded as such. It is refused for any other
+    routing: `full` always runs the CONFIGURED thinker, or the modes stop being
+    comparable — one flag would quietly swap the production path's brain.
+    """
+    from . import worldline as wl
+    from .prefill import build, loom_for, trail_for
+    from .thinker import Endpoint
+    loom = loom_for(store, reg.prefill_cfg_for(store))
+    pf = build(store, loom, trail=trail_for(store, reg.prefill_cfg_for(store), loom=loom))
+    thinker = reg.models_for(store).thinker
+    identity = None
+    if routing == "agent-only":
+        if agent_url:
+            thinker = Endpoint(url=agent_url, model=agent_model or "agent")
+        identity = {"url": thinker.url, "model": thinker.model}
+    elif agent_url or agent_model:
+        raise ValueError("--agent-url/--agent-model measure agent-only routing; "
+                         f"--routing {routing!r} always uses the configured thinker")
+    return wl.run(store, wl.load_cases(cases_path), routing=routing,
+                  thinker=thinker, resident=pf.text,
+                  fastpath_cfg=reg.fastpath_cfg_for(store), hops=hops,
+                  trace_path=trace_path
+                  or os.path.join(store.still, "worldline-traces.jsonl"),
+                  agent=identity, use_cues=use_cues)
+
+
 def counter(command: str | None):
     """A token counter: the named command, or the built-in estimate."""
     if not command:
@@ -86,16 +125,24 @@ def retention(reg: Registry, store: Store, questions_path: str,
 
     rows, by_cat = [], {}
     for q in questions:
-        d = do_recall(store, thinker, q["question"], hops=hops, top=top)
-        found = bool(re.search(q["expect"], d.get("context", ""), re.I))
-        wanted = not q.get("must_not_store")
-        ok = found if wanted else not found
-        rows.append({"id": q["id"], "category": q["category"], "found": found,
-                     "expected_to_be_found": wanted, "pass": ok,
-                     "walked": d.get("walked", []), "how": d.get("how")})
-        c = by_cat.setdefault(q["category"], {"pass": 0, "total": 0})
-        c["total"] += 1
-        c["pass"] += 1 if ok else 0
+        try:
+            d = do_recall(store, thinker, q["question"], hops=hops, top=top)
+            found = bool(re.search(q["expect"], d.get("context", ""), re.I))
+            wanted = not q.get("must_not_store")
+            ok = found if wanted else not found
+            rows.append({"id": q["id"], "category": q["category"], "found": found,
+                         "expected_to_be_found": wanted, "pass": ok,
+                         "walked": d.get("walked", []), "how": d.get("how")})
+            c = by_cat.setdefault(q["category"], {"pass": 0, "total": 0})
+            c["total"] += 1
+            c["pass"] += 1 if ok else 0
+        except (re.error, KeyError) as e:
+            # One malformed question must abort the run naming the offender, not be
+            # skipped silently — a benchmark that quietly drops a question overstates
+            # the store.
+            raise RuntimeError(
+                f"retention: question {q.get('id')!r} is malformed "
+                f"({type(e).__name__}: {e})") from e
 
     passed = sum(1 for r in rows if r["pass"])
     return {
@@ -123,18 +170,22 @@ def compress(reg: Registry, store: Store, tokenizer_command: str | None = None,
     dis = Distiller(reg, store)
     metrics_path = os.path.join(store.still, "metrics.jsonl")
     raw_tokens = batches = 0
+    malformed_metric_lines = 0
     recorded_keys: set[str] = set()
     if os.path.exists(metrics_path):
-        for line in open(metrics_path, encoding="utf-8", errors="ignore"):
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if session and session not in str(row.get("source_key", "")):
-                continue
-            raw_tokens += int(row.get("raw_tokens_est") or 0)
-            recorded_keys.add(str(row.get("source_key", "")))
-            batches += 1
+        with open(metrics_path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                    if session and session not in str(row.get("source_key", "")):
+                        continue
+                    # raw_tokens_est can be a JSON type int() refuses (a list, a dict)
+                    # — one such line used to crash the whole benchmark.
+                    raw_tokens += int(row.get("raw_tokens_est") or 0)
+                    recorded_keys.add(str(row.get("source_key", "")))
+                    batches += 1
+                except (ValueError, TypeError, AttributeError):
+                    malformed_metric_lines += 1
 
     st = store_tokens(store, count)
     # The numerator must be ONLY what came out of the recorded batches. Dividing the
@@ -152,7 +203,8 @@ def compress(reg: Registry, store: Store, tokenizer_command: str | None = None,
             unattributed += 1
             continue
         try:
-            src_key = json.load(open(mpath, encoding="utf-8")).get("source_key", "")
+            with open(mpath, encoding="utf-8") as f:
+                src_key = json.load(f).get("source_key", "")
         except (OSError, ValueError):
             unattributed += 1
             continue
@@ -195,6 +247,10 @@ def compress(reg: Registry, store: Store, tokenizer_command: str | None = None,
         out["note"] = ("batches were recorded but no memory carries an evidence manifest "
                        "pointing at them, so store_ratio is undefined. Memories poured "
                        "before manifests existed cannot be attributed to a batch.")
+    if malformed_metric_lines:
+        # The count only lands in the report when it is non-zero: a healthy log does
+        # not deserve a field everyone has to re-read.
+        out["malformed_metric_lines"] = malformed_metric_lines
     if not raw_tokens:
         out["note"] = ("no distiller metrics yet, so store_ratio cannot be computed. "
                        "Run `kura distill run` (metrics land in _still/metrics.jsonl); "

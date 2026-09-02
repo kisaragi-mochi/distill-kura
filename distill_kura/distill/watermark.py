@@ -55,14 +55,11 @@ class Watermarks:
                 fcntl.flock(lk, fcntl.LOCK_UN)
 
     def claim(self, files: list[str], budget_chars: int,
-              min_chars: int) -> tuple[str, int, Source, int] | None:
+              min_chars: int) -> tuple[str, int, int, Source] | None:
         """Reserve the next stretch worth drinking.
 
-        Returns (path, start, source, reserved_end). `budget_chars` is passed to
-        `claim_bound` unchanged — it is the same budget `sip` will receive. A
-        global byte-slack here reserved past what a record-walking source would
-        drink; max-forward then skipped the unread tail forever. Adapters that
-        estimate bytes apply their own slack inside `claim_bound`.
+        Returns (path, start, end, source). `end` is the reserved watermark unit
+        sip must not read past — a second runner may already own bytes/events after it.
         """
         with open(self.path + ".lock", "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
@@ -74,12 +71,22 @@ class Watermarks:
                         continue
                     k = src.key(path)
                     start = cur.get(k, 0)
+                    # The reserve must be the window sip() will ACTUALLY consume with
+                    # the same budget — twice now it has not been. In DSH it was 2.2×
+                    # larger; in the claude adapter it was budget*4 BYTES against a
+                    # read that stops on kept CHARACTERS (80 KB reserved, 30 KB read,
+                    # on an ASCII journal). Both times the mark outran the read and
+                    # every chunk's unread tail was skipped forever. Claiming less than
+                    # sip reads is recoverable (advance() moves the mark to the true
+                    # stop); claiming more is silent loss, the unforgivable direction.
+                    # So no adapter may compute this by a second rule: claim_bound()
+                    # takes the same walk sip() takes, and pays the second read.
                     end, approx = src.claim_bound(path, start, budget_chars)
                     if approx < min_chars or end <= start:
                         continue
                     cur[k] = end
                     self._write(cur)
-                    return path, start, src, end
+                    return path, start, end, src
                 return None
             finally:
                 fcntl.flock(lk, fcntl.LOCK_UN)

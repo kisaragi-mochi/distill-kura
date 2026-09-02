@@ -17,16 +17,20 @@ byte offset for append-only files, sequence number for rewritten archives.
 from __future__ import annotations
 
 import glob
+import inspect
 import json
 import os
 import re
 import subprocess
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 
 MAX_TOOL = 1500      # tools are verbose; the head is enough to ground a number
 MAX_SEG = 4000
 MAX_LINE = 32 * 1024  # raw JSONL line, including the newline; bound before json.loads
+SCAN_LIMIT = MAX_LINE * 10  # unterminated tail: bounded per read, never scan to EOF
 MAX_ID = 256          # event_id / session_id / turn_id; oversized is skipped, never sliced
 MAX_TIMESTAMP = 40    # RFC3339 date-time with timezone; ordinary values fit with room
 MAX_CLASS = 32
@@ -123,24 +127,33 @@ class Source:
         raise NotImplementedError
 
     def sip(self, path: str, start: int, limit_chars: int,
-            until: int | None = None, report: IntakeReport | None = None
-            ) -> tuple[list[Segment], int]:
+            report: IntakeReport | None = None) -> tuple[list[Segment], int]:
         """Read past the watermark. Returns (segments, new watermark).
 
-        `until` is the reserved end from `claim` — sip must not drink past it.
         `report` collects bounded skip reasons; it must never carry payloads.
         """
         raise NotImplementedError
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
         """Reserve a stretch before drinking it, so parallel runs never overlap.
-
-        `budget_chars` is the same budget `sip` will receive. The returned end
-        must be a watermark `sip` will actually reach: `claim` writes it before
-        the drink, and `advance` only takes max(), so over-reservation skips
-        unread bytes forever. Returns (end watermark, approximate chars).
-        """
+        Returns (end watermark, approximate chars in the stretch)."""
         raise NotImplementedError
+
+
+def call_sip(src: Source, path: str, start: int, limit_chars: int, *,
+             report: IntakeReport | None = None,
+             bound_end: int | None = None) -> tuple[list[Segment], int]:
+    """Invoke sip with only kwargs the adapter accepts.
+
+    Pre-existing custom sources may implement only ``sip(path, start, limit_chars)``.
+    """
+    params = inspect.signature(src.sip).parameters
+    kwargs: dict = {}
+    if "report" in params:
+        kwargs["report"] = report
+    if "bound_end" in params:
+        kwargs["bound_end"] = bound_end
+    return src.sip(path, start, limit_chars, **kwargs)
 
 
 # ── Claude Code / plain JSONL transcripts (append-only → byte watermark) ─────
@@ -175,21 +188,28 @@ class ClaudeCodeSource(Source):
                     return " ".join(x.get("text", "") for x in c if isinstance(x, dict))
         return ""
 
-    def sip(self, path: str, start: int, limit_chars: int,
-            until: int | None = None, report: IntakeReport | None = None
-            ) -> tuple[list[Segment], int]:
-        return self._drink(path, start, limit_chars, until=until)
+    def _walk(self, path: str, start: int, limit_chars: int,
+              bound_end: int | None = None) -> tuple[list[Segment], int, int]:
+        """The one line-walk: sip() and claim_bound() both come through here.
 
-    def _drink(self, path: str, start: int, limit_chars: int,
-               until: int | None = None) -> tuple[list[Segment], int]:
+        A reserve computed by a second, cheaper rule drifts from the read. This bound
+        used to assume 4 bytes per character and reserve `budget * 4` bytes, while the
+        read stops when the KEPT characters reach the budget: on a 4000-line ASCII
+        journal it reserved 80 KB against a true stop of 30 KB, and the 50 KB between
+        was marked drunk without ever being read — 62% of every stretch, silently,
+        forever. English and code journals are the common case, so it was happening in
+        production. Same rules, same tally, same stopping condition, by construction.
+
+        Returns (segments, stop offset, kept chars).
+        """
         segs: list[Segment] = []
         total = 0
         with open(path, "rb") as h:
             h.seek(start)
             while True:
-                line_start = h.tell()
-                if until is not None and line_start >= until:
-                    return segs, line_start
+                pos = h.tell()
+                if bound_end is not None and pos >= bound_end:
+                    return segs, pos, total
                 line = h.readline()
                 if not line:
                     break
@@ -197,6 +217,8 @@ class ClaudeCodeSource(Source):
                     d = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(d, dict):
+                    continue          # a stray non-object line is not a message
                 t = d.get("type")
                 # A subagent's transcript records the PARENT MODEL's instructions as
                 # `type: user` with `isSidechain: true`. That text is model-written:
@@ -204,7 +226,8 @@ class ClaudeCodeSource(Source):
                 # approved X" in a delegation prompt would pass the gate as a decision.
                 # Tool results stay [TOOL]; everything else in a sidechain is [SELF].
                 side = bool(d.get("isSidechain"))
-                c = (d.get("message") or {}).get("content")
+                msg = d.get("message")
+                c = msg.get("content") if isinstance(msg, dict) else None
                 parts = c if isinstance(c, list) else ([c] if isinstance(c, str) else [])
                 for p in parts:
                     cls = None
@@ -230,17 +253,32 @@ class ClaudeCodeSource(Source):
                     segs.append(Segment(cls, txt[:MAX_SEG]))
                     total += min(len(txt), MAX_SEG)
                 if total >= limit_chars:
-                    return segs, h.tell()
-            return segs, h.tell()
+                    return segs, h.tell(), total
+            return segs, h.tell(), total
+
+    def sip(self, path: str, start: int, limit_chars: int,
+            report: IntakeReport | None = None,
+            bound_end: int | None = None) -> tuple[list[Segment], int]:
+        segs, end, _ = self._walk(path, start, limit_chars, bound_end=bound_end)
+        return segs, end
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
-        # Same walk sip uses, same budget Distiller will pass to sip. A 2.2× byte
-        # estimate reserved past the char-budget record end; max-forward then
-        # skipped the unread head of the next compact JSONL line forever.
-        # approx is bytes walked, not truncated segment text: MAX_SEG caps a
-        # long USER line at 4000 chars, and using that sum as min_chars would
-        # refuse a journal whose padding was sized to pass MIN_DRINK on bytes.
-        _, end = self._drink(path, start, budget_chars)
+        size = os.path.getsize(path)
+        # A kept character never costs less than one byte of the line it came from
+        # (UTF-8 never shrinks, and the JSON scaffolding around the text is pure
+        # surplus), so a stretch shorter than the budget can never fill it: the walk
+        # would run to EOF. That makes this shortcut exact rather than estimated —
+        # which matters because catch_up() asks for the whole file with a budget of
+        # 2**40 and must not JSON-parse a year of journals to be told where it ends.
+        if size - start <= budget_chars:
+            return size, max(0, size - start)
+        # Otherwise walk the lines a second time: reserving costs a re-read of a few
+        # tens of KB, guessing costs journal. `approx` is the raw stretch, not the
+        # kept chars — it only feeds the "worth waking the model" filter, and erring
+        # HIGH there at worst spends a pass that finds nothing and moves on, while
+        # erring low would park the mark forever on a journal of nothing but
+        # sidechain and system-reminder lines.
+        _, end, _ = self._walk(path, start, budget_chars)
         return end, max(0, end - start)
 
 
@@ -267,17 +305,30 @@ class DshSource(Source):
 
     @staticmethod
     def _lines(path: str):
-        p = subprocess.run(["zstd", "-dc", path], capture_output=True, timeout=300)
+        try:
+            p = subprocess.run(["zstd", "-dc", path], capture_output=True, timeout=300)
+        except FileNotFoundError:
+            raise RuntimeError("zstd is not installed; DSH session archives cannot be read")
+        if p.returncode != 0:
+            # A corrupt archive used to yield no lines at all: every event was
+            # "skipped", the watermark never moved, and the session read as drunk
+            # on every pass — a silent hole in the journal.
+            raise RuntimeError(f"zstd failed on {path} (rc={p.returncode}): "
+                               f"{p.stderr.decode(errors='replace')[:200]}")
         for line in p.stdout.splitlines():
             try:
-                yield json.loads(line)
+                d = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(d, dict):
+                yield d
 
     @staticmethod
     def _classify(d: dict) -> Segment | None:
         t = d.get("type")
-        data = d.get("data") or {}
+        data = d.get("data")
+        if not isinstance(data, dict):
+            return None
         if t == "user/message":
             if (data.get("source") or {}).get("kind") != "user":
                 return None                       # injected context is not the human
@@ -306,17 +357,24 @@ class DshSource(Source):
             return Segment("TOOL", txt) if txt else None
         return None
 
-    def sip(self, path: str, start: int, limit_chars: int,
-            until: int | None = None, report: IntakeReport | None = None
-            ) -> tuple[list[Segment], int]:
+    def _walk(self, path: str, start: int, limit_chars: int,
+              bound_end: int | None = None) -> tuple[list[Segment], int, int]:
+        """The one event-walk, breaking only after a segment is counted — so the
+        reserved end is exactly where the read with this budget stops. Written twice,
+        these two loops drifted: breaking on unclassified events too let the marks run
+        ahead of the reads, and every chunk's unread tail was skipped forever (two
+        thirds of a DSH journal, measured). One walk cannot disagree with itself.
+
+        Returns (segments, sequence watermark, kept chars).
+        """
         segs: list[Segment] = []
         total, last = 0, start
         for d in self._lines(path):
             seq = d.get("seq")
             if seq is None or seq <= start:
                 continue
-            if until is not None and seq > until:
-                continue
+            if bound_end is not None and seq > bound_end:
+                break
             last = max(last, seq)
             s = self._classify(d)
             if not s:
@@ -326,24 +384,33 @@ class DshSource(Source):
             total += len(s.text)
             if total >= limit_chars:
                 break
+        return segs, last, total
+
+    def sip(self, path: str, start: int, limit_chars: int,
+            report: IntakeReport | None = None,
+            bound_end: int | None = None) -> tuple[list[Segment], int]:
+        segs, last, _ = self._walk(path, start, limit_chars, bound_end=bound_end)
         return segs, last
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
-        total, end = 0, start
-        for d in self._lines(path):
-            seq = d.get("seq")
-            if seq is None or seq <= start:
-                continue
-            s = self._classify(d)
-            if s:
-                total += min(len(s.text), MAX_TOOL if s.cls == "TOOL" else MAX_SEG)
-            end = max(end, seq)
-            if total >= budget_chars:
-                break
+        # Exact in both numbers: the same walk, so the reserve lands on the same event
+        # the read stops at. The archive is decompressed twice (once to reserve, once
+        # to drink) — a few hundred ms against a stretch of journal lost in silence.
+        _, end, total = self._walk(path, start, budget_chars)
         return end, total
 
 
 # ── Classified evidence JSONL (append-only → byte watermark) ───────────────
+
+@dataclass
+class _ScanCursor:
+    pos: int
+    anchor: bytes
+    cursor_anchor: bytes
+    file_size: int
+    mtime_ns: int
+    ctime_ns: int
+
 
 class EvidenceJsonlSource(Source):
     """`*.evidence.jsonl` — one versioned, class-tagged event per line.
@@ -351,6 +418,13 @@ class EvidenceJsonlSource(Source):
     Writers append complete JSON objects; a crash may leave a partial final line.
     The watermark stops before that line so the next append can finish it. Invalid
     lines are dropped, never reclassified, and counted on an IntakeReport.
+
+    Progressive oversized-line discard assumes an append-only source contract.
+    Cached scan cursors are fail-closed defence against observable truncation,
+    inode/path replacement, same-size rewrites (via ``st_mtime_ns`` /
+    ``st_ctime_ns`` generation), and in-place mutation near a saved cursor
+    (via head and cursor anchors). A malicious rewrite that grows the file and
+    preserves every checked anchor is not claimed detectable here.
 
     Minimum shape (schema_version 1)::
 
@@ -370,6 +444,16 @@ class EvidenceJsonlSource(Source):
     digests fit.
     """
     name = "evidence"
+    _ANCHOR_LEN = 16
+    # ponytail: raise if many concurrent unterminated huge tails exceed this cap;
+    # eviction only restarts an unreserved progressive scan, never a reserved sip.
+    _SCAN_STATE_CAP = 256
+
+    def __init__(self) -> None:
+        self._scan_lock = threading.Lock()
+        self._scan_cursors: OrderedDict[
+            tuple[str, int, int, int], _ScanCursor
+        ] = OrderedDict()
 
     def matches(self, path: str) -> bool:
         return path.endswith(".evidence.jsonl")
@@ -387,13 +471,192 @@ class EvidenceJsonlSource(Source):
             report.note(reason, at, size)
 
     @staticmethod
-    def _read_record(h) -> tuple[bytes | None, str]:
+    def _scan_key(path: str, line_start: int, st_dev: int, st_ino: int) -> tuple[str, int, int, int]:
+        return (os.path.abspath(path), line_start, st_dev, st_ino)
+
+    def _anchor_ok(self, h, line_start: int, anchor: bytes) -> bool:
+        if not anchor:
+            return True
+        here = h.tell()
+        h.seek(line_start)
+        ok = h.read(len(anchor)) == anchor
+        h.seek(here)
+        return ok
+
+    def _read_cursor_anchor(self, h, line_start: int, pos: int) -> bytes:
+        if pos <= line_start:
+            return b""
+        start = max(line_start, pos - self._ANCHOR_LEN)
+        here = h.tell()
+        h.seek(start)
+        anchor = h.read(pos - start)
+        h.seek(here)
+        return anchor
+
+    def _cursor_anchor_ok(
+        self, h, line_start: int, pos: int, cursor_anchor: bytes,
+    ) -> bool:
+        if not cursor_anchor:
+            return pos <= line_start
+        start = max(line_start, pos - len(cursor_anchor))
+        here = h.tell()
+        h.seek(start)
+        ok = h.read(len(cursor_anchor)) == cursor_anchor
+        h.seek(here)
+        return ok
+
+    def _make_scan_cursor(
+        self, h, path: str, line_start: int, pos: int, head_anchor: bytes,
+    ) -> _ScanCursor:
+        st = os.stat(path)
+        return _ScanCursor(
+            pos=pos,
+            anchor=head_anchor,
+            cursor_anchor=self._read_cursor_anchor(h, line_start, pos),
+            file_size=st.st_size,
+            mtime_ns=st.st_mtime_ns,
+            ctime_ns=st.st_ctime_ns,
+        )
+
+    def _scan_put(self, key: tuple[str, int, int, int], entry: _ScanCursor) -> None:
+        abspath, line_start, st_dev, st_ino = key
+        stale = [k for k in self._scan_cursors
+                 if k[0] == abspath and k[1] == line_start and k[2:] != (st_dev, st_ino)]
+        for k in stale:
+            self._scan_cursors.pop(k, None)
+        if key in self._scan_cursors:
+            self._scan_cursors.move_to_end(key)
+        self._scan_cursors[key] = entry
+        while len(self._scan_cursors) > self._SCAN_STATE_CAP:
+            self._scan_cursors.popitem(last=False)
+
+    def _scan_get(self, path: str, line_start: int) -> _ScanCursor | None:
+        st = os.stat(path)
+        key = self._scan_key(path, line_start, st.st_dev, st.st_ino)
+        abspath = os.path.abspath(path)
+        with self._scan_lock:
+            stale = [k for k in self._scan_cursors
+                     if k[0] == abspath and k[1] == line_start
+                     and k[2:] != (st.st_dev, st.st_ino)]
+            for k in stale:
+                self._scan_cursors.pop(k, None)
+            entry = self._scan_cursors.get(key)
+            if entry is None:
+                return None
+            if st.st_size < entry.file_size or st.st_size < entry.pos:
+                self._scan_cursors.pop(key, None)
+                return None
+            if (st.st_size == entry.file_size
+                    and (st.st_mtime_ns != entry.mtime_ns
+                         or st.st_ctime_ns != entry.ctime_ns)):
+                self._scan_cursors.pop(key, None)
+                return None
+            self._scan_cursors.move_to_end(key)
+            return entry
+
+    def _scan_clear(self, path: str, line_start: int) -> None:
+        st = os.stat(path)
+        key = self._scan_key(path, line_start, st.st_dev, st.st_ino)
+        with self._scan_lock:
+            self._scan_cursors.pop(key, None)
+
+    def _scan_bounded_line(self, h, line_start: int, visible_end: int) -> str:
+        """Within a reservation: scan the oversized line through its newline once."""
+        while h.tell() < visible_end:
+            pos = h.tell()
+            limit = min(MAX_LINE, visible_end - pos)
+            if limit <= 0:
+                break
+            chunk = h.readline(limit)
+            if not chunk:
+                h.seek(line_start)
+                return "partial"
+            if chunk.endswith(b"\n"):
+                return "oversized"
+        h.seek(line_start)
+        return "partial"
+
+    def _scan_progressive(
+        self,
+        h,
+        path: str,
+        line_start: int,
+        visible_end: int,
+        anchor: bytes,
+    ) -> str:
+        """Unreserved: scan at most SCAN_LIMIT bytes; watermark stays at line_start."""
+        st = os.stat(path)
+        key = self._scan_key(path, line_start, st.st_dev, st.st_ino)
+        scanned = 0
+        while scanned < SCAN_LIMIT:
+            pos = h.tell()
+            if pos >= visible_end:
+                with self._scan_lock:
+                    self._scan_put(
+                        key, self._make_scan_cursor(h, path, line_start, pos, anchor))
+                h.seek(line_start)
+                return "partial"
+            limit = min(MAX_LINE, visible_end - pos)
+            if limit <= 0:
+                h.seek(line_start)
+                return "partial"
+            chunk = h.readline(limit)
+            if not chunk:
+                with self._scan_lock:
+                    self._scan_put(
+                        key, self._make_scan_cursor(
+                            h, path, line_start, h.tell(), anchor))
+                h.seek(line_start)
+                return "partial"
+            scanned += len(chunk)
+            if chunk.endswith(b"\n"):
+                with self._scan_lock:
+                    self._scan_cursors.pop(key, None)
+                return "oversized"
+        with self._scan_lock:
+            self._scan_put(
+                key, self._make_scan_cursor(h, path, line_start, h.tell(), anchor))
+        h.seek(line_start)
+        return "partial"
+
+    def _read_record(
+        self,
+        h,
+        path: str,
+        bound_end: int | None = None,
+    ) -> tuple[bytes | None, str]:
         """Bounded read of one JSONL record. Never readline()s the rest of the file.
 
         Status: 'eof' | 'ok' | 'partial' | 'oversized'.
         'ok' payload includes the newline and is at most MAX_LINE bytes.
         """
-        chunk = h.readline(MAX_LINE + 1)
+        line_start = h.tell()
+        if bound_end is not None and line_start >= bound_end:
+            return None, "eof"
+        file_size = os.path.getsize(path)
+        visible_end = bound_end if bound_end is not None else file_size
+
+        if bound_end is None:
+            entry = self._scan_get(path, line_start)
+            if entry is not None:
+                st = os.stat(path)
+                head_ok = self._anchor_ok(h, line_start, entry.anchor)
+                if head_ok and (
+                        st.st_size == entry.file_size
+                        or self._cursor_anchor_ok(
+                            h, line_start, entry.pos, entry.cursor_anchor)):
+                    h.seek(entry.pos)
+                    return None, self._scan_progressive(
+                        h, path, line_start, visible_end, entry.anchor)
+                self._scan_clear(path, line_start)
+                h.seek(line_start)
+
+        first_limit = MAX_LINE + 1
+        if bound_end is not None:
+            first_limit = min(first_limit, max(0, bound_end - line_start))
+            if first_limit <= 0:
+                return None, "eof"
+        chunk = h.readline(first_limit)
         if not chunk:
             return None, "eof"
         if chunk.endswith(b"\n"):
@@ -402,12 +665,14 @@ class EvidenceJsonlSource(Source):
             return chunk, "ok"
         if len(chunk) <= MAX_LINE:
             return chunk, "partial"
-        while True:
-            more = h.readline(MAX_LINE)
-            if not more:
-                return None, "partial"
-            if more.endswith(b"\n"):
-                return None, "oversized"
+        here = h.tell()
+        h.seek(line_start)
+        anchor = h.read(self._ANCHOR_LEN)
+        h.seek(here)
+        if bound_end is not None:
+            return None, self._scan_bounded_line(h, line_start, visible_end)
+        return None, self._scan_progressive(
+            h, path, line_start, visible_end, anchor)
 
     @staticmethod
     def _parse(raw: bytes) -> tuple[str | None, Segment | None]:
@@ -466,17 +731,17 @@ class EvidenceJsonlSource(Source):
         return None, Segment(cls, text.strip())
 
     def _drink(self, path: str, start: int, limit_chars: int,
-               until: int | None = None,
-               report: IntakeReport | None = None) -> tuple[list[Segment], int]:
+               report: IntakeReport | None = None,
+               bound_end: int | None = None) -> tuple[list[Segment], int]:
         segs: list[Segment] = []
         total = 0
         with open(path, "rb") as h:
             h.seek(start)
             while True:
                 line_start = h.tell()
-                if until is not None and line_start >= until:
+                if bound_end is not None and line_start >= bound_end:
                     return segs, line_start
-                raw, status = self._read_record(h)
+                raw, status = self._read_record(h, path, bound_end=bound_end)
                 if status == "eof":
                     return segs, line_start
                 if status == "partial":
@@ -497,19 +762,21 @@ class EvidenceJsonlSource(Source):
             return segs, h.tell()
 
     def sip(self, path: str, start: int, limit_chars: int,
-            until: int | None = None, report: IntakeReport | None = None
-            ) -> tuple[list[Segment], int]:
-        return self._drink(path, start, limit_chars, until=until, report=report)
+            report: IntakeReport | None = None,
+            bound_end: int | None = None) -> tuple[list[Segment], int]:
+        segs, end = self._drink(path, start, limit_chars, report=report,
+                                bound_end=bound_end)
+        return segs, end
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
-        # Same walk sip uses, same budget Distiller will pass to sip. A byte
-        # estimate (file size, or start+budget) reserved past the last complete
-        # record; max-forward then skipped the unread tail forever.
+        # Same walk sip uses, same budget Distiller will pass to sip.
         segs, end = self._drink(path, start, budget_chars)
         text = sum(len(s.text) for s in segs)
+        walked = max(0, end - start)
         # Junk-only stretches still have to move: approx=0 would refuse the claim
-        # and never report the skips. Bytes walked let the watermark advance.
-        return end, text if text else max(0, end - start)
+        # and never report the skips. A short valid event after a huge discarded
+        # prefix must count the walked span, not just kept characters.
+        return end, max(text, walked)
 
 
 # ── Plain text / markdown notes (append-only → byte watermark) ──────────────
@@ -531,24 +798,55 @@ class TextSource(Source):
             out += glob.glob(os.path.join(root, "**", ext), recursive=True)
         return sorted(out, key=os.path.getmtime, reverse=True)
 
+    @staticmethod
+    def _stop(path: str, start: int, limit_chars: int) -> int:
+        """Where a sip of this budget ends — the one rule, so the reserve and the read
+        can never be computed differently. (Computing them separately is what marked
+        62% of a claude stretch drunk without reading it.)
+
+        A fixed byte window — 4 per char, the UTF-8 worst case — pulled BACK off a
+        half-written character: cutting mid-character lost that character twice over,
+        `errors="ignore"` dropping its head here and its tail on the next sip, with
+        nothing in the log to say a character had gone.
+        """
+        size = os.path.getsize(path)
+        end = min(start + limit_chars * 4, size)
+        if end >= size or end <= start:
+            return max(start, min(end, size))
+        n = min(4, end - start)             # a UTF-8 character is at most 4 bytes
+        with open(path, "rb") as h:
+            h.seek(end - n)
+            tail = h.read(n)
+        i = len(tail) - 1
+        while i >= 0 and (tail[i] & 0xC0) == 0x80:      # 10xxxxxx: a continuation byte
+            i -= 1
+        if i < 0:
+            return end                     # no lead byte in reach; leave the bytes be
+        b = tail[i]
+        need = 1 if b < 0x80 else 2 if b < 0xE0 else 3 if b < 0xF0 else 4
+        have = len(tail) - i
+        return end if have >= need else max(start + 1, end - have)
+
     def sip(self, path: str, start: int, limit_chars: int,
-            until: int | None = None, report: IntakeReport | None = None
-            ) -> tuple[list[Segment], int]:
+            report: IntakeReport | None = None,
+            bound_end: int | None = None) -> tuple[list[Segment], int]:
+        stop = self._stop(path, start, limit_chars)
+        if bound_end is not None:
+            stop = min(stop, bound_end)
         with open(path, "rb") as h:
             h.seek(start)
-            cap = limit_chars * 4
-            if until is not None:
-                cap = min(cap, max(0, until - start))
-            raw = h.read(cap).decode("utf-8", errors="ignore")
-            pos = h.tell()
-            if until is not None:
-                pos = min(pos, until)
+            raw = h.read(max(0, stop - start)).decode("utf-8", errors="ignore")
         segs = [Segment("USER", p.strip()[:MAX_SEG]) for p in raw.split("\n\n") if p.strip()]
-        return segs, pos
+        return segs, stop
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
-        size = os.path.getsize(path)
-        end = min(start + int(budget_chars * 2.2), size)
+        # Exact by construction: the same rule the read obeys. If the file GREW between
+        # the two, the reserve is the older, shorter stop — short is the recoverable
+        # direction (advance() carries the mark to wherever the read truly ended);
+        # long is the one that loses journal.
+        end = self._stop(path, start, budget_chars)
+        # `approx` is raw bytes, not kept chars: see ClaudeCodeSource.claim_bound for
+        # why this filter errs high.
         return end, max(0, end - start)
 
 

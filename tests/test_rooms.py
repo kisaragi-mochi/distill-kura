@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 
 import pytest
@@ -28,10 +29,11 @@ def rooms_registry(tmp_path) -> Registry:
                encoding="utf-8").read()
     text = src.replace("~/kura/", str(tmp_path / "kura") + "/") \
               .replace("~/dsh/sessions/", str(tmp_path / "sessions") + "/") \
-              .replace('charter = "examples/rooms/', f'charter = "{ROOT}/examples/rooms/') \
               .replace('url = "http://127.0.0.1:8011/v1"', 'url = "http://127.0.0.1:9/v1"')
     for r in ROOMS:
         Store(name=r, path=str(tmp_path / "kura" / r)).init_files()
+        shutil.copy(os.path.join(ROOT, "examples", "rooms", r, "charter.md"),
+                    tmp_path / "kura" / r / "charter.md")
         os.makedirs(tmp_path / "sessions" / f"work-{r}", exist_ok=True)
     cfg = tmp_path / "kura.toml"
     cfg.write_text(text, encoding="utf-8")

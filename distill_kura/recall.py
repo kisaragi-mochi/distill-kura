@@ -8,6 +8,11 @@ Why not grep / embeddings: a question about "SSD inference chips" shares no word
 with a memory titled "run the 2.6T model from an SSD tier", yet they are the same
 problem. A resident index + a small model recognises that in ~0.4 s. If the
 thinker is unreachable we fall back to word overlap and *say so* in `how`.
+
+Before any of that runs tier zero: `fastpath`, a deterministic recognizer that
+answers a DIRECT question (one that names a memory) in well under a millisecond
+and stays silent on everything else. A gated hit skips the thinker entirely;
+silence changes nothing about the path above.
 """
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ import json
 import re
 import time
 
+from . import fastpath
 from .store import Store
 from .thinker import Endpoint
 from .tokens import estimate
@@ -30,11 +36,10 @@ PICK_SYS = (
 )
 
 
-def _clean(name: str) -> str:
-    """Tidy one pick. Models answer with `slug`, `slug.md`, `[slug]`, `path/slug.md` —
-    all the same intent, and the caller should not have to know which shape arrived."""
-    n = str(name).strip().strip("[]()`\"' ")
-    return n[:-3] if n.endswith(".md") else n
+# The words a question is scored by. Runs of one script only: a merged character
+# class glues `SSD推論` into one term that can then match nothing but that same
+# adjacency, and the memory it was reaching for is never scored at all.
+_TERMS = re.compile(r"[A-Za-z0-9]{2,}|[ァ-ヴー]{2,}|[一-龠]{2,}")
 
 
 def pick_by_meaning(store: Store, thinker: Endpoint, question: str, top: int) -> list[str] | None:
@@ -46,7 +51,10 @@ def pick_by_meaning(store: Store, thinker: Endpoint, question: str, top: int) ->
     if m:
         try:
             got = json.loads(m.group(0))
-            picked = [_clean(x) for x in got if isinstance(x, str)][:top]
+            # Models answer with `slug`, `slug.md`, `[slug]`, `path/slug.md` — all
+            # the same intent. `Store._clean` is where that shape-tidying lives; a
+            # second copy here drifted from it the moment either side was touched.
+            picked = [store._clean(x) for x in got if isinstance(x, str)][:top]
             if picked:
                 return picked
         except ValueError:
@@ -60,9 +68,15 @@ def pick_by_meaning(store: Store, thinker: Endpoint, question: str, top: int) ->
 
 
 def pick_by_words(store: Store, question: str, top: int) -> list[str]:
-    terms = re.findall(r"[A-Za-z0-9ァ-ヴー一-龠]{2,}", question)
+    """Last resort when the thinker is unreachable: rank index lines by word overlap.
+
+    Read through `_uncommented`, never the raw index. The header comment carries the
+    format hint, and its EXAMPLE link (`- [Title](its-slug.md)`) matched a question
+    about titles or triggers — so the degraded path handed back `its-slug`, a memory
+    that does not exist, and crowded a real one out of `top`."""
+    terms = _TERMS.findall(question)
     scored = []
-    for line in store.index_text().splitlines():
+    for line in store._uncommented(store.index_text()).splitlines():
         m = re.search(r"\(([^)]+)\.md\)", line)
         if not m:
             continue
@@ -81,7 +95,7 @@ def fit(text: str, question: str, budget: int) -> str:
         return text
     head_end = text.find("\n\n", text.find("---", 4) + 3)
     head = text[:max(0, head_end)][:600] if head_end > 0 else text[:600]
-    terms = [w for w in re.findall(r"[A-Za-z0-9]{2,}|[ァ-ヴー]{2,}|[一-龠]{2,}", question)]
+    terms = _TERMS.findall(question)
     rest = text[len(head):]
     paras = [x for x in rest.split("\n\n") if x.strip()]
     if any(len(x) > budget // 3 for x in paras):      # giant paragraph → split by line
@@ -101,22 +115,46 @@ def fit(text: str, question: str, budget: int) -> str:
 
 
 def recall(store: Store, thinker: Endpoint | None, question: str, hops: int = 1,
-           top: int = 3, chars: int = 6000, total_chars: int | None = None) -> dict:
+           top: int = 3, chars: int = 6000, total_chars: int | None = None,
+           fastpath_cfg: dict | None = None) -> dict:
     """Recall by recognition.
 
     `chars` is the budget for ONE memory, not for the answer: link-walking can return
     ten of them, so a caller reading it as a ceiling on the response was out by an order
     of magnitude. `total_chars` is the ceiling on the whole context; memories are filled
     in walk order until it runs out, and the reply says how much of each budget was used.
+
+    `fastpath_cfg` is the `[fastpath]` table (`enabled`, `gate`); None means the
+    defaults. The reply always says what tier zero did (`fastpath_verdict`, `fastpath_ms`).
     """
     t0 = time.time()
-    picked = pick_by_meaning(store, thinker, question, top) if thinker else None
+    cfg = fastpath_cfg or {}
+    fp_ms, fp_verdict, picked, how = None, "disabled", None, ""
+    fp: dict = {}
+    if cfg.get("enabled", True):
+        # Tier zero: a gated hit IS the pick and the thinker is never asked — which
+        # also means a direct question still finds its memory when the thinker is
+        # down, instead of degrading straight to word overlap. The callsign pre-head
+        # answers first when the question contains a verified shared word.
+        fp = fastpath.lookup(store, question, top=top,
+                             gate=cfg.get("gate", fastpath.DEFAULT_GATE),
+                             cues=cfg.get("cues", True))
+        fp_ms, fp_verdict = fp["ms"], fp["verdict"]
+        if fp["hits"]:
+            picked, how = [h["slug"] for h in fp["hits"]], "fastpath"
+            if fp.get("cue"):
+                how = "fastpath-cue"
     if picked is None:
-        picked, how = pick_by_words(store, question, top), "words(thinker unreachable)"
-    elif not picked:
-        picked, how = pick_by_words(store, question, top), "meaning→none→words"
-    else:
-        how = "meaning"
+        picked = pick_by_meaning(store, thinker, question, top) if thinker else None
+        if picked is None:
+            picked, how = pick_by_words(store, question, top), "words(thinker unreachable)"
+        elif not picked:
+            # The thinker read the whole index and named nothing. That is an answer —
+            # overriding it with word overlap would hand back look-alikes for a
+            # question this store knows nothing about. Refusal is a feature.
+            how = "meaning→none"
+        else:
+            how = "meaning"
     order = store.walk(picked, hops)
     parts, used, included = [], 0, []
     for s in order:
@@ -137,12 +175,17 @@ def recall(store: Store, thinker: Endpoint | None, question: str, hops: int = 1,
         # the best-ranked one, cut to fit and labelled as cut: a partial memory is an
         # answer, an empty context reads as "nothing is remembered".
         head = fit(store.read(order[0]), question, max(120, total_chars - 80))
-        parts = [f"=== {store.label}: {order[0]} (truncated) ===\n"
-                 + head[:max(0, total_chars - 60)]]
+        # The ceiling is on the WHOLE context, header included — the main loop above
+        # accounts for it piece by piece, and this branch used to guess a fixed -60
+        # margin that a long label + slug walked straight past.
+        header = f"=== {store.label}: {order[0]} (truncated) ===\n"
+        parts = [header + head[:max(0, total_chars - len(header))]]
         included = [order[0]]
     ctx = "\n\n".join(parts)
     store.note_read(included, "recall")
     return {"store": store.name, "question": question, "how": how, "picked": picked,
+            "fastpath_verdict": fp_verdict, "fastpath_ms": fp_ms,
+            "fastpath_cue": fp.get("cue"),
             "walked": order, "included": included,
             "dropped_for_budget": [s for s in order if s not in included],
             "context": ctx, "chars": len(ctx), "chars_per_memory": chars,

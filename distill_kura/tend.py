@@ -2,10 +2,16 @@
 
 What it does, in order, every time the house has been quiet for `idle_min`:
 
-    drain   drafts waiting → the editor reads each one cold and pours / fixes / tosses
-    distill no drafts     → one pass over the journal: sip → spot → gate → stage
-    weave   something poured this silence → re-weave the resident map, once
-    tidy    once per silence, only if the index has mechanically ragged lines
+    drain      drafts waiting → the editor reads each one cold and pours / fixes / tosses
+    distill    no drafts     → one pass over the journal: sip → spot → gate → stage
+    weave      something poured this silence → re-weave the resident map, once
+    trail      after each weave → rebuild the Hot Trail (model-free, cheap); also
+               whenever the trail on disk has passed its own time horizon — the
+               fresh window slides with no store write, and a watcher that never
+               rebuilt the trail would leave "the current path" empty forever
+    payforward after each weave → pay the map's cold prefill into the registered
+               mouths (`kura pay-forward`); an unchanged map is a cheap check, exit 2
+    tidy       once per silence, only if the index has mechanically ragged lines
 
 "Quiet" is the simplest signal there is: the newest journal file's mtime. No model is
 asked whether the human is busy; a conversation file that has not changed in ten
@@ -31,6 +37,10 @@ Lessons from that watcher, written into this one:
 - **Be easy to watch.** A heartbeat in `_still/tend.json` every tick; `doctor`
   reads it and says whether the watcher is alive. The first watcher died with the
   machine and nobody noticed for twelve days.
+- **A once-per-silence chore is settled by its outcome, not by its launch.** The
+  flag that says "this was done in this quiet" belongs where the exit code is read
+  (`Track.raise_on`); raised at launch instead, a pay-forward that failed or lost the
+  lock was never retried and the mouths stayed cold for the whole silence.
 
 The watcher spawns `kura` subcommands as subprocesses rather than calling in-process,
 so a track can be killed cleanly and its exit code means what the CLI says it means.
@@ -43,13 +53,81 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from .distill.sources import discover_all
 from .registry import Registry
 from .store import Store
 
-TRACKS = ("drain", "distill", "weave", "tidy")
+
+@dataclass(frozen=True)
+class Track:
+    """Everything the watcher needs to know about one track, in one place.
+
+    A track used to be spelled out in four: the name tuple, the command dict, the
+    `done` keys, and an elif ladder in `reap`. Adding one meant remembering all four,
+    and the fourth — when the per-silence flag goes up — was the one that got it
+    wrong (see `raise_on` on payforward).
+    """
+    name: str
+    argv: tuple[str, ...]                        # the `kura` subcommand to spawn
+    tally: dict[str, Callable[[dict], int]] = field(default_factory=dict)
+    #                                            what a finished run adds to `done`
+    flag: str = ""                               # the per-silence flag it raises; "" = every tick
+    raise_on: tuple[int, ...] | None = None
+    # When the flag goes up. None = at launch (the attempt itself is the chore).
+    # Otherwise the exit codes that mean "this silence is served" — every other code
+    # leaves the flag down, so the next tick may try again after the backoff.
+    after: Callable[["Tender", dict], None] | None = None
+
+
+def _count(f: str) -> Callable[[dict], int]:
+    return lambda r: int(r.get(f) or 0)
+
+
+def _many(f: str) -> Callable[[dict], int]:
+    return lambda r: len(r.get(f) or [])
+
+
+def _pour_unsettles_the_map(t: "Tender", r: dict) -> None:
+    if r.get("poured"):
+        t._woven_this_silence = False            # the map has something new to say
+
+
+def _weave_moves_the_map(t: "Tender", r: dict) -> None:
+    t._trailed_this_silence = False              # the map moved: the trail must follow
+    t._paid_this_silence = False                 # a fresh weave may have changed the map
+
+
+TRACKS: dict[str, Track] = {t.name: t for t in (
+    Track("drain", ("distill", "drain"),
+          tally={"poured": _count("poured"), "tossed": _count("tossed"),
+                 "fixed": _count("fixed")},
+          after=_pour_unsettles_the_map),
+    Track("distill", ("distill", "run", "--chunks", "1"),
+          tally={"drafts": _many("drafts")}),
+    Track("weave", ("weave",), tally={"woven": lambda r: 1},
+          flag="_woven_this_silence", raise_on=(0,),
+          # NOT on exit 2: that is "the index moved while weaving, nothing was
+          # written". Counting it as woven would send the trail and the mouths off
+          # to follow a map that never changed.
+          after=_weave_moves_the_map),
+    Track("trail", ("trail",), tally={"trailed": lambda r: 1 if r.get("written") else 0},
+          flag="_trailed_this_silence"),
+    Track("payforward", ("pay-forward",), tally={"paid": _count("worked")},
+          flag="_paid_this_silence",
+          # 0 = the fleet is warm, 2 = every mouth verified fresh. Exit 1 is a mouth
+          # that failed or was locked out by another runner, and raising the flag on
+          # it — which is what launching used to do — left the map cold for the rest
+          # of the silence: no retry until the next weave or the next human return,
+          # exactly when the mouth needed warming. The backoff in `reap` is what
+          # keeps that retry from spinning.
+          raise_on=(0, 2)),
+    Track("tidy", ("distill", "tidy"), tally={"tidied": _count("fixed")},
+          flag="_tidied_this_silence"),
+)}
 
 
 def _log(path: str, s: str) -> None:
@@ -86,9 +164,16 @@ class Tender:
         self.next_ok: dict[str, float] = {t: 0.0 for t in TRACKS}
         self.proc: subprocess.Popen | None = None
         self.proc_track = ""
-        self.done = {"poured": 0, "tossed": 0, "fixed": 0, "drafts": 0, "woven": 0, "tidied": 0}
-        self._woven_this_silence = False
-        self._tidied_this_silence = False
+        self.done = {"poured": 0, "tossed": 0, "fixed": 0, "drafts": 0, "woven": 0,
+                     "trailed": 0, "paid": 0, "tidied": 0}
+        self.new_silence()
+
+    def new_silence(self) -> None:
+        """Every per-silence flag comes down, from the one table — a flag that is
+        raised in `tick` but forgotten here would outlive the silence it belongs to."""
+        for tr in TRACKS.values():
+            if tr.flag:
+                setattr(self, tr.flag, False)
 
     # ── the signal ────────────────────────────────────────────────────────
     def newest_mtime(self) -> float:
@@ -107,8 +192,7 @@ class Tender:
         if self.config_path:
             base += ["-c", self.config_path]
         base += ["-s", self.store.name]
-        return base + {"drain": ["distill", "drain"], "distill": ["distill", "run", "--chunks", "1"],
-                       "weave": ["weave"], "tidy": ["distill", "tidy"]}[track]
+        return base + list(TRACKS[track].argv)
 
     def start(self, track: str) -> None:
         _log(self.log_path, f"→ {track}")
@@ -130,8 +214,13 @@ class Tender:
             out = ""
         rc = self.proc.returncode
         track, self.proc, self.proc_track = self.proc_track, None, ""
+        tr = TRACKS[track]
         for line in out.strip().splitlines():
             _log(self.log_path, f"   {line[:400]}")
+        if tr.raise_on is not None and rc in tr.raise_on:
+            # Raised here and not at launch: only an outcome the track declares as
+            # "served" may suppress the next attempt in this silence.
+            setattr(self, tr.flag, True)
         if rc == 2:
             self.next_ok[track] = time.time() + self.backoff_s
             _log(self.log_path, f"· {track}: nothing to do — resting {int(self.backoff_s / 60)} min")
@@ -145,19 +234,12 @@ class Tender:
             r = json.loads(last) if last else {}
         except ValueError:
             r = {}
-        if track == "drain":
-            self.done["poured"] += int(r.get("poured") or 0)
-            self.done["tossed"] += int(r.get("tossed") or 0)
-            self.done["fixed"] += int(r.get("fixed") or 0)
-            if r.get("poured"):
-                self._woven_this_silence = False       # the map has something new to say
-        elif track == "distill":
-            self.done["drafts"] += len(r.get("drafts") or [])
-        elif track == "weave":
-            self.done["woven"] += 1
-            self._woven_this_silence = True
-        elif track == "tidy":
-            self.done["tidied"] += int(r.get("fixed") or 0)
+        # Work is counted, launches are not: `paid` is bakes + restores, and a run of
+        # skipped-fresh mouths exits 2 above and never reaches this line.
+        for key, take in tr.tally.items():
+            self.done[key] += take(r)
+        if tr.after:
+            tr.after(self, r)
         return True
 
     def kill(self, why: str) -> None:
@@ -172,12 +254,36 @@ class Tender:
             self.proc_track = ""
 
     # ── choosing the next track ───────────────────────────────────────────
+    def _trail_time_stale(self) -> bool:
+        """Does a trail that EXISTS need rebuilding for time alone? Cheap and
+        model-free: read the sidecar, hash the index — the trail's own proof."""
+        from .prefill import loom_for, trail_for
+        cfg = self.reg.prefill_cfg_for(self.store)
+        t = trail_for(self.store, cfg, loom=loom_for(self.store, cfg))
+        return t.text_on_disk() is not None and t.is_stale()
+
     def choose(self, now: float) -> str | None:
         drafts = os.path.join(self.store.still, "drafts")
         have_drafts = any(f.endswith(".md") for f in os.listdir(drafts)) if os.path.isdir(drafts) else False
         order = (["drain"] if have_drafts else ["distill"])
         if not self._woven_this_silence and self.done["poured"]:
             order.append("weave")
+        if self._woven_this_silence and not self._trailed_this_silence:
+            # Right after the weave, before pay-forward: the trail is model-free and
+            # takes milliseconds, and a pour has retired the old one (the revision
+            # moved). Without this track the "current path" would go absent the first
+            # time the watcher poured something and never come back.
+            order.append("trail")
+        elif self._trail_time_stale():
+            # The pure-time hazard: no store write at all, the fresh window simply
+            # slid past the trail's own horizon. Absent trails are not maintained
+            # here — the after-weave path is what creates one.
+            order.append("trail")
+        if self._woven_this_silence and not self._paid_this_silence:
+            # Only after a weave: a map that was not re-woven cannot have changed, and
+            # a mouth restart is the systemd hook's job (docs/OPERATING.md), not the
+            # watcher's. When the weave changed nothing this is a cheap check → exit 2.
+            order.append("payforward")
         if not self._tidied_this_silence:
             order.append("tidy")
         for t in order:
@@ -211,14 +317,14 @@ class Tender:
             if any(self.done.values()):
                 _log(self.log_path, "the human is back: " + ", ".join(f"{k} {v}" for k, v in self.done.items() if v))
             self.done = {k: 0 for k in self.done}
-            self._woven_this_silence = False
-            self._tidied_this_silence = False
+            self.new_silence()
         idle = now - stamp if stamp else 0.0
         if stamp and idle >= self.idle_s and not self.proc:
             t = self.choose(now)
             if t:
-                if t == "tidy":
-                    self._tidied_this_silence = True
+                tr = TRACKS[t]
+                if tr.flag and tr.raise_on is None:
+                    setattr(self, tr.flag, True)   # a chore the attempt itself settles
                 self.start(t)
         self.beat(idle, stamp)
         return stamp
@@ -238,8 +344,3 @@ class Tender:
                 time.sleep(self.poll_s)
         except KeyboardInterrupt:
             self.kill("watcher stopped")
-
-
-def heartbeat(store: Store, stale_after_s: float = 120.0) -> dict:
-    """What `doctor` reports: is someone tending this store?"""
-    return store.tend_state(stale_after_s)

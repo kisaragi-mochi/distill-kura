@@ -33,9 +33,10 @@ from ..tokens import estimate
 from ..registry import Registry
 from ..store import ANNOTATION_KEYS, FROZEN, Store, normalize_tags
 from . import prompts
-from .gate import attributes_to_human, gate, norm, salvage, verify_tags
+from .gate import (attributes_to_human, composed_number_violations,
+                   final_surface_violations, gate, norm, salvage, verify_tags)
 from .seeds import Seeds
-from .sources import Segment, as_evidence, discover_all, source_for, IntakeReport
+from .sources import Segment, as_evidence, call_sip, discover_all, source_for, IntakeReport
 from .watermark import Watermarks
 
 CHUNK_CHARS = 200_000        # one batch ≈ what a long-context reader swallows at once
@@ -54,6 +55,35 @@ _HEAD_KEYS = ("EXTENDS", "TITLE", "DESC", "TAGS", "BELONGS_BECAUSE", "KEEP", "MA
 
 
 _HEAD_LINE = re.compile(r"^(" + "|".join(_HEAD_KEYS) + r"):[ \t]*(.*)$")
+
+
+def _safe_slug(raw: str) -> str:
+    """A draft's file name, from the scribe's SLUG line.
+
+    The sanitiser keeps ASCII only, so a store written in Japanese hands back slugs
+    that reduce to nothing (or to a bare "1" out of "メモ-1") — and every such memory
+    was then the same file, each new one overwriting the last. A digest of the
+    original text gives the nameless one a name of its own: same slug, same name on
+    every run, and two different slugs cannot land on one file."""
+    s = re.sub(r"[^a-z0-9-]+", "-", raw.strip().lower()).strip("-")[:48].strip("-")
+    if len(s) >= 3:
+        return s
+    h = hashlib.sha256(raw.strip().encode("utf-8")).hexdigest()[:10]
+    return f"{s}-{h}" if s else f"memory-{h}"
+
+
+def _free_path(directory: str, base: str, suffix: str = ".md") -> str:
+    """`<base>.md` in `directory`, or `<base>.2.md`, `<base>.3.md`… if that exists.
+
+    Writing straight to a name that is already taken destroys the earlier file with
+    no trace — the loser of a name collision is simply gone. Numbering keeps both
+    where a person can still read them."""
+    p = os.path.join(directory, base + suffix)
+    n = 1
+    while os.path.exists(p):
+        n += 1
+        p = os.path.join(directory, f"{base}.{n}{suffix}")
+    return p
 
 
 def _split_draft(body: str) -> tuple[dict[str, str], str]:
@@ -159,9 +189,12 @@ class Distiller:
         return self.models.brain.ask(self._sys(task), user, max_tokens=max_tokens,
                                      timeout=3600) or ""
 
-    def scribe(self, task: str, user: str, max_tokens: int = 1400) -> str:
-        return self.models.scribe.ask(self._sys(task.format(language=self.language)), user,
-                                      max_tokens=max_tokens, timeout=3600) or ""
+    def scribe(self, task: str, user: str, max_tokens: int = 1400) -> str | None:
+        # None survives on purpose: "the scribe was unreachable" and "the scribe
+        # answered" are different facts, and a caller that collapses them (as `or
+        # ""` once did) reads an outage as a verdict — a TOSS that deletes the draft.
+        return self.models.scribe.ask(self._sys(task.format(language=self.language)),
+                                      user, max_tokens=max_tokens, timeout=3600)
 
     # ── store text, for echo suppression ─────────────────────────────────
     def store_text(self) -> str:
@@ -244,11 +277,8 @@ class Distiller:
         ref = fm.get("origin_manifest") or fm.get("evidence_manifest", "")
         if not ref.startswith("sha256:"):
             return None
-        try:
-            with open(os.path.join(self._evidence_dir(), ref[7:] + ".json"), encoding="utf-8") as f:
-                return str(json.load(f).get("source_key") or "")
-        except (OSError, ValueError):
-            return None
+        man = self.store.load_manifest_verified(ref[7:])
+        return str(man.get("source_key") or "") if man is not None else None
 
     def recur(self, c: dict, target: str, key: str, source: str) -> str:
         """→ 'tagged' | 'already' | a reason it was not. Never raises, never counts."""
@@ -348,24 +378,44 @@ class Distiller:
         if "USER" not in c["classes"]:
             warn += ("⚠️ There is NOT ONE word of the human's in this candidate. Do not write "
                      "that they decided, chose, or instructed anything.\n")
-        out = self.scribe(prompts.SCRIBE_SYS,
-                          f"CANDIDATE: {c.get('topic')}\nKIND: {c.get('kind')}\n"
-                          f"The distiller's reading (**not evidence — never cite it**): "
-                          f"{c.get('why')}\n{warn}\n"
-                          f"=== EVIDENCE (this is everything) ===\n{ev}\n\n"
-                          f"=== NEARBY MEMORIES (candidates for [[links]]) ===\n"
-                          f"{hints or '(nothing close)'}\n")
-        if not out:
-            return None
-        slug = re.search(r"^SLUG:\s*(.+)$", out, re.M)
-        title = re.search(r"^TITLE:\s*(.+)$", out, re.M)
-        desc = re.search(r"^DESC:\s*(.+)$", out, re.M)
-        body = re.search(r"^BODY:\s*\n(.*)$", out, re.S | re.M)
-        if not (slug and desc and body):
-            return None
-        text = desc.group(1) + "\n" + body.group(1)
+        user = (f"CANDIDATE: {c.get('topic')}\nKIND: {c.get('kind')}\n"
+                f"The distiller's reading (**not evidence — never cite it**): "
+                f"{c.get('why')}\n{warn}\n"
+                f"=== EVIDENCE (this is everything) ===\n{ev}\n\n"
+                f"=== NEARBY MEMORIES (candidates for [[links]]) ===\n"
+                f"{hints or '(nothing close)'}\n")
+        # The scribe is a model: its finished text gets the same deterministic floor
+        # as the candidate's quotes did. One retry with the violations named, then drop.
+        for attempt in (1, 2):
+            out = self.scribe(prompts.SCRIBE_SYS, user)
+            if not out:
+                return None
+            slug = re.search(r"^SLUG:\s*(.+)$", out, re.M)
+            title = re.search(r"^TITLE:\s*(.+)$", out, re.M)
+            desc = re.search(r"^DESC:\s*(.+)$", out, re.M)
+            body = re.search(r"^BODY:\s*\n(.*)$", out, re.S | re.M)
+            if not (slug and desc and body):
+                return None
+            text = desc.group(1) + "\n" + body.group(1)
+            # The floor sees everything that will be stored or indexed: the title
+            # lands in MEMORY.md and the resident map, the curation sentences are
+            # saved under the curation mark — all of it is model-written surface.
+            _, s_ann, _ = _curation_of(out)
+            cand_ann = " ".join(str(c.get(k) or "") for k in ANNOTATION_KEYS)
+            surface = "\n".join([slug.group(1), (title.group(1) if title else ""), text,
+                                 " ".join(s_ann.values()), cand_ann])
+            bad = final_surface_violations(surface, c["evidence"], c["classes"])
+            if not bad:
+                break
+            if attempt == 2:
+                _log(f"      ✗ final surface fails the floor: {bad}")
+                return None
+            user += ("\n⚠️ REJECTED — fix these and answer again: "
+                     f"{'; '.join(bad)}. A number must come from the evidence itself "
+                     "(do not compute new ones); never credit the human without their "
+                     "own quoted words.\n")
         _, plain = _split_draft(body.group(1))
-        return {"slug": re.sub(r"[^a-z0-9-]+", "-", slug.group(1).strip().lower()).strip("-")[:48],
+        return {"slug": _safe_slug(slug.group(1)),
                 "title": (title.group(1).strip()[:40] if title else ""),
                 "description": desc.group(1).strip()[:200],
                 "body": plain,
@@ -373,7 +423,10 @@ class Distiller:
                 "evidence": c["evidence"], "classes": c["classes"],
                 "unverified_numbers": c.get("unverified_numbers", False),
                 "judgement": c.get("judgement", False),
-                "attributed_to_human": attributes_to_human(text, c["classes"]),
+                # routing cues ride to the manifest untouched; they never enter the
+                # body or the index — a callsign is a way BACK, not content
+                "routing_cues": c.get("routing_cues") or [],
+                "routing_cues_refused": c.get("routing_cues_refused") or {},
                 **self._curate(c, out)}
 
     def _curate(self, c: dict, out: str) -> dict:
@@ -430,13 +483,28 @@ class Distiller:
         head = self._DATE_IN_TEXT.sub(date, head)
         if date not in head:
             head = f"## {date} " + head.lstrip("#").strip()
+        # The floor runs AFTER the mechanical date stamp: the heading's date is
+        # code's claim, so it rides in `allowed`; every other number — a "99x" in
+        # the section, the body, the curation sentences — must be the evidence's.
+        _, s_ann, _ = _curation_of(out or "")
+        # The candidate's own sentences ride along too (_curate merges them below),
+        # so they stand on the same floor as in the new-memory path: the extension
+        # branch used to floor only the scribe's sentences, and an unbacked number
+        # in the CANDIDATE's belongs_because slipped into the memory under the mark.
+        cand_ann = " ".join(str(c.get(k) or "") for k in ANNOTATION_KEYS)
+        bad = final_surface_violations("\n".join([head, plain, " ".join(s_ann.values()), cand_ann]),
+                                       c["evidence"], c["classes"], allowed=date)
+        if bad:
+            _log(f"      ✗ extension surface fails the floor: {bad}")
+            return None
         text = head + "\n" + plain
         return {"slug": target, "title": "", "description": "", "extends": target,
                 "body": text.strip(), "kind": c.get("kind", "project"),
                 "evidence": c["evidence"], "classes": c["classes"],
                 "unverified_numbers": c.get("unverified_numbers", False),
                 "judgement": c.get("judgement", False),
-                "attributed_to_human": attributes_to_human(text, c["classes"]),
+                "routing_cues": c.get("routing_cues") or [],
+                "routing_cues_refused": c.get("routing_cues_refused") or {},
                 **self._curate(c, out or "")}
 
     # ── ⑥ stage ──────────────────────────────────────────────────────────
@@ -456,9 +524,17 @@ class Distiller:
     def _write_manifest(self, d: dict, source: str, key: str) -> str:
         manifest = {
             # 2: tags, the evidence each claiming tag rests on, the ones refused and
-            # why, and the three curation sentences. Additive — a v1 manifest is
-            # still read by everything that reads manifests.
-            "gate_version": 2,
+            # why, and the three curation sentences. 3: the composed text's numbers
+            # are re-verified against the evidence before staging. 4: the floor
+            # covers the whole model-written surface (title, trigger, section,
+            # curation sentences, and a judge's FIX before it is re-signed), with
+            # Unicode-normalised tokens and single digits verified. 5: the slug is
+            # part of the gated surface. 6: the mark signs the whole envelope —
+            # slug, kind, evidence-manifest digest and body — the judge never
+            # judges an unsigned draft, and pour verifies the manifest's bytes.
+            # Additive — a v1 manifest is still read by everything that reads
+            # manifests.
+            "gate_version": 6,
             "source_key": key,
             "source_file": os.path.basename(source),
             "source_sha256": self._source_digest(source),
@@ -477,6 +553,17 @@ class Distiller:
             "language": self.language,
             "created_at": datetime.now(timezone.utc).isoformat()[:19] + "Z",
         }
+        # Routing cues are their OWN schema version, never folded into gate_version:
+        # the envelope mark already binds the manifest's digest, and cue plumbing can
+        # evolve without re-touching the gate's number. memory_slug is the slug this
+        # provenance routes TO — set by code (compose/extends/covered), never by the
+        # model's proposal.
+        if d.get("routing_cues"):
+            manifest["memory_slug"] = d.get("slug") or d.get("extends")
+            manifest["routing_cues_version"] = 1
+            manifest["routing_cues"] = d["routing_cues"]
+            if d.get("routing_cues_refused"):
+                manifest["routing_cues_refused"] = d["routing_cues_refused"]
         blob = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=1)
         digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()
         path = os.path.join(self._evidence_dir(), f"{digest}.json")
@@ -501,18 +588,25 @@ class Distiller:
             return ""
 
     def stage(self, d: dict, source: str) -> str:
-        p = os.path.join(self.drafts_dir, f"{d['slug']}.md")
+        # Two candidates can compose to one slug (two Japanese titles reach the same
+        # fallback name, or two English ones sanitise alike), and staging straight to
+        # `<slug>.md` overwrote the draft already standing there — gate-passed work
+        # gone with nothing logged. The second draft takes a numbered name instead.
+        p = _free_path(self.drafts_dir, d["slug"])
+        staged = os.path.basename(p)[:-3]
         ev = "\n".join(f"  [{e['class']}] {e['text'][:300]}" for e in d["evidence"])
         flags = ""
         if d.get("unverified_numbers"):
             flags += "   ⚠️unbacked number"
-        if d.get("attributed_to_human"):
-            flags += "   🚫credits the human with no [USER] quote"
         if d.get("judgement"):
             flags += "   🧠the agent's judgement (not an outside fact)"
         if d.get("extends"):
             flags += f"   ↑extends {d['extends']}"
-        manifest = self._write_manifest(d, source, getattr(self, "_current_key", ""))
+        # An EXTENDS draft is named after the memory it appends to, so a numbered file
+        # name says nothing about the destination: provenance still routes to the
+        # memory the pour will extend, not to the file the draft happens to sit in.
+        manifest = self._write_manifest({**d, "slug": d.get("extends") or staged},
+                                        source, getattr(self, "_current_key", ""))
         cur = ""
         if d.get("tags"):
             cur += f"TAGS: {json.dumps(list(d['tags']), ensure_ascii=False)}\n"
@@ -528,9 +622,13 @@ class Distiller:
             f.write(f"<!-- distilled {datetime.now(timezone.utc).isoformat()[:19]}Z\n"
                     f"     source: {os.path.basename(source)}\n"
                     f"     kind: {d['kind']}   evidence classes: {','.join(d['classes'])}{flags}\n"
-                    f"     gate: {self._mark(body)}\n"
+                    f"     gate: {self._mark(staged, d['kind'], manifest, body)}\n"
                     f"     evidence_manifest: sha256:{manifest}\n"
                     f"     evidence:\n{ev}\n-->\n" + body)
+        # The mark signs the NAME, so the caller must hear the name that exists: a
+        # draft reported under the slug it wanted would be looked up, and poured,
+        # under a file that is not this one.
+        d["slug"] = staged
         return p
 
     # ── ⑦ pour ───────────────────────────────────────────────────────────
@@ -552,9 +650,35 @@ class Distiller:
     def _draft_body(raw: str) -> str:
         return re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S).strip()
 
-    def _mark(self, body: str) -> str:
-        return hmac.new(self._gate_key(), body.strip().encode("utf-8"),
+    def _mark(self, slug: str, kind: str, manifest: str, body: str) -> str:
+        # v6: the mark signs the ENVELOPE, not just the text. v5 bound the name
+        # (a renamed draft used to pour under a stolen identity); v6 also binds
+        # what KIND of memory this is (kind decides pinned status in the resident
+        # map — a header edit used to promote a memory without touching a signed
+        # byte) and WHICH evidence it claims to come from (a pointer swapped to a
+        # different, validly-hashed manifest used to forge provenance forever).
+        blob = f"gate-format-v6\n{slug}\n{kind}\n{manifest}\n{body.strip()}"
+        return hmac.new(self._gate_key(), blob.encode("utf-8"),
                         hashlib.sha256).hexdigest()[:32]
+
+    _ENV_KIND = re.compile(r"kind:\s*(\w+)")
+    _ENV_MAN = re.compile(r"evidence_manifest:\s*sha256:([0-9a-f]{64})")
+    _ENV_MARK = re.compile(r"gate:\s*([0-9a-f]{32})")
+
+    def _envelope_of(self, raw: str) -> tuple[str, str, str] | None:
+        """(kind, manifest_hex, mark) from a draft's header — None if any is absent."""
+        head = raw.split("-->")[0]
+        k = self._ENV_KIND.search(head)
+        m = self._ENV_MAN.search(head)
+        g = self._ENV_MARK.search(head)
+        return (k.group(1), m.group(1), g.group(1)) if (k and m and g) else None
+
+    def _draft_mark_valid(self, slug: str, raw: str) -> bool:
+        env = self._envelope_of(raw)
+        if env is None:
+            return False
+        kind, man, mark = env
+        return hmac.compare_digest(mark, self._mark(slug, kind, man, self._draft_body(raw)))
 
     def pour(self, slug: str) -> dict:
         # A draft is named by a bare slug. Joined as a path, `../../../out/o` read a file
@@ -565,13 +689,23 @@ class Distiller:
         if not os.path.exists(p):
             return {"ok": False, "why": "no such draft"}
         raw = open(p, encoding="utf-8").read()
+        # The distiller no longer writes this flag: the final-surface floor refuses a
+        # composed text that credits the human before a draft can ever be staged. It
+        # stays here for the drafts the floor never saw — one written by hand into the
+        # directory, or one carried over from an older distiller — because the answer
+        # to "should this be a memory?" must not depend on which version staged it.
         if "🚫" in raw.split("-->")[0]:
             return {"ok": False, "why": "credits the human with no [USER] evidence; not poured"}
-        m = re.search(r"gate:\s*([0-9a-f]{32})", raw.split("-->")[0])
-        if not m or not hmac.compare_digest(m.group(1), self._mark(self._draft_body(raw))):
+        if not self._draft_mark_valid(slug, raw):
             return {"ok": False,
                     "why": "this draft carries no valid gate mark — it was not staged by "
-                           "the distiller, or its body was edited afterwards"}
+                           "the distiller, or its name, kind, manifest or body was "
+                           "edited afterwards"}
+        env = self._envelope_of(raw)
+        if env and self.store.load_manifest_verified(env[1]) is None:
+            return {"ok": False,
+                    "why": "the evidence manifest this draft claims is missing or "
+                           "tampered — provenance must exist before the memory does"}
         body = re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S)
         kind = re.search(r"kind:\s*(\w+)", raw)
         head, add = _split_draft(body)
@@ -610,6 +744,27 @@ class Distiller:
         if r.get("ok"):
             os.rename(p, p + ".poured")
             self._store_text = None
+            # The route becomes real only now that the memory does. A staged draft
+            # carried its cues as provenance; a TOSSed or quarantined one never
+            # reaches this line, so no unpoured draft can grow a route. A receipt
+            # that cannot be minted does NOT fail the pour — but it is never
+            # silent: the result says so.
+            cue_receipt = "none"
+            if man:
+                hexd = man.group(1).split("sha256:", 1)[-1]
+                vm = self.store.load_manifest_verified(hexd)
+                if vm and vm.get("routing_cues"):
+                    from ..cues import CueLedger
+                    res = CueLedger(self.store).issue(
+                        memory_slug=slug_out,
+                        evidence_manifest=f"sha256:{hexd}",
+                        routing_cues=vm["routing_cues"],
+                        accepted_via="extends" if head.get("EXTENDS") else "new")
+                    cue_receipt = "issued" if res["ok"] else f"failed: {res['why']}"
+                    if not res["ok"]:
+                        _log(f"  ⚠ cue receipt refused for {slug_out} — {res['why']}")
+            if cue_receipt != "none":
+                r["cue_receipt"] = cue_receipt
         # `created` already means "the file did not exist"; naming the slug here too
         # overwrote that answer with a string.
         return {**r, "poured_into": slug_out, "extended": bool(head.get("EXTENDS"))}
@@ -619,21 +774,40 @@ class Distiller:
         head = raw.split("-->")[0]
         body = re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S).strip()
         slug = os.path.basename(path)[:-3]
-        if "🚫" in head:
-            return {"slug": slug, "verdict": "TOSS",
-                    "why": "credits the human with no [USER] evidence (gate refused)"}
+        judged_sha = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        # ask() collapses every infrastructure failure to None (unreachable, timeout,
+        # HTTP error). Judging on "" would read "the model was down" as "the scribe
+        # did not keep the shape" — a TOSS that DELETES a gate-passed draft. No
+        # answer is not a verdict.
         out = self.scribe(prompts.POUR_SYS,
                           f"=== DRAFT: {slug} ===\n{body}\n\n"
                           f"=== EVIDENCE AND FLAGS (set by the distiller) ===\n{head}", 1600)
+        if not (out or "").strip():
+            return {"slug": slug, "verdict": "SKIP", "judged_sha": judged_sha,
+                    "why": "the scribe was unreachable or answered nothing — not a verdict"}
         first = (out.splitlines() or [""])[0].upper()
         v = next((x for x in ("POUR", "FIX", "TOSS") if x in first), None)
         why = (re.search(r"^reason[:：]\s*(.+)$", out, re.M | re.I) or [None, ""])[1] if v else ""
         m = re.search(r"^BODY:\s*\n(.*)$", out, re.S | re.M)
         bb = re.search(r"^BELONGS_BECAUSE:\s*(.+)$", out.split("BODY:", 1)[0], re.M)
-        return {"slug": slug, "verdict": v or "TOSS",
+        return {"slug": slug, "verdict": v or "TOSS", "judged_sha": judged_sha,
                 "why": (why or "the scribe did not keep the shape")[:160],
                 "new_body": m.group(1).strip() if m else None,
                 "belongs_because": bb.group(1).strip() if bb else None}
+
+    def _manifest_evidence(self, draft_raw: str) -> tuple[list[dict] | None, list[str]]:
+        """The draft's FULL evidence, from its content-addressed manifest.
+
+        The header's own evidence lines are truncated for human eyes (300 chars);
+        re-verification needs the real quotes, and the manifest has them. No
+        manifest, no re-signing — fail closed."""
+        m = re.search(r"evidence_manifest:\s*sha256:([0-9a-f]{64})", draft_raw)
+        if not m:
+            return None, []
+        man = self.store.load_manifest_verified(m.group(1))
+        if man is None:
+            return None, []
+        return list(man.get("quotes") or []), list(man.get("evidence_classes") or [])
 
     def drain(self, limit: int = 0) -> dict:
         ds = sorted(glob.glob(os.path.join(self.drafts_dir, "*.md")))
@@ -641,11 +815,64 @@ class Distiller:
             ds = ds[:limit]
         if not ds:
             return {"ok": True, "why": "no drafts"}
+        # The judge must never be a mint: a draft whose mark is invalid for its
+        # CURRENT name (renamed, or header-edited) is not judged at all — a FIX
+        # re-signs, and re-signing laundered a stolen identity into a valid one.
+        signed, pre_quarantined = [], []
+        for pth in ds:
+            s0 = os.path.basename(pth)[:-3]
+            raw0 = open(pth, encoding="utf-8").read()
+            if self._draft_mark_valid(s0, raw0):
+                signed.append(pth)
+                continue
+            # Mechanically, without a model: judging an unsigned draft would let a
+            # FIX mint a fresh mark for a stolen name — the judge must never be a
+            # mint. And an invalid mark means "origin unprovable", not "content
+            # unwanted" — so the draft is QUARANTINED, never destroyed: moved
+            # aside atomically where nothing judges, fixes or pours it, but a
+            # person can still look.
+            qdir = os.path.join(self.still, "quarantine")
+            os.makedirs(qdir, exist_ok=True)
+            qp = _free_path(qdir, s0)
+            os.replace(pth, qp)
+            with open(os.path.join(self.still, "tossed.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps({"slug": s0, "verdict": "QUARANTINE",
+                                    "why": "no valid mark for its current name/kind/manifest",
+                                    "moved_to": qp,
+                                    "at": datetime.now(timezone.utc).isoformat()[:19]},
+                                   ensure_ascii=False) + "\n")
+            pre_quarantined.append(s0)
+            _log(f"  ⊘ quarantine {s0} — no valid mark for its current name; never judged")
+        ds = signed
+        if not ds:
+            return {"ok": True, "poured": 0, "fixed": 0, "tossed": 0,
+                    "quarantined": len(pre_quarantined),
+                    "left": len(glob.glob(os.path.join(self.drafts_dir, "*.md")))}
         _log(f"drain: {len(ds)} drafts, {self.slots} at a time")
         poured, fixed, tossed = [], [], []
+        skipped, unparsed = [], []          # not verdicts: left staged, loudly
+        quarantined = pre_quarantined
         with ThreadPoolExecutor(max_workers=self.slots) as pool:
             for j in pool.map(self.judge_draft, ds):
                 p = os.path.join(self.drafts_dir, j["slug"] + ".md")
+                # The verdict binds the BYTES that were judged: another drain may
+                # have fixed this draft while the model thought. Moved → next drain.
+                try:
+                    now_sha = hashlib.sha256(open(p, encoding="utf-8").read()
+                                             .encode("utf-8")).hexdigest()
+                except OSError:
+                    _log(f"  ⚠ {j['slug']} vanished while judged; skipping")
+                    continue
+                if j.get("judged_sha") and now_sha != j["judged_sha"]:
+                    _log(f"  ⚠ {j['slug']} moved while judged; verdict discarded")
+                    continue
+                if j["verdict"] == "SKIP":
+                    # The judge could not judge (unreachable or empty): the draft
+                    # stays exactly as staged for the next drain. Deleting on an
+                    # infrastructure failure is how a quiet outage empties the queue.
+                    _log(f"  ⏸ skip  {j['slug']} — {j['why'][:70]}")
+                    skipped.append(j["slug"])
+                    continue
                 if j["verdict"] == "TOSS":
                     with open(os.path.join(self.still, "tossed.jsonl"), "a", encoding="utf-8") as f:
                         f.write(json.dumps({**j, "at": datetime.now(timezone.utc).isoformat()[:19],
@@ -655,7 +882,15 @@ class Distiller:
                     tossed.append(j["slug"])
                     _log(f"  ✗ toss {j['slug']} — {j['why'][:70]}")
                     continue
-                if j["verdict"] == "FIX" and j.get("new_body"):
+                if j["verdict"] == "FIX":
+                    if not j.get("new_body"):
+                        # A FIX whose BODY section did not parse is NOT a POUR: the
+                        # judge said part of the text goes beyond the evidence, and
+                        # pouring the draft as staged would file exactly that part.
+                        # It stays staged for the next drain to judge cold.
+                        _log(f"  ⚠ fix unparsed {j['slug']} — no BODY: section; left staged")
+                        unparsed.append(j["slug"])
+                        continue
                     raw = open(p, encoding="utf-8").read()
                     # Every header line survives a FIX, not just the first one: keeping
                     # only TITLE dropped DESC, and the memory poured with its slug as
@@ -665,9 +900,21 @@ class Distiller:
                         hd["BELONGS_BECAUSE"] = j["belongs_because"]
                     keep_head = [f"{k}: {v}" for k, v in hd.items()]
                     body = ("\n".join(keep_head) + "\n\n" if keep_head else "") + j["new_body"] + "\n"
-                    # The scribe rewrote the body with the evidence in front of it, so it
-                    # is still gated — but the mark has to follow the text it signs.
-                    keep = re.sub(r"gate:\s*[0-9a-f]{32}", f"gate: {self._mark(body)}",
+                    # The judge is the LAST model to touch this text, so the door
+                    # stands behind it too: the mark is a proof of having passed the
+                    # floor, and a FIX that cannot pass does not get re-signed — the
+                    # draft stays as staged, for the next drain to judge cold.
+                    ev, classes = self._manifest_evidence(raw)
+                    if ev is None:
+                        _log(f"  ⚠ fix refused {j['slug']} — no readable evidence manifest")
+                        continue
+                    bad = final_surface_violations(f"{j['slug']}\n{body}", ev, classes)
+                    if bad:
+                        _log(f"  ⚠ fix refused {j['slug']} — {'; '.join(bad)[:90]}")
+                        continue
+                    env = self._envelope_of(raw)
+                    keep = re.sub(r"gate:\s*[0-9a-f]{32}",
+                                  f"gate: {self._mark(j['slug'], env[0], env[1], body)}",
                                   raw.split("-->")[0]) + "-->\n"
                     open(p, "w", encoding="utf-8").write(keep + body)
                     fixed.append(j["slug"])
@@ -679,6 +926,8 @@ class Distiller:
                 else:
                     _log(f"  ⚠ not poured {j['slug']} — {r.get('why') or r.get('error')}")
         return {"ok": True, "poured": len(poured), "fixed": len(fixed), "tossed": len(tossed),
+                "quarantined": len(quarantined), "skipped": len(skipped),
+                "fix_unparsed": len(unparsed),
                 "left": len(glob.glob(os.path.join(self.drafts_dir, "*.md")))}
 
     # ── ⑧ index hygiene ──────────────────────────────────────────────────
@@ -716,28 +965,59 @@ class Distiller:
         if not targets:
             return {"ok": True, "why": "no ragged index lines"}
         _log(f"tidy: {len(targets)} ragged lines (fixing up to {limit})")
-        fixed = 0
+        repl: list[tuple[str, str, str, str]] = []
         for i, slug, why in targets[:limit]:
             body = self.store.read(slug)[:6000]
             if not body:
                 continue
             out = self.scribe(prompts.TIDY_SYS,
                               f"slug: {slug}\nwhat is wrong with the current line: {why}\n\n"
-                              f"=== THE MEMORY ===\n{body}", 300)
+                              f"=== THE MEMORY ===\n{body}", 300) or ""
             mt = re.search(r"^TITLE:\s*(.+)$", out, re.M)
             md = re.search(r"^DESC:\s*(.+)$", out, re.M)
             if not (mt and md):
                 continue
-            lines[i] = f"- [{mt.group(1).strip()[:40]}]({slug}.md) — {md.group(1).strip()[:200]}"
-            fixed += 1
-            _log(f"  ✎ {slug} — {why}")
-        if fixed:
-            # Under the store lock and through the atomic replace, like every other
-            # index write: a bare open() here could interleave with a pour and drop
-            # the line it was adding, or leave a half-written index after a crash.
+            # This is the only path that puts model prose into the canonical index,
+            # and the index feeds recall AND the resident map — so it wears the same
+            # numeric floor as every other model-written surface. The memory itself
+            # (plus the line being replaced) is the evidence.
+            derived = mt.group(1) + "\n" + md.group(1)
+            bad = composed_number_violations(derived, [{"text": body}, {"text": lines[i]}])
+            if attributes_to_human(derived, []) and not attributes_to_human(
+                    body + " " + lines[i], []):
+                bad = bad + ["credits the human where the memory does not"]
+            if bad:
+                _log(f"  ⚠ tidy refused {slug} — {bad}")
+                continue
+            repl.append((lines[i],
+                         f"- [{mt.group(1).strip()[:40]}]({slug}.md) — {md.group(1).strip()[:200]}",
+                         slug, why, body))
+        fixed = skipped_stale = 0
+        if repl:
+            # The model calls above ran on a SNAPSHOT, and a pour may have landed
+            # meanwhile — writing the snapshot back would erase its line (the exact
+            # `not_in_index` wound doctor keeps finding). So: re-read under the
+            # lock and merge line by line; a target line that no longer exists as
+            # read is stale and is skipped, never guessed at.
             with self.store._locked():
-                self.store._write_index("\n".join(lines) + "\n")
-        return {"ok": True, "fixed": fixed, "still_ragged": len(targets) - fixed}
+                cur = self.store.index_text().splitlines()
+                for old_line, new_line, slug, why, body_snap in repl:
+                    if self.store.read(slug)[:6000] != body_snap:
+                        skipped_stale += 1
+                        _log(f"  ⚠ tidy skipped {slug} — the memory changed while the model wrote")
+                        continue
+                    try:
+                        cur[cur.index(old_line)] = new_line
+                    except ValueError:
+                        skipped_stale += 1
+                        _log(f"  ⚠ tidy skipped {slug} — the line moved while the model wrote")
+                        continue
+                    fixed += 1
+                    _log(f"  ✎ {slug} — {why}")
+                if fixed:
+                    self.store._write_index("\n".join(cur) + "\n")
+        return {"ok": True, "fixed": fixed, "skipped_stale": skipped_stale,
+                "still_ragged": len(targets) - fixed}
 
     # ── the pass ─────────────────────────────────────────────────────────
     def files(self, session: str | None = None) -> list[str]:
@@ -771,9 +1051,10 @@ class Distiller:
         c = self.marks.claim(self.files(session), self.chunk_chars, MIN_DRINK)
         if not c:
             return None
-        path, start, src, reserved = c
+        path, start, bound_end, src = c
         report = IntakeReport()
-        segs, nxt = src.sip(path, start, self.chunk_chars, until=reserved, report=report)
+        segs, nxt = call_sip(src, path, start, self.chunk_chars,
+                             report=report, bound_end=bound_end)
         self.marks.advance(src.key(path), nxt)
         self._emit_intake(path, report)
         return segs, path, src.key(path)
@@ -781,7 +1062,6 @@ class Distiller:
     def _emit_intake(self, path: str, report: IntakeReport) -> None:
         """One bounded summary per sip. A diagnostic must never break a pass,
         print evidence text, or grow without a cap — samples already are."""
-        self._intake_skipped = dict(report.skipped)
         if not report.skipped:
             return
         try:
@@ -812,6 +1092,7 @@ class Distiller:
 
     def run(self, session: str | None = None, chunks: int = 1) -> dict:
         made, killed, covered, sown, recurred = [], 0, 0, 0, 0
+        cue_receipts = cue_receipt_failures = 0
         for _ in range(chunks):
             got = self.sip_one(session)
             if not got:
@@ -856,6 +1137,34 @@ class Distiller:
                         _log(f"      ↺ recurred: {target}")
                     elif rec != "already":
                         _log(f"      · not marked recurred — {rec}")
+                    if c.get("routing_cues") and target in self.store.slug_set():
+                        # Memory novelty is COVERED; ROUTING novelty may still be NEW:
+                        # the store already says this, but the human just used a word
+                        # for it the store had never heard. The cue and its provenance
+                        # are recorded against the EXISTING slug (code-chosen, never
+                        # the model's) — and nothing else moves: no memory body, no
+                        # index line, not one canonical byte. The RECEIPT is what makes
+                        # it a route; the manifest alone is provenance, not authority.
+                        mdigest = self._write_manifest(
+                            {"slug": target, "kind": c.get("kind"),
+                             "evidence": c["evidence"], "classes": c["classes"],
+                             "routing_cues": c["routing_cues"],
+                             "routing_cues_refused": c.get("routing_cues_refused") or {}},
+                            path, key)
+                        from ..cues import CueLedger
+                        res = CueLedger(self.store).issue(
+                            memory_slug=target, evidence_manifest=f"sha256:{mdigest}",
+                            routing_cues=c["routing_cues"], accepted_via="covered")
+                        if res["ok"]:
+                            cue_receipts += 1
+                            _log(f"      ⇢ cue kept for COVERED {target}: "
+                                 f"{[x['text'] for x in c['routing_cues']]}")
+                        else:
+                            # A route that cannot be minted is silence — but never
+                            # silent ABOUT it: the run's numbers and log both say so.
+                            cue_receipt_failures += 1
+                            _log(f"      ⚠ cue receipt refused for COVERED {target} — "
+                                 f"{res['why']}")
                     with open(os.path.join(self.still, "dropped.jsonl"), "a", encoding="utf-8") as f:
                         f.write(json.dumps({**{k: v for k, v in c.items() if k != "evidence"},
                                             "why_dropped": f"COVERED by {target}", "reason": why,
@@ -888,15 +1197,16 @@ class Distiller:
                 "candidates": len(cands), "gated_kept": len(kept),
                 "gated_dropped": len(dropped), "ideas": len(ideas),
                 "covered": covered, "recurred": recurred, "drafts": drafted,
+                "cue_receipts": cue_receipts, "cue_receipt_failures": cue_receipt_failures,
                 "draft_chars": draft_chars,
                 "draft_tokens_est": estimate("\n".join(draft_text)),
                 "index_tokens_est": estimate(self.store.index_text()),
-                "intake_skipped": getattr(self, "_intake_skipped", {}),
             })
         if not made and not killed and not covered and not sown:
             return {"ok": True, "why": "nothing worth drinking"}
         return {"ok": True, "drafts": made, "dropped": killed, "covered": covered,
-                "recurred": recurred, "seeds": sown}
+                "recurred": recurred, "seeds": sown,
+                "cue_receipts": cue_receipts, "cue_receipt_failures": cue_receipt_failures}
 
     def night(self, idle_min: float = 20.0, poll_s: float = 30.0) -> None:
         """Run a pass whenever the journals have been quiet long enough. Never gets in

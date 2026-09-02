@@ -34,10 +34,26 @@ Two bugs from the original implementation are fixed here, both of which failed s
 2. **The cloth does not live in the store.** Written next to the memories it was picked
    up as a memory itself (it appeared in `doctor` as an unindexed one). It belongs in
    `_still/`, which is the workshop and is never walked.
+
+A third failure is guarded against by construction rather than fixed after the fact:
+**the source may move while the loom is busy.** `weave()` reads the index once, then
+spends model time on triggers; a memory poured meanwhile is missing from the cloth, yet
+the cloth's mtime ends up NEWER than the index — so any mtime-based staleness test calls
+the stale cloth fresh, and pay-forward bakes the stale map into KV. So the weave records
+the sha256 of the index text it read, `persist()` re-hashes the index under the store's
+write lock and refuses a cloth whose source has moved, and `is_stale()` compares hashes,
+never mtimes — of the source AND of the cloth itself, so a corrupted or hand-edited
+cloth cannot wear a valid freshness stamp. And because the weave's real input is wider
+than the index text — `layer_of()` reads memory types and body dates too — the store's
+revision counter is captured beside the hash: a body-only change leaves the index
+byte-identical and slips any hash, but it bumps the revision. The record lives in a
+sidecar (`<cloth>.state.json`), not in the cloth text: the injected map must stay
+byte-stable and free of anything volatile.
 """
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -67,12 +83,26 @@ DEFAULT_TRIGGER_TOKENS = 24
 # code that wrote it", so without a version the trimmer can be improved and nothing
 # happens. Observed exactly that: a fix for dropped ★ markers changed nothing until the
 # ledger was invalidated.
-LEDGER_VERSION = 5
+LEDGER_VERSION = 10   # 10: hooks face the adaptive floors (9: the file is marked)
+
+# The hooks file carries the cue ledger's mark (cues.py `_mark`): HMAC over the
+# canonical payload with the store's gate key. It used to be plain JSON, so a hook
+# line edited by hand reached the production cloth on the next weave. A file whose
+# mark does not verify is treated as EMPTY — every hook regenerated — never
+# partially trusted. The prefix domain-separates these marks from the cue ledger's.
+HOOKS_MARK_PREFIX = "hook-ledger-v1"
 
 # Markers that carry the point of a line. A trimmer that drops them keeps the words and
 # loses the meaning: ⚠️ says "this will bite you again", ★ says "this is the important
 # one". They cost one character and are the highest-value signal in the format.
 MARKERS = ("⚠", "★")
+# Where the mechanical trimmer may end its opening clause. The ASCII "." used to sit
+# in the same character class as 。 and ；, so it also matched the point inside a decimal:
+# "the bake took 796.5 seconds" was cut to "the bake took 796." and the trigger claimed
+# a measurement — 796, and then 5 from the leftovers — that the memory never contained.
+# A period ends a clause only when it is not holding a number together, so it counts
+# only with a non-digit before it and whitespace or the end of the line after.
+CLAUSE_END = re.compile(r"(?<=[。;；])\s*|(?<=\.)(?<!\d\.)(?:\s+|$)|\s+—\s+|\s+/\s+")
 DEFAULT_FRESH_DAYS = 14.0
 DEFAULT_PINNED_TYPES = ("feedback", "user")
 BACKUPS_KEPT = 20
@@ -106,6 +136,15 @@ Write it in the same language as the input."""
 
 def _sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+
+def _sha256(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _canon(obj) -> str:
+    """One deterministic serialisation for hashing and signing (same as cues._canon)."""
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 class WeaveError(RuntimeError):
@@ -151,6 +190,9 @@ class Loom:
         self.verbatim_after = verbatim_after
         self.backups = int(backups)
         self.out_path = out_path or os.path.join(store.still, "index.woven.md")
+        # Which canonical index the cloth on disk was verified against — a sidecar,
+        # because nothing volatile may ride inside the injected map itself.
+        self.state_path = self.out_path + ".state.json"
         self.hooks_path = os.path.join(store.still, "hooks.json")
         self.bulk_touch_share = float(bulk_touch_share)
         self._bulk: set[str] | None = None
@@ -238,19 +280,34 @@ class Loom:
         return "trigger"
 
     # ── the hook ledger: why this is cheap in the steady state ───────────
+    def _hooks_mark(self, payload: dict) -> str:
+        return hmac.new(self.store.gate_key(),
+                        (HOOKS_MARK_PREFIX + _canon(payload)).encode("utf-8"),
+                        hashlib.sha256).hexdigest()
+
     def _hooks(self) -> dict:
         try:
             with open(self.hooks_path, encoding="utf-8") as f:
                 d = json.load(f)
-            return d if isinstance(d, dict) else {}
         except (OSError, ValueError):
             return {}
+        # Marked like the cue ledger: a file is trusted only when its mark
+        # verifies. Missing, malformed, unmarked (the old plain dict) or
+        # mis-marked (a hook line edited by hand) all read as EMPTY — the whole
+        # ledger is regenerated; it is never partially trusted.
+        if isinstance(d, dict) and isinstance(d.get("payload"), dict) \
+                and isinstance(d.get("mark"), str) \
+                and hmac.compare_digest(self._hooks_mark(d["payload"]), d["mark"]):
+            return d["payload"]
+        return {}
 
     def _save_hooks(self, hooks: dict) -> None:
+        blob = json.dumps({"payload": hooks, "mark": self._hooks_mark(hooks)},
+                          ensure_ascii=False, indent=1, sort_keys=True)
         os.makedirs(self.store.still, exist_ok=True)
         tmp = self.hooks_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(hooks, f, ensure_ascii=False, indent=1, sort_keys=True)
+            f.write(blob)
         os.replace(tmp, self.hooks_path)
 
     # ── mechanical trimming (the no-model path) ──────────────────────────
@@ -262,10 +319,19 @@ class Loom:
         # The unit must not be followed by another letter. Without that guard
         # "3.7 seed" is read as "3.7 s" and rewritten as "3.7s" — the trimmer inventing
         # a measurement that was never taken, which is the one thing it must never do.
+        # The guard was there and inert: written `{unit}?`, the `?` bound to the trailing
+        # lookahead — so the unit was compulsory and its guard optional, exactly inverted,
+        # and "3.7 seed" did come back as "3.7s" and "796.5 seconds" as "796.5s". The
+        # unit stays compulsory (a bare digit out of "FP16" is noise, not a measurement);
+        # what it needed was for its own guard to bind to it.
         unit = r"(?:t/s|tok/s|GB|GiB|MB|KiB|TB|%|倍|秒|枚|層|件|ms|s|B)(?![A-Za-z])"
-        for m in re.finditer(rf"\d+(?:\.\d+)?\s*{unit}?"
-                             rf"(?:\s*(?:→|->)\s*\d+(?:\.\d+)?\s*{unit}?)?", norm):
-            frag = re.sub(r"\s+", "", m.group(0))
+        for m in re.finditer(rf"\d+(?:\.\d+)?\s*{unit}"
+                             rf"(?:\s*(?:→|->)\s*\d+(?:\.\d+)?\s*{unit})?", norm):
+            # Collapse runs of whitespace, never remove them: gluing turned "12.5 GB"
+            # into "12.5GB", re-binding the number to a unit it never wore — the exact
+            # lie the adaptive floors refuse, which left the canonical line as the only
+            # honest fallback and the trigger never shortened at all.
+            frag = re.sub(r"\s+", " ", m.group(0))
             if len(frag) > 1:
                 out.append(frag)
         out += re.findall(r"[A-Za-z][A-Za-z0-9_+./-]{2,24}", text)
@@ -291,6 +357,27 @@ class Loom:
     # damage, and a damaged line makes the reader distrust the whole map.
     _BREAKS = "。、．，・/｜|)）」』〕 \t"
 
+    # A number is one token even though it contains punctuation. A cut that lands
+    # inside it leaves half a number — "796.5" becomes "796." — and the trimmer has
+    # reported a measurement nobody took. The span mirrors the numeric floor's own token
+    # shape (`gate._SCI_OR_NUM`) on purpose: the floor reads "107.7/8" as ONE claim, so a
+    # trim that keeps only "107.7" is an invention by the floor's reckoning and would be
+    # thrown away downstream. The trailing digit is required, so a sentence-ending
+    # "796." keeps its period.
+    _NUMBER = re.compile(r"\d+(?:\.\d+)?[eE][+-]?\d+|\d[\d,.:/-]*\d|\d")
+
+    @classmethod
+    def _off_number(cls, text: str, cut: int) -> int:
+        """Move `cut` off the middle of a number: back to where the number starts, or —
+        when that would leave nothing at all — forward past its end. Over budget is a
+        cost; half a number is a lie."""
+        for m in cls._NUMBER.finditer(text):
+            if m.start() >= cut:
+                break
+            if cut < m.end():
+                return m.end() if not text[:m.start()].strip() else m.start()
+        return cut
+
     @classmethod
     def _soft_cut(cls, text: str, limit: int) -> str:
         """Cut to `limit`, backing up to the nearest break in the last fifth of it."""
@@ -299,7 +386,8 @@ class Loom:
         hard = text[:limit]
         floor = int(limit * 0.8)
         best = max((hard.rfind(ch) for ch in cls._BREAKS), default=-1)
-        return (hard[:best + 1] if best >= floor else hard).rstrip(cls._BREAKS + "-—")
+        cut = cls._off_number(text, best + 1 if best >= floor else limit)
+        return text[:cut].rstrip(cls._BREAKS + "-—")
 
     @classmethod
     def _balance(cls, text: str) -> str:
@@ -319,16 +407,18 @@ class Loom:
                 cut = min(cut, first_unclosed)
         return text[:cut].rstrip(" 、,/-—・(（[「『〔")
 
-    def _mechanical(self, desc: str) -> str:
+    def _mechanical(self, desc: str, title: str = "") -> str:
         """Trim without a model: keep the opening clause, then append salient fragments
         while the budget lasts. Never returns empty — a blank line drops the memory off
         the map entirely, which is far worse than a mediocre trigger."""
+        from .distill.gate import composed_number_violations
+        raw = re.sub(r"\s+", " ", desc).strip()
         clean = re.sub(r"\s+", " ", desc.replace("**", "")).strip()
         if estimate(clean) <= self.trigger_tokens:
             return clean
         limit = self._char_budget(clean)
         # Cut at the first clause boundary that still leaves something substantial.
-        head = re.split(r"(?<=[。.;；])\s*|(?:\s+—\s+)|(?:\s+/\s+)|(?:。)", clean)[0].strip()
+        head = CLAUSE_END.split(clean)[0].strip()
         if len(head) > limit or len(head) < min(12, limit):
             head = self._soft_cut(clean, limit)
         keep, used = [head], len(head)
@@ -337,7 +427,19 @@ class Loom:
                 continue
             keep.append(frag)
             used += len(frag) + 1
-        return self._balance(self._soft_cut(" ".join(keep), limit))
+        # A model-written trigger has to clear the numeric floor in `_acceptable` before
+        # it is worn; this fallback never went through that door, so a number the trim
+        # composed by accident landed on the resident map unchecked and pay-forward
+        # baked it into KV. Same floor, same source. A trim that cannot clear it is not
+        # patched up but abandoned for a wider one, and the last rung is the line itself:
+        # over budget, and made of nothing that was not already in the memory.
+        source = [{"text": f"{title} {desc}"}]
+        for cand in (self._balance(self._soft_cut(" ".join(keep), limit)),
+                     self._balance(head), clean, raw):
+            cand = cand.strip()
+            if cand and not composed_number_violations(cand, source):
+                return cand
+        return raw
 
     # ── quality bar ──────────────────────────────────────────────────────
     # Character 2-grams at 0.70, chosen by measurement rather than taste. On seven real
@@ -388,6 +490,21 @@ class Loom:
             return False
         if t.strip("*`★⚠️ 　").lower() == title.strip().lower():
             return False        # saying the title twice wastes the only line we get
+        # The trigger is worn on every turn and baked into KV by pay-forward: a
+        # one-digit swap ("12 GPUs"→"99 GPUs") keeps most of its 2-grams and walks
+        # over the overlap floor, so numbers get the same deterministic floor as
+        # every other model-written surface. Canonical memory right, worn memory
+        # wrong is a failure mode of its own.
+        from .distill.gate import attributes_to_human, composed_number_violations
+        if composed_number_violations(t, [{"text": f"{title} {desc}"}]):
+            return False
+        # The same floor for attribution: a trigger that credits the human with a
+        # decision the source line never credited manufactures authority out of
+        # compression — and is then worn on every turn. Rejected exactly like an
+        # invented number, and the mechanical trimmer takes over. A source that
+        # already credits the human may keep a crediting trigger.
+        if attributes_to_human(t, []) and not attributes_to_human(f"{title} {desc}", []):
+            return False
         if desc:
             return self._grounded(t, desc)
         # No source to compare against: fall back to the old specificity heuristic, now
@@ -421,19 +538,36 @@ class Loom:
                         desc, self._balance(self._soft_cut(cand, self._char_budget(desc))))
                 if self._acceptable(cand, title, desc):
                     return cand, True
-        return self._keep_markers(desc, self._mechanical(desc)), False
+        return self._keep_markers(desc, self._mechanical(desc, title)), False
 
     # ── weaving ──────────────────────────────────────────────────────────
-    def weave(self, generate: bool = True) -> Cloth:
+    def weave(self, generate: bool = True, triggers: dict[str, str] | None = None) -> Cloth:
         """Build the cloth. `generate=False` reports what the current ledger would give
         without calling a model — that is what `status` uses, so asking the loom how big
-        the cloth is never costs a GPU second."""
+        the cloth is never costs a GPU second.
+
+        `triggers` (slug → text) is worn INSTEAD of the ledger for the trigger layer —
+        the adaptive shadow's shortest-safe cues, once a benchmark has earned them
+        (`adaptive_apply`), or a resident-map variant for that benchmark. The ledger
+        is not written from it, and the postcondition below still applies to it."""
+        # The revision is captured BEFORE the index is read: a mutation landing in
+        # between then shows as revision-moved at persist time, which is the safe
+        # direction (a refused persist costs one re-weave; a missed one costs a lie).
+        from . import floors  # lazy: floors.py imports DEAD_WORDS/MARKERS from here
+        revision = self.store.revision()
         raw = self.store.index_text()
         hooks = self._hooks()
         now = time.time()
+        # The hash of the exact index text this cloth is woven from, and the store
+        # revision it was woven at. `persist()` verifies both again, under the store
+        # lock, before writing: a memory poured while the loom is busy on triggers
+        # must not vanish under a cloth that then looks fresher than the index — and
+        # a body or type change (which `layer_of` reads) leaves the index text
+        # byte-identical, so only the revision can see it.
         stats = {"pinned": 0, "fresh": 0, "trigger": 0, "passthrough": 0, "grouped": 0,
                  "hooks_reused": 0, "hooks_written": 0, "hooks_mechanical": 0,
-                 "llm_calls": 0}
+                 "llm_calls": 0, "source_sha256": _sha256(raw),
+                 "source_revision": revision}
         dirty = False
         verbatim = False
         out: list[str] = []
@@ -459,6 +593,10 @@ class Loom:
                 continue
 
             stats["trigger"] += 1
+            if triggers is not None and triggers.get(slug):
+                stats["overridden"] = stats.get("overridden", 0) + 1
+                out.append(f"{bullet}[{title}]({slug}.md) — {triggers[slug]}")
+                continue
             entry = hooks.get(slug) if isinstance(hooks.get(slug), dict) else None
             # Reuse is keyed on the description's hash AND the budget it was written for.
             # Hashing only the description looks right and is wrong: changing
@@ -475,15 +613,30 @@ class Loom:
             if not generate:
                 out.append(f"{bullet}[{title}]({slug}.md) — "
                            + (entry["hook"] if entry and entry.get("hook")
-                              else self._mechanical(desc)))
+                              else self._mechanical(desc, title)))
                 continue
             trigger, from_model = self._make_trigger(title, desc)
             stats["hooks_written"] += 1
             if not from_model:
                 stats["hooks_mechanical"] += 1
+            # The hook faces the adaptive floors before it is worn: the production
+            # ledger wore `d62189` for `6d62189` and ★ on lines that never had them
+            # (19/67 memories, measured 2026-09-02). On a violation the mechanical trim
+            # gets its chance; if that lies too, the canonical line is worn as-is.
+            # A cut that lies is never worn.
+            floor = floors.first_violation(trigger, title, desc, self)
+            canonical = False
+            if floor is not None:
+                mech = self._keep_markers(desc, self._mechanical(desc, title))
+                if floors.first_violation(mech, title, desc, self) is None:
+                    trigger, from_model = mech, False
+                else:
+                    trigger, from_model, canonical = desc, False, True
             hooks[slug] = {"hook": trigger, "title": title, "desc_sha1": _sha1(desc),
                            "tokens": self.trigger_tokens, "v": LEDGER_VERSION,
-                           "by": "model" if from_model else "mechanical"}
+                           "floor": floor,
+                           "by": ("canonical" if canonical else
+                                  "model" if from_model else "mechanical")}
             dirty = True
             out.append(f"{bullet}[{title}]({slug}.md) — {trigger}")
 
@@ -574,13 +727,53 @@ class Loom:
 
     def persist(self, cloth: Cloth) -> dict:
         """Put an already-woven cloth on disk, atomically, keeping a few generations.
+
+        Compare-and-swap on the SOURCE, never on mtimes: the canonical index is re-read
+        and re-hashed under the store's write lock, and the cloth lands only if the
+        index is still the exact text it was woven from. Without this, a memory poured
+        while the loom was busy on triggers is missing from the cloth, yet the cloth
+        ends up NEWER than the index — an mtime test calls that fresh, and pay-forward
+        bakes the stale map into KV. On a mismatch nothing is written, the old cloth
+        stands, and the caller is told distinctly (`refused`); whether to re-weave is
+        the caller's decision — retrying here could chase a busy store forever.
+
         Writing nothing when nothing changed is the point: a cloth that is rewritten on
         every tick looks changed to every cache downstream."""
+        if self.store.write_policy == FROZEN:
+            # Nothing may write inside a frozen store — including its lock file. And
+            # nothing can move its index either, so the unlocked check is the truth.
+            return self._persist_checked(cloth)
+        with self.store._locked():
+            return self._persist_checked(cloth)
+
+    def _persist_checked(self, cloth: Cloth) -> dict:
+        current_rev = self.store.revision()
+        current = _sha256(self.store.index_text())
+        expected = cloth.stats.get("source_sha256")
+        expected_rev = cloth.stats.get("source_revision")
+        if expected is None and expected_rev is None:
+            # A Cloth woven by weave() always carries both. One without them did not
+            # come from here, and writing it unconditionally would skip the
+            # compare-and-swap this method exists to be.
+            cloth.stats["written"] = False
+            cloth.stats["refused"] = ("cloth has no source provenance; weave() it — "
+                                      "a hand-built Cloth is not checkable")
+            return cloth.stats
+        if ((expected is not None and current != expected)
+                or (expected_rev is not None and current_rev != expected_rev)):
+            cloth.stats["written"] = False
+            cloth.stats["refused"] = "source moved while weaving"
+            return cloth.stats
         os.makedirs(os.path.dirname(self.out_path), exist_ok=True)
         if os.path.exists(self.out_path):
             prev = open(self.out_path, encoding="utf-8", errors="ignore").read()
             if prev == cloth.text:
-                cloth.stats["written"] = False        # idempotent: no churn, no backup
+                # Idempotent: no churn, no backup. The record is still brought up to
+                # date — a cloth written before the record existed (or with only half
+                # of it) is byte-identical yet unprovable, and one no-op weave must
+                # heal that.
+                self._record_state(current, _sha256(cloth.text), current_rev)
+                cloth.stats["written"] = False
                 return cloth.stats
             bdir = os.path.join(self.store.still, "index-backups")
             os.makedirs(bdir, exist_ok=True)
@@ -597,9 +790,29 @@ class Loom:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(cloth.text)
         os.replace(tmp, self.out_path)
+        # The cloth first, its record second: a crash between the two leaves an
+        # unprovable cloth (served as stale — safe), never a fresh stamp on old text.
+        self._record_state(current, _sha256(cloth.text), current_rev)
         cloth.stats["written"] = True
         cloth.stats["path"] = self.out_path
         return cloth.stats
+
+    def _record_state(self, source_sha: str, cloth_sha: str, revision: int) -> None:
+        """Remember which canonical index the cloth on disk was verified against, which
+        cloth bytes were actually written, and which store revision it all happened at.
+        The stamp proves the PRODUCT too: without `cloth_sha256`, a cloth corrupted or
+        hand-edited while the index sat unchanged would still wear a valid freshness
+        stamp. And the revision sees what no index hash can: a body or type change
+        (read by `layer_of`) that leaves the index text byte-identical."""
+        record = {"cloth_sha256": cloth_sha, "source_revision": revision,
+                  "source_sha256": source_sha}
+        if self._state() == record:
+            return                               # no churn when nothing changed
+        os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
+        tmp = self.state_path + f".tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=1, sort_keys=True)
+        os.replace(tmp, self.state_path)
 
     # ── reading it back ──────────────────────────────────────────────────
     def cloth_on_disk(self) -> str | None:
@@ -608,9 +821,51 @@ class Loom:
         except OSError:
             return None
 
-    def is_stale(self) -> bool:
-        """True when the canonical index has moved on since the cloth was woven."""
+    def _state(self) -> dict:
         try:
-            return os.path.getmtime(self.store.index_path) > os.path.getmtime(self.out_path)
-        except OSError:
+            with open(self.state_path, encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def source_sha256(self) -> str | None:
+        """The recorded hash of the index the cloth on disk was woven from, if any."""
+        v = self._state().get("source_sha256")
+        return v if isinstance(v, str) and v else None
+
+    def is_stale(self) -> bool:
+        """True when the canonical index has moved on since the cloth was woven —
+        or when the cloth itself is no longer the text that was written.
+
+        By HASH, not by mtime. A memory poured while the loom was busy leaves the
+        cloth NEWER than the index — mtime calls exactly that state fresh, which is
+        the one lie pay-forward would then bake into KV. The record `persist()`
+        wrote under the store lock proves both ends: the SOURCE (the current index
+        hashes to `source_sha256`) and the PRODUCT (the cloth on disk hashes to
+        `cloth_sha256`) — a corrupted or hand-edited cloth must not wear a valid
+        freshness stamp. The store REVISION guards what neither hash can see: the
+        weave's real input includes memory types and body dates (`layer_of`), and a
+        body-only change leaves the index text byte-identical while bumping the
+        counter. No record, or half a record, means the cloth cannot be proven
+        current, which is treated the same as stale — the canonical index is always
+        the safe fallback, and one re-weave heals the record.
+
+        Honesty about revision 0: with no counter file, `revision()` answers 0 —
+        "no counted mutation yet" — so a store upgraded mid-life weaves at 0, sits
+        as blind to out-of-band body edits as it was before the counter existed,
+        and heals on its first weave after its first counted mutation."""
+        cloth = self.cloth_on_disk()
+        if cloth is None:
             return True
+        st = self._state()
+        source, product = st.get("source_sha256"), st.get("cloth_sha256")
+        revision = st.get("source_revision")
+        if not (isinstance(source, str) and source
+                and isinstance(product, str) and product
+                and isinstance(revision, int) and not isinstance(revision, bool)):
+            return True                          # pre-upgrade sidecar: unprovable
+        if self.store.revision() != revision:
+            return True
+        return (_sha256(self.store.index_text()) != source
+                or _sha256(cloth) != product)

@@ -8,10 +8,11 @@ as you configure and a client can switch modes per request:
     GET  /index             ?store=maker
     GET  /doctor            ?store=maker          (?all=1 → every store at once)
     GET  /memory/<slug>     ?store=maker
+    GET  /glance/<slug>     ?store=maker   the ~150-token confirmation, exact
     GET  /prefill           ?store=eq[&format=text] the resident index block, ready to paste
     GET  /profile           ?store=eq             the store's charter + persona pointer
     GET  /stores            what exists, which mode maps where, which models
-    GET  /health
+    GET  /health            liveness — and which build/pid/config is actually serving
 
 Path-prefixed forms work too — `POST /s/eq/recall`, `GET /s/eq/index` — which is
 handy for clients that can only vary a base URL per mode.
@@ -24,13 +25,21 @@ import json
 import os
 import re
 import urllib.parse
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import __version__
 from . import prefill as prefill_mod
+from .glance import glance
 from .recall import recall
 from .tokens import estimate
 from .registry import Registry
 from .store import ANNOTATION_KEYS
+
+# Captured at import: the module rides in with the process, so this is when THIS code
+# began serving — the one field a stale survivor of an earlier deploy cannot fake.
+STARTED_AT = datetime.now().astimezone().isoformat(timespec="seconds")
+MODULE_PATH = os.path.dirname(os.path.abspath(__file__))
 
 
 def _annotations(p: dict) -> dict:
@@ -79,6 +88,17 @@ def _make_handler(reg: Registry):
 
         # ── GET ──────────────────────────────────────────────────────────
         def do_GET(self):
+            # Malformed client values (?window=big, {"hops": "one"}) used to escape
+            # as ValueError/TypeError and drop the connection with no reply at all.
+            # The bad-json branch two doors down shows the contract: bad input is a
+            # 400, an error the client can read.
+            try:
+                return self._do_GET()
+            except (ValueError, TypeError) as e:
+                return self._send(400, {"error": f"invalid argument: "
+                                                 f"{type(e).__name__}: {e}"})
+
+        def _do_GET(self):
             path, sel, q = self._split(self.path)
             if path.startswith("/health"):
                 d = reg.stores[reg.default]
@@ -87,7 +107,19 @@ def _make_handler(reg: Registry):
                     "stores": {n: len(s.slugs()) for n, s in reg.stores.items()},
                     # `memories` and `dir` describe the DEFAULT store, so a client
                     # written against a single-kura service keeps working unchanged.
-                    "memories": len(d.slugs()), "dir": d.path})
+                    "memories": len(d.slugs()), "dir": d.path,
+                    # Which BUILD is actually serving. A restart once "succeeded"
+                    # while an old 0.0.0.0-bound process kept the port and served
+                    # three deploys' worth of stale code — and nothing in this reply
+                    # could show it. The package version does not move between
+                    # commits; KURA_BUILD_ID (stamped at launch) does. Volatile
+                    # fields are safe HERE: /health is never a prefix-cached surface.
+                    "build_id": os.environ.get("KURA_BUILD_ID", "unknown"),
+                    "version": __version__,
+                    "pid": os.getpid(),
+                    "started_at": STARTED_AT,
+                    "module_path": MODULE_PATH,
+                    "config_path": reg.config_path})
             if path.startswith("/stores"):
                 return self._send(200, reg.describe())
             if path.startswith("/doctor"):
@@ -109,7 +141,9 @@ def _make_handler(reg: Registry):
                     header=cfg.get("header"),
                     window_tokens=int(q.get("window") or cfg.get("window_tokens", 131072)),
                     fraction=float(q.get("fraction") or cfg.get("budget_fraction", 0.05)),
-                    hard_fraction=float(cfg.get("hard_fraction", 0.20)))
+                    hard_fraction=float(cfg.get("hard_fraction", 0.20)),
+                    trail=prefill_mod.trail_for(st, cfg, loom=loom),
+                    resident_mode=cfg.get("resident_mode", "full"))
                 # The map is the largest thing this server hands out and it changes a
                 # few times a day, while clients re-read it every couple of minutes.
                 inm = (self.headers.get("If-None-Match") or "").strip('"')
@@ -165,12 +199,30 @@ def _make_handler(reg: Registry):
                                    # callers may show them, nothing ranks by them.
                                    "tags": list(st.tags(s_)) if s_ else [],
                                    "annotations": st.annotations(s_) if s_ else {}})
+            if path.startswith("/glance/"):
+                # EXACT, like read_exact: a slug the caller recognised on the map gets
+                # its ~150-token mechanical confirmation, and a misspelling is an
+                # honest 404 — never a neighbour. Exists so the recognition can be
+                # confirmed BEFORE a full read takes its tokens.
+                slug = urllib.parse.unquote(path.split("/glance/", 1)[1])
+                g = glance(st, slug)
+                return self._send(200 if g.get("ok") else 404, g)
             self._send(404, {"error": "not found", "path": path})
 
         # ── POST ─────────────────────────────────────────────────────────
         def do_POST(self):
+            try:
+                return self._do_POST()
+            except (ValueError, TypeError) as e:
+                return self._send(400, {"error": f"invalid argument: "
+                                                 f"{type(e).__name__}: {e}"})
+
+        def _do_POST(self):
             path, sel, _ = self._split(self.path)
-            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return self._send(400, {"error": "bad Content-Length"})
             try:
                 p = json.loads(self.rfile.read(n) or b"{}")
             except ValueError:
@@ -185,7 +237,8 @@ def _make_handler(reg: Registry):
                                               p.get("question", ""),
                                               int(p.get("hops", 1)), int(p.get("top", 3)),
                                               int(p.get("chars", 6000)),
-                                              int(tot) if tot else None))
+                                              int(tot) if tot else None,
+                                              fastpath_cfg=reg.fastpath_cfg_for(st)))
             if path.startswith("/remember"):
                 # A tool call or a script: a DIRECT write, refused unless the store's
                 # policy allows one. The distiller's verified pour is a different door.

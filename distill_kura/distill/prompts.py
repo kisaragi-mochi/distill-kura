@@ -99,6 +99,12 @@ repeats a failure), resolved, settled. Use the store's own words too. A tag is a
 description, never a weight: more tags do not make a memory matter more. Tags that
 claim something about the human are checked against your quotes.
 
+CALLSIGNS are the words THE HUMAN used here that could serve as a shared shortcut
+back to this memory later — a project nickname, a coined phrase, "that all-hands
+thing". Copy them EXACTLY from a [USER] line (at most two). Never coin one, never
+paraphrase, never take one from the agent's or a tool's words: a callsign nobody
+but you ever said routes nowhere and is discarded.
+
 `keep` is the meaning that must survive any later thinning; `may_fade` is the detail
 that need not. Both are one sentence. They decide nothing today.
 
@@ -123,6 +129,7 @@ Output ONLY a JSON array (empty if nothing qualifies), at most {max_items} items
   "why":"<ONE line>",
   "belongs_because":"<ONE sentence: why THIS store wants it>",
   "tags":["decision","landmine"],
+  "callsigns":["<exact words from a [USER] line, optional, at most two>"],
   "keep":"<ONE sentence>", "may_fade":"<ONE sentence>",
   "quotes":["[USER] ...", "[TOOL] ..."]}}]"""
 
@@ -140,13 +147,15 @@ One pass optimises for the most striking thing in a batch. What it reliably miss
  · a feeling the human stated plainly, in a store whose charter cares about that
 
 Same rules as the first pass: VERBATIM quotes with their [CLASS] tag, kept short, or the
-candidate is discarded. Say why each one belongs HERE. Do not restate anything on the
+candidate is discarded. Say why each one belongs HERE. Callsigns, if any, are copied
+exactly from a [USER] line. Do not restate anything on the
 taken list in different words.
 
 Output ONLY a JSON array, at most {max_items} items, empty if the first pass really did
 take everything:
 [{{"topic":"...","kind":"user|feedback|project|reference|idea","why":"<ONE line>",
-  "belongs_because":"<ONE sentence>","tags":["..."],"keep":"<ONE sentence>",
+  "belongs_because":"<ONE sentence>","tags":["..."],"callsigns":["..."],
+  "keep":"<ONE sentence>",
   "may_fade":"<ONE sentence>","quotes":["[USER] ..."]}}]"""
 
 

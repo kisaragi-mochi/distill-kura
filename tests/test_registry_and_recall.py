@@ -6,7 +6,6 @@ an unreachable thinker degrades to word matching and says so instead of going si
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 import threading
@@ -14,7 +13,8 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from distill_kura.distill.watermark import Watermarks   # noqa: E402
-from distill_kura.recall import fit, recall             # noqa: E402
+from distill_kura import fastpath                       # noqa: E402
+from distill_kura.recall import fit, pick_by_words, recall   # noqa: E402
 from distill_kura.registry import Registry              # noqa: E402
 from distill_kura.store import Store                    # noqa: E402
 
@@ -322,8 +322,12 @@ def test_recall_salvages_a_slug_from_prose(tmp_path):
 
 
 def test_recall_degrades_to_words_and_says_so(tmp_path):
+    """Tier zero is switched off here on purpose: this question names a memory, so
+    the fastpath would answer it first (its own tests cover that). What is under
+    test is the tier BELOW — the thinker being unreachable must degrade visibly."""
     s = a_store(tmp_path)
-    d = recall(s, StubThinker(None), "tell me about cooling", hops=0)
+    d = recall(s, StubThinker(None), "tell me about cooling", hops=0,
+               fastpath_cfg={"enabled": False})
     assert d["how"].startswith("words")            # visible degradation, not silence
     assert d["walked"] == ["cooling"]
 
@@ -348,6 +352,58 @@ def test_fit_keeps_the_head_and_the_relevant_paragraph(tmp_path):
     out = fit(text, "how many tokens per second?", 400)
     assert "opening line" in out
     assert "42 tokens per second" in out
+
+
+
+def test_the_degraded_word_path_never_recalls_the_comment_s_example(tmp_path):
+    """The index header comment carries the format hint, and the hint contains an
+    EXAMPLE link — `- [Title](its-slug.md)`. Word overlap read the RAW index, so a
+    question about titles and triggers "recalled" `its-slug`: a memory that does not
+    exist, ranked first, pushing a real one out of `top`. Nothing downstream caught it
+    (the walk silently drops an unresolvable slug), so the caller was told a phantom
+    was remembered."""
+    s = a_store(tmp_path)
+    assert "its-slug.md" in s.index_text()          # the bait is still in the header
+    q = "what is the recognition trigger for a title"
+
+    picked = pick_by_words(s, q, 3)
+    assert "its-slug" not in picked
+    assert set(picked) <= s.slug_set()              # every pick is a real memory
+
+    d = recall(s, StubThinker(None), q, hops=0, fastpath_cfg={"enabled": False})
+    assert d["how"].startswith("words")             # still the degraded path
+    assert set(d["picked"]) <= s.slug_set()
+
+    # …and the comment is all that was skipped: real index lines still score.
+    assert pick_by_words(s, "tell me about cooling", 3) == ["cooling"]
+
+
+def test_the_fastpath_cache_sees_a_body_only_edit(tmp_path):
+    """The recognizer's cache was stamped with (index mtime, memory count), and a body
+    rewrite can move neither. Real indexes group a family on one line
+    (`- topic — [A](a.md)/[B](b.md)`), which no rewrite matches, so the index is left
+    byte-identical: the recognizer kept scoring the OLD body and `doctor` reported
+    itself fresh while doing it. The store's revision counter moves on every committed
+    mutation, so it is in the stamp."""
+    s = a_store(tmp_path)
+    open(s.index_path, "w", encoding="utf-8").write(
+        "# s — index\n- the CPU run — [cooling](cooling.md) / [ssd](ssd-tier-mission.md)\n")
+    fastpath.lookup(s, "a question that names nothing")     # builds the cache
+    assert "zep" not in fastpath.index_for(s).heads["body"]
+    before = os.stat(s.index_path).st_mtime_ns
+    rev = s.revision()
+
+    r = s.remember("cooling", "the fans had to go in before the CPU run",
+                   "zeppelin marmalade")
+    # The premise, asserted rather than assumed: the two old stamp numbers did not move.
+    assert r["indexed"] is False
+    assert os.stat(s.index_path).st_mtime_ns == before
+    assert len(s.slug_set()) == 2
+    assert s.revision() > rev                                # only this one saw it
+
+    assert s.doctor()["fastpath"]["fresh"] is False          # the next recall rebuilds
+    fastpath.lookup(s, "a question that names nothing")
+    assert "zep" in fastpath.index_for(s).heads["body"]      # the new body is scorable
 
 
 # ── watermarks ──────────────────────────────────────────────────────────────
@@ -382,15 +438,76 @@ def test_claim_reserves_before_reading(tmp_path):
     """Claiming a stretch must move the mark immediately, so a second runner starting
     in the same instant gets different water."""
     j = tmp_path / "j.jsonl"
-    # Complete Claude JSONL records: a 2.2× byte estimate used to split a
-    # newline-free blob, but sip drinks records, so two claims on real
-    # transcripts must reserve disjoint complete-record ends.
-    line = json.dumps({"type": "user", "message": {"content": [
-        {"type": "text", "text": "x" * 200}]}}) + "\n"
-    j.write_text(line * 2000, encoding="utf-8")
+    # A real journal, line by line. The fixture used to be 500 KB with no newline in
+    # it at all, and it fell into two stretches only because the reserve was a byte
+    # ESTIMATE that cut the file wherever the arithmetic landed. The reserve is now
+    # exactly where the read stops, and one unbroken line is one stretch — a journal
+    # has to have line boundaries to have more.
+    j.write_text(('{"type":"user","message":{"content":[{"type":"text","text":"'
+                  + "x" * 400 + '"}]}}\n') * 1200, encoding="utf-8")
     w = Watermarks(str(tmp_path / "_still" / "watermark.json"))
     first = w.claim([str(j)], budget_chars=100_000, min_chars=1000)
     second = w.claim([str(j)], budget_chars=100_000, min_chars=1000)
     assert first is not None and second is not None
     assert second[1] > first[1]          # different starting offsets
-    assert first[3] == second[1]         # reserved end of A is B's start
+
+
+def test_recall_respects_an_explicit_nothing(tmp_path):
+    # The thinker read the whole index and answered []. Word overlap must NOT be
+    # allowed to override that with look-alikes — refusal is an answer.
+    s = a_store(tmp_path)
+    t = StubThinker("[]")
+    d = recall(s, t, "cooling ssd", hops=0, fastpath_cfg={"enabled": False})
+    assert d["how"] == "meaning→none"
+    assert d["picked"] == [] and d["walked"] == []
+
+
+# ── /health names its build ─────────────────────────────────────────────────
+
+def _health_server(store):
+    """The e2e convention: the real handler on a real socket."""
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from distill_kura.server import _make_handler
+    from distill_kura.thinker import Models
+    reg = Registry(stores={store.name: store}, modes={},
+                   models=Models.from_config(None), default=store.name,
+                   config_path=os.path.join(store.path, "kura.toml"))
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(reg))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/health"
+    fetch = lambda: __import__("json").load(urllib.request.urlopen(url))  # noqa: E731
+    return srv, reg, fetch
+
+
+def test_health_names_the_build_actually_serving(tmp_path, monkeypatch):
+    """A restart once "succeeded" while an old 0.0.0.0-bound survivor kept the port
+    and served three deploys' worth of stale code — and /health could not show it.
+    Now "is the new build serving?" is one request: build id, pid, start time, the
+    code path actually imported, the config actually loaded."""
+    import distill_kura
+    import distill_kura.server as server_mod
+    monkeypatch.setenv("KURA_BUILD_ID", "abc1234")
+    srv, reg, fetch = _health_server(a_store(tmp_path))
+    try:
+        h = fetch()
+        assert h["ok"] is True and h["stores"] == {"s": 2}      # the old contract stands
+        assert h["build_id"] == "abc1234"                       # stamped at launch
+        assert h["version"] == distill_kura.__version__
+        assert h["pid"] == os.getpid()                          # a survivor's differs
+        assert h["started_at"]                                  # ISO, set at import
+        assert h["module_path"] == os.path.dirname(os.path.abspath(server_mod.__file__))
+        assert os.path.isfile(os.path.join(h["module_path"], "server.py"))
+        assert h["config_path"] == reg.config_path
+    finally:
+        srv.shutdown()
+
+
+def test_health_build_id_is_unknown_when_nothing_stamped_it(tmp_path, monkeypatch):
+    """"unknown" is honest and greppable; an empty string would read as a build."""
+    monkeypatch.delenv("KURA_BUILD_ID", raising=False)
+    srv, reg, fetch = _health_server(a_store(tmp_path))
+    try:
+        assert fetch()["build_id"] == "unknown"
+    finally:
+        srv.shutdown()
