@@ -399,3 +399,22 @@ There is no authentication. The default bind is `127.0.0.1`. If it must be reach
 from elsewhere, put a reverse proxy with auth in front; do not add a half-built auth
 layer to the server. Remember that a kura is a fairly intimate document — it holds what
 someone decided, what annoyed them, and what they came back to.
+
+
+## The adaptive shadow (M4)
+
+Turn it on per store or globally with `[prefill] adaptive_triggers = true` and run
+`kura weave` as usual; the production cloth is unchanged, and `_still/adaptive.json`
+gains one record per trigger-layer memory. Read `summary.saved_tokens` for the size of
+the prize and `summary.reasons` for what stands between you and it — "ambiguous" means
+a neighbour, "not offered" means the scribe gave no cue at that rung, "negation
+dropped" / "number re-bound" / "retirement word dropped" mean the cue lied. The
+scribe is called once per memory and never again while the line is unchanged; the
+verdicts are recomputed on every weave, which is why a shadow is cheap to keep on.
+
+To benchmark it, render the shadow into a map (`Adaptive(store, loom).render()`; a
+CLI flag arrives with the M4 benchmark step) and hand it to
+`kura bench worldline --routing agent-only --resident canonical,woven,adaptive
+--resident-file adaptive=/path/to/map.md`. Promote (`adaptive_apply = true`) only when
+that table shows no new wrong or obsolete branch and no rise in
+`remembered_but_unreachable` — the memory that exists but cannot be reached.

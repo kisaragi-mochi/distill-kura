@@ -2,6 +2,66 @@
 
 ## 0.3.0 — unreleased
 
+### M4 — the shortest cue that still recognises (shadow)
+
+The fixed 24-token trigger asked "how much can I cut?". M4 asks the plan's
+question: *what is the shortest cue that makes the reader recognise THIS memory and
+not its neighbour?* — and answers it in the shadow, where being wrong costs nothing.
+`kura weave` with `[prefill] adaptive_triggers = true` (or `--adaptive`) writes
+`_still/adaptive.json`: per trigger-layer memory, the current trigger, a candidate per
+rung of `trigger_steps` (one scribe call per memory, cached), the shortest one that
+is SAFE, and — the measurement — `why_not_shorter` for every rung it refused
+("ambiguous: <slug>", "negation dropped", "number re-bound: 43.7 ms", "not
+offered"). The production cloth does not change: `adaptive_apply` stays `false`
+until a benchmark earns it, and an untouched old config never reaches this code.
+
+Safe means two things, checked in that order. The floor: every production floor the
+trigger already passes (2-gram grounding, invented numbers, invented attribution,
+dead words, title restated) plus what a SHORTER cue newly risks — a number re-bound
+to another unit or referent (43.7 t/s → 43.7 ms, TP=4 → TP=8), a before→after arrow
+reversed, a retirement word dropped (⚠️退役 shrinking into a line that reads as
+current), an identifier cut mid-token (ds4-tp8-engine-canonical → ds4-tp8), a
+negation gained or lost (工房ではない → 工房), a marker or [[link]] the line never
+had. Then the distinguishability test: the five-head recognizer is asked the cue as a
+question with the callsign pre-head OFF and the body head OFF — a new
+`fastpath.lookup(..., cues=False, body=False)` over a resident-only index — so a cue
+counts as recognised only by what the resident map itself shows. A verified callsign
+is the human's own word and shares no 2-grams with the line, so it is not graded by
+grounding at all: its floor is a live, unambiguous receipt and its test is the receipt
+route, recorded as `via: receipt` and counted separately.
+
+Two lessons the red team taught before the code was written: candidates are
+memory-local and cached (`_still/adaptive.hooks.json`), but VERDICTS are not — whether
+a cue is ambiguous depends on every neighbour, so the tests run again on every
+shadow, without a model, and a memory poured this morning can revoke a cue judged
+safe last night; and `trigger_steps` must END at `trigger_tokens`, or the ladder
+could never offer the size production wears today. Falling back to 24 — or to the
+canonical line itself — is not a failure; it is the finding that this memory needs
+that many tokens.
+
+Also in this change: `fastpath.RECOGNIZER_VERSION` (the shadow keys on it);
+`gate.attributes_to_human` learns the house's own shorthand (ケン確定 / 裁定 / 方針 /
+決定 / 号令, "ケン:", "Ken decided") — a cue could rewrite who decided while every
+2-gram stayed in place; `Loom.weave(triggers=...)` — an explicit trigger map the
+cloth may wear instead of the ledger, the one seam production exposes to M4 (the
+postcondition still applies to it).
+
+**Worldline bench for M4.** `kura bench worldline --resident canonical,woven[,NAME]`
+runs the same cases across resident-map variants and prints them side by side;
+`--resident-file NAME=PATH` benchmarks any rendered map (the adaptive shadow's
+`Adaptive.render()`) without the benchmark importing it. New raw metrics, no
+composite: `remembered_but_unreachable` (the memory exists, the door was too narrow —
+only meaningful under agent-only/fastpath, where no thinker rescues a thin map),
+`unnecessary_opens`, `obsolete_branch` (disjoint from `wrong_branch`; a resurrection
+alone now fails the run), `honest_unknown`. A 27-memory synthetic fixture store
+(`bench/worldline/memories.json`, superseded plans included) makes the shipped 26
+cases runnable anywhere; `explanation_burden` waits for M8 and a human definition.
+
+*Found on the way, not yet fixed:* `hooks.json` is unsigned and a reused hook is not
+re-floored, so a hand-edited ledger line can reach the cloth; the shadow deliberately
+lives in separate files and is never read by `weave()`, but the production ledger
+deserves the same mark the cue ledger has (follow-up).
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the

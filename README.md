@@ -273,6 +273,35 @@ including the systemd shape for mouth restarts, is in `docs/OPERATING.md`.
 
 ---
 
+### The shortest cue that still recognises (M4, shadow)
+
+A trigger line is paid on every turn. The question is not how short it can be cut but
+how short it can be while the reader still thinks "ah, THAT one" — and not its
+neighbour. With
+
+```toml
+[prefill]
+trigger_tokens = 24            # the legacy budget, still what production wears
+adaptive_triggers = true       # generate and judge shorter candidates (shadow)
+adaptive_apply = false         # nothing enters the cloth until a benchmark earns it
+trigger_steps = [8, 12, 16, 24]
+```
+
+`kura weave` also writes `_still/adaptive.json`: per memory, a candidate per rung,
+the shortest one that passes every floor the production trigger passes (plus the ones
+a shorter cue newly needs — a number tied to a different unit, a dropped negation or
+retirement word, a cut identifier) AND is recognised alone by the recognizer with the
+callsign pre-head and the body off, and `why_not_shorter` for each rung refused. A
+verified callsign is judged by its receipt, not by word overlap. Candidates are
+cached per memory; the verdicts are recomputed every time, because whether a cue is
+ambiguous depends on every neighbour. Falling back to 24, or to the line itself, is a
+measurement — that memory needs that many tokens.
+
+Promotion is a benchmark's decision, not a flag's: `kura bench worldline --resident
+canonical,woven --resident-file adaptive=<rendered map>` under `--routing
+agent-only`, read per category, with no increase in wrong or obsolete branches and
+no rise in `remembered_but_unreachable`. Until then the shadow only watches.
+
 ## Modes: more than one kura
 
 A single memory that serves both "help me build this" and "help me think this through"
