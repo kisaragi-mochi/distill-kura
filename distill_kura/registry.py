@@ -83,7 +83,11 @@ _DISTILL_TYPES = {"inherit_global_journals": bool, "journals": dict, "language":
 _PREFILL_TYPES = {"window_tokens": int, "budget_fraction": float, "hard_fraction": float,
                   "fresh_days": (int, float), "pinned_types": list, "trigger_tokens": int,
                   "verbatim_after": str, "cloth_path": str, "header": str,
-                  "trail_tokens": int}
+                  "trail_tokens": int,
+                  # M4 adaptive minimum recognition trigger — SHADOW by default: candidates
+                  # are generated and judged, the production cloth keeps trigger_tokens
+                  # until a benchmark says otherwise. An untouched old config changes nothing.
+                  "adaptive_triggers": bool, "adaptive_apply": bool, "trigger_steps": list}
 # Tier zero of recall (`fastpath.py`). `gate` is the honesty bar: a hit below it is
 # silence, and silence goes to the thinker.
 _FASTPATH_TYPES = {"enabled": bool, "gate": (int, float), "cues": bool}
@@ -137,6 +141,28 @@ def mouth_base(url: str) -> str:
     return u
 
 
+def _check_adaptive(section: str, t: dict) -> None:
+    """The adaptive-trigger keys, refused loudly when they cannot mean what they say:
+    steps that are not ascending ints would silently reorder the ladder; a step above
+    trigger_tokens would "shorten" to something longer than the legacy budget; and
+    `adaptive_apply` without `adaptive_triggers` is a switch wired to nothing."""
+    steps = t.get("trigger_steps")
+    if steps is not None:
+        if not steps or any(not isinstance(x, int) or isinstance(x, bool) or x <= 0 for x in steps):
+            raise ValueError(f"[{section}] trigger_steps must be a non-empty list of positive ints")
+        if steps != sorted(set(steps)):
+            raise ValueError(f"[{section}] trigger_steps must be strictly ascending: {steps}")
+        cap = t.get("trigger_tokens", 24)
+        if steps[-1] != cap:
+            # The last rung IS the legacy budget: a ladder that ends below it can never
+            # offer the size production wears today, and one that ends above it would
+            # call a longer cue "shorter".
+            raise ValueError(f"[{section}] trigger_steps must end at trigger_tokens={cap}, "
+                             f"got {steps}")
+    if t.get("adaptive_apply") and not t.get("adaptive_triggers"):
+        raise ValueError(f"[{section}] adaptive_apply=true needs adaptive_triggers=true")
+
+
 def _check_table(where: str, table: dict, types: dict) -> None:
     for k, v in (table or {}).items():
         want = types.get(k)
@@ -157,6 +183,7 @@ def _check_types(name: str, sc: dict) -> None:
     _check_table(f"stores.{name}", sc, _TYPES)
     _check_table(f"stores.{name}.distill", sc.get("distill") or {}, _DISTILL_TYPES)
     _check_table(f"stores.{name}.prefill", sc.get("prefill") or {}, _PREFILL_TYPES)
+    _check_adaptive(f"stores.{name}.prefill", sc.get("prefill") or {})
     _check_table(f"stores.{name}.fastpath", sc.get("fastpath") or {}, _FASTPATH_TYPES)
 
 
@@ -330,6 +357,7 @@ class Registry:
             stores["main"] = Store(name="main", path=d, label=os.environ.get("KURA_LABEL", "kura"))
         _check_table("distill", raw.get("distill") or {}, _DISTILL_TYPES)
         _check_table("prefill", raw.get("prefill") or {}, _PREFILL_TYPES)
+        _check_adaptive("prefill", raw.get("prefill") or {})
         _check_table("fastpath", raw.get("fastpath") or {}, _FASTPATH_TYPES)
         srv = raw.get("server") or {}
         default = srv.get("default") or next(iter(stores))
