@@ -165,7 +165,8 @@ def test_continues_and_next_need_no_manifest_and_record_their_cue(tmp_path):
     d = edges_mod.derive(s)
     got = {(e["source"]): (e["type"], e["cue"], e["evidence"]) for e in d["edges"]}
     assert got["cont"] == ("continues", "続き", None)
-    assert got["arrowcont"] == ("continues", "→", None)
+    # A line that only begins with an arrow is a "see also", not a continuation.
+    assert "arrowcont" not in got
     assert got["nxt"] == ("next", "次:", None)
     assert d["unevidenced"] == 0
 

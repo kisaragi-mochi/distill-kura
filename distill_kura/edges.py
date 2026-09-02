@@ -55,7 +55,6 @@ _REJECTED = ("却下", "不採用", "棄却", "rejected", "refuted", "撤回", "
 _BLOCKED = ("blocked", "待ち", "止まって", "停止中", "blocked-by", "待機")
 _CONTINUES = ("続き", "継続", "継承", "continues", "後継", "再戦", "再開")
 _NEXT_START = ("次=", "次:", "next:", "次の一手")          # the explicit pointer
-_CONTINUES_START = ("→", "次", "Next")                     # the open onward line
 
 # `廃案 (→ old-plan)`: the bare-name arrow shape. A candidate from here still has
 # to pass the neighbourhood floor — the name must be [[linked]] somewhere in the
@@ -107,13 +106,12 @@ def _line_candidates(store, line: str) -> list[tuple[str, str, str]]:
             if stripped.startswith(pref):
                 t, cue = "next", pref
                 break
-        if t is None:
-            for pref in _CONTINUES_START:
-                if stripped.startswith(pref):
-                    t, cue = "continues", pref
-                    break
-            if t is None and (w := _hit(_CONTINUES, line)):
-                t, cue = "continues", w
+        # A line that merely BEGINS with an arrow is a "see also", not a
+        # continuation: on the house store that rule produced 39 `continues`
+        # edges of which most were related-reading pointers. A continuation
+        # word on the same line as the link is required (measured 2026-09-02).
+        if t is None and (w := _hit(_CONTINUES, line)):
+            t, cue = "continues", w
     out: list[tuple[str, str, str]] = []
     if t is not None:
         for name in store.links_of(line):
