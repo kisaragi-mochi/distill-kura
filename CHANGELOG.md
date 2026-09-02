@@ -226,6 +226,19 @@ one slug no longer renames onto the earlier `.md.poured` and destroys it; and th
 ledger's sow/confirm run under a lock with per-pid temp files, so parallel runners no
 longer lose seeds or truncate each other.
 
+### Structure pass, wave 2 (2026-09-02 afternoon)
+Ninety-three non-bug findings from the morning review (duplication, drifted docs, test
+gaps, error handling, naming) were re-verified at HEAD and worked in four isolated
+worktrees, behaviour-preserving and under the full suite: one containment predicate,
+one per-store config merge, one bearer-header builder, one prefill build-from-config,
+one `_send` for every HTTP reply, one draft-head/evidence-lines/draft-record helper in
+the pipeline, hoisted gate vocabularies, `Store.profile_check` as the single profile
+judgement, a stale "degraded" label and a bad `hops` no longer read as outages, and
+the README/OPERATING/DESIGN passages brought back to what the code does. New tests
+pin CLI exit codes, server routes (ETag/304/text), and the branches that had none.
+Left for a decision or a later wave: a single `_parse_scribe`, an `_Envelope` type,
+fsync-unified atomic writes, and the twenty-one structure/split findings.
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the
