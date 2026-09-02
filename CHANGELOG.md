@@ -263,6 +263,21 @@ exits 0 = completed, 1 = attempted or required but not completed (a timeout is 1
 child process survives the return. The index craft tells writers that a retired thing
 wears it — on its own trigger, only after a verified transition, never from a derived edge.
 
+### The retirement face (2026-09-02 evening)
+A retired plan, method or ruling is never hidden and never dressed as current: the OLD
+memory's own trigger says so (`退役: …／現在は [[new]]`, `superseded: … — now [[new]]`).
+The only door is `Store.retire(old, new, manifest_hex)`, which verifies through the
+content-addressed loader that the manifest carries a USER-class quote naming the old
+memory; a TOOL/SELF/ACT-only manifest, a tampered manifest, a missing or identical slug,
+a grouped line, a frozen store and a second, different successor are all refused; a
+repeat is `already`. A derived edge cannot retire anything (tested). Only the index line
+changes, through the index writer with WAL and a revision bump, plus one appended body
+line naming the manifest. The distiller fires it at the end of a pour when the human's
+gated words named what the new memory replaces; the loom compresses inside the face,
+never the face (the trimmer had been dropping the trailing `[[new]]`, measured and
+fixed); doctor, the richness gauge and worldline rows count and show faced memories;
+`kura retire OLD NEW --manifest HEX` is the human-driven door.
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the
