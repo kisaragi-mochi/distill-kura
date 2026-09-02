@@ -427,11 +427,32 @@ class Loom:
                 cut = min(cut, first_unclosed)
         return text[:cut].rstrip(" 、,/-—・(（[「『〔")
 
+    # A retired memory's line wears its face FIRST (store.retire): "退役: …／現在は
+    # [[new]]" / "superseded: … — now [[new]]". Compression may shorten what is inside
+    # the face; it may never eat the face itself. The trimmer works on the middle and
+    # the wrapper is put back verbatim — without this the tail is exactly what a
+    # length cut removes, and the worn map says a dead plan is current with no link
+    # to what replaced it.
+    FACE = re.compile(r"^(\s*(?:退役\s*[:：]|superseded\s*:)\s*)"
+                      r"(.*?)"
+                      r"(／現在は\s*\[\[[^\[\]]+\]\]|\s+—\s*now\s+\[\[[^\[\]]+\]\])\s*$",
+                      re.I | re.S)
+
+    @classmethod
+    def _face_parts(cls, desc: str) -> tuple[str, str, str] | None:
+        """→ (opening, the part that may be compressed, closing), or None."""
+        m = cls.FACE.match(desc or "")
+        if not m or not m.group(2).strip():
+            return None
+        return m.group(1), m.group(2).strip(), m.group(3)
+
     def _mechanical(self, desc: str, title: str = "") -> str:
         """Trim without a model: keep the opening clause, then append salient fragments
         while the budget lasts. Never returns empty — a blank line drops the memory off
         the map entirely, which is far worse than a mediocre trigger."""
         from .distill.gate import composed_number_violations
+        if (face := self._face_parts(desc)):
+            return face[0] + self._mechanical(face[1], title) + face[2]
         raw = re.sub(r"\s+", " ", desc).strip()
         clean = re.sub(r"\s+", " ", desc.replace("**", "")).strip()
         if estimate(clean) <= self.trigger_tokens:
@@ -541,6 +562,12 @@ class Loom:
 
     def _make_trigger(self, title: str, desc: str) -> tuple[str, bool]:
         """→ (trigger, came_from_model)."""
+        # A faced line is compressed INSIDE its face: the scribe is shown only the
+        # part it may shorten, so no answer of its own can drop the retirement word
+        # or the link to the successor.
+        if (face := self._face_parts(desc)):
+            inner, from_model = self._make_trigger(title, face[1])
+            return face[0] + inner + face[2], from_model
         if self.scribe:
             out = self.scribe.ask(
                 HOOK_SYS.format(limit=self.trigger_tokens, chars=self._char_budget(desc)),

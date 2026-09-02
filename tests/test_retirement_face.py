@@ -11,10 +11,12 @@ import hashlib
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from distill_kura.store import Store                          # noqa: E402
+from distill_kura.weave import Loom                           # noqa: E402
 
 
 def a_store(tmp_path, policy="direct-allowed"):
@@ -199,3 +201,67 @@ def test_a_grouped_index_line_is_left_to_its_author(tmp_path):
     s._write_index("# m\n\n- ways — [old](old-way.md)/[new](new-way.md)\n")
     r = s.retire("old-way", "new-way", user_manifest(s))
     assert not r["ok"] and "no index line of its own" in r["error"]
+
+
+# ── the face survives the map ───────────────────────────────────────────────
+
+def _aged(store: Store, slug: str, days: float = 400) -> None:
+    """Push a memory out of the `fresh` layer so its line is actually compressed."""
+    old = time.time() - days * 86400
+    os.utime(store.file_of(slug), (old, old))
+
+
+def a_long_faced_store(tmp_path):
+    s = Store(name="m", path=str(tmp_path / "m"))
+    s.init_files()
+    s.remember("k3-plan",
+               "K3をSSD階層で走らせる計画。純CPUで10 tok/sを狙う。作戦帳はCAMPAIGN.mdに置き、"
+               "職人はDSH-Qwenが担当し、監督は雲のユキが受け持つ長い長い説明の行", "本文")
+    s.remember("k3-new", "新しい計画", "本文")
+    h = a_manifest(s, [{"class": "USER", "text": "k3-plan はもうやめる。新しい方でいく"}])
+    assert s.retire("k3-plan", "k3-new", h)["ok"]
+    _aged(s, "k3-plan")
+    return s
+
+
+def test_the_weave_never_compresses_the_face_away(tmp_path):
+    """The face's tail is exactly what a length cut removes — and a worn map that
+    says a dead plan is current, with no link to what replaced it, is worse than no
+    map at all."""
+    s = a_long_faced_store(tmp_path)
+    canonical = next(l for l in s.index_text().splitlines() if "(k3-plan.md)" in l)
+    for generate in (False, True):
+        cloth = Loom(s, scribe=None).weave(generate=generate)
+        line = next(l for l in cloth.text.splitlines() if "(k3-plan.md)" in l)
+        assert "退役: " in line and "[[k3-new]]" in line, line
+        assert len(line) < len(canonical), "and it did compress"
+
+
+def test_a_scribes_answer_cannot_drop_the_face_either(tmp_path):
+    """The scribe is shown only the part inside the face, so no answer of its own
+    can lose the retirement word or the successor link."""
+    class Scribe:
+        def ask(self, system, user, **kw):
+            return "K3をSSD階層で走らせる計画"     # grounded, and faceless
+
+    s = a_long_faced_store(tmp_path)
+    line = next(l for l in Loom(s, scribe=Scribe()).weave().text.splitlines()
+                if "(k3-plan.md)" in l)
+    assert line.endswith("／現在は [[k3-new]]") and "退役: " in line
+    assert "K3をSSD階層で走らせる計画" in line, "and the scribe's compression is still worn"
+
+
+def test_the_floors_accept_a_faced_trigger(tmp_path):
+    """floors._OBSOLETE refuses a cut that DROPS a retirement word; it must not refuse
+    one that carries it."""
+    from distill_kura import floors
+
+    s = a_long_faced_store(tmp_path)
+    desc = next(l for l in s.index_text().splitlines()
+                if "(k3-plan.md)" in l).split(" — ", 1)[1]
+    loom = Loom(s, scribe=None)
+    trigger = loom._mechanical(desc, "k3-plan")
+    assert floors.first_violation(trigger, "k3-plan", desc, loom) is None
+    # And the guard it exists for still bites: the same cut without the face.
+    faceless = trigger.split("／")[0].removeprefix("退役: ")
+    assert floors.first_violation(faceless, "k3-plan", desc, loom) == "retirement word dropped"
