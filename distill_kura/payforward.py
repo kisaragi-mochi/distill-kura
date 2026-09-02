@@ -71,6 +71,7 @@ from datetime import datetime
 from . import prefill as prefill_mod
 from .registry import Registry, mouth_base as _base
 from .store import Store
+from .thinker import bearer_headers
 
 # 12 of the etag's 16 hex chars: enough to keep two maps' files apart, short enough
 # that the filename stays readable in a directory listing.
@@ -118,9 +119,7 @@ def _post(url: str, body: dict, timeout: float, api_key_env: str | None) -> tupl
     """POST json → (status, parsed reply). An HTTP error status is an ANSWER — a 400
     from a restore means "no such file", which the caller acts on — so it comes back
     as a status, not an exception. Only never-reached-the-server raises (OSError)."""
-    headers = {"Content-Type": "application/json"}
-    if api_key_env and os.environ.get(api_key_env):
-        headers["Authorization"] = f"Bearer {os.environ[api_key_env]}"
+    headers = {"Content-Type": "application/json", **bearer_headers(api_key_env)}
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:

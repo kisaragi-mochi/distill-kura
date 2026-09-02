@@ -41,6 +41,14 @@ import urllib.request
 from dataclasses import dataclass, field
 
 
+def bearer_headers(api_key_env: str | None) -> dict:
+    """`{"Authorization": "Bearer <key>"}` when the named variable is set and non-empty,
+    else `{}`. Empty counts as unset — the rule all three callers (ask, alive and
+    payforward._post) already applied separately, in three copies of the same block."""
+    key = os.environ.get(api_key_env, "") if api_key_env else ""
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
 @dataclass
 class Endpoint:
     # No built-in default: an unset url used to silently become 127.0.0.1:8000, so a
@@ -95,13 +103,13 @@ class Endpoint:
         if not self.url:
             self.last_error = "no url configured"
             return None                 # unconfigured is unreachable, not "somewhere else"
-        headers = {"Content-Type": "application/json"}
-        if self.api_key_env:
-            key = os.environ.get(self.api_key_env, "")
-            if key:
-                headers["Authorization"] = f"Bearer {key}"
-            else:
-                self.last_error = f"{self.api_key_env} is not set"
+        headers = {"Content-Type": "application/json", **bearer_headers(self.api_key_env)}
+        # The note rides the HTTP failure instead of being written to last_error here:
+        # written here it was a dead store — every exit path below reassigns last_error
+        # before returning, so no operator could ever see it. A missing key surfaces as
+        # a 401, and that is the message that needs to say the variable was never set.
+        key_note = ("" if not self.api_key_env or "Authorization" in headers
+                    else f"; {self.api_key_env} is not set")
         for dialect in (self.dialect, "generic"):
             try:
                 req = urllib.request.Request(
@@ -122,7 +130,7 @@ class Endpoint:
                     detail = e.read().decode()[:200]
                 except Exception:
                     pass
-                self.last_error = f"HTTP {e.code} ({dialect} body): {detail}"
+                self.last_error = f"HTTP {e.code} ({dialect} body{key_note}): {detail}"
                 # 400 usually means "I do not know that field". Worth one plainer attempt;
                 # anything else is a key, a model name or a server, and retrying is noise.
                 if e.code != 400 or dialect == "generic":
@@ -139,9 +147,8 @@ class Endpoint:
         if not self.url:
             return False
         try:
-            req = urllib.request.Request(self.url.rstrip("/") + "/models")
-            if self.api_key_env and os.environ.get(self.api_key_env):
-                req.add_header("Authorization", f"Bearer {os.environ[self.api_key_env]}")
+            req = urllib.request.Request(self.url.rstrip("/") + "/models",
+                                         headers=bearer_headers(self.api_key_env))
             urllib.request.urlopen(req, timeout=5).read()
             return True
         except Exception:
