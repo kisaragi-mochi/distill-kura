@@ -267,3 +267,15 @@ def test_cli_resident_file_wants_name_equals_path(tmp_path):
         main(["-c", cfg, "-s", "m", "bench", "worldline", "--cases", CASES,
               "--routing", "fastpath", "--resident-file", "nopath"])
     assert "NAME=PATH" in str(e.value)
+
+
+def test_every_trace_names_the_map_it_wore_by_hash(tmp_path):
+    """'adaptive' is a label; the sha says WHICH trigger set was measured (FAILURES FOUND #2)."""
+    s = build(tmp_path)
+    stub = StubModel({})
+    vs = wl.resident_variants(s, ["canonical", "woven"])
+    out = wl.run(s, [case("wf-direct-1")], "agent-only", thinker=stub, resident_variants=vs)
+    shas = {t["resident_variant"]: t["resident_sha"] for t in out["traces"]}
+    assert len(shas["canonical"]) == 12 and shas["canonical"] != shas["woven"]
+    for name, v in out["variants"].items():
+        assert v["resident_sha"] == shas[name]

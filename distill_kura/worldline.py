@@ -29,6 +29,7 @@ loop (M8) and a proxy would be measured instead of the thing.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -160,6 +161,12 @@ def _agent_answer(raw: str, store: Store) -> dict:
             "format_error": False}
 
 
+def _map_sha(text: str) -> str:
+    """Identity of the resident map that was actually worn — the name alone
+    ("adaptive") cannot say WHICH trigger set a trace was measured against."""
+    return hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:12]
+
+
 def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = None,
              resident: str | None = None, fastpath_cfg: dict | None = None,
              hops: int = 1, agent: dict | None = None,
@@ -169,6 +176,7 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
     resident = store.index_text() if resident is None else resident
     tr = {"case": case.get("id", ""), "category": case.get("category", ""),
           "routing": routing, "resident_variant": resident_variant,
+          "resident_sha": _map_sha(resident),
           "resident_tokens": estimate(resident),
           "first_tool": "", "opened": [], "related_reached": [],
           "thinker_calls": 0, "fastpath_used": False, "recall_context_tokens": 0,
@@ -327,6 +335,7 @@ def run(store: Store, cases: list[dict], routing: str = "full",
                          fastpath_cfg=fastpath_cfg, hops=hops, agent=agent,
                          use_cues=use_cues, resident_variant=name) for c in cases]
         variants[name] = {"resident_tokens": estimate(text or ""),
+                          "resident_sha": _map_sha(text or ""),
                           "summary": summarize(rows)}
         traces.extend(rows)
     if trace_path:
