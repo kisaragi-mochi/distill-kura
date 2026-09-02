@@ -552,3 +552,58 @@ def test_a_straight_pour_verifies_the_manifests_bytes(tmp_path):
         f.write(" ")
     out = d.pour("archive-on-slow-disk")
     assert not out["ok"] and "manifest" in out["why"]
+
+
+def test_a_second_coverage_pass_drops_a_topic_the_first_already_took(tmp_path):
+    """The audit pass is told what the first pass took. If the dedup or the cap broke,
+    the same candidate would be composed twice — two drafts, two memories, one fact."""
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    d.coverage_passes, d.max_items = 2, 4
+    seen = {}
+    more = json.dumps([{"topic": "archive-on-slow-disk", "kind": "project", "why": "again",
+                        "quotes": ["[USER] put the archive on the slow disk"]},
+                       {"topic": "mirror-hunch", "kind": "project", "why": "a mirror",
+                        "quotes": ["[SELF] I think we should also mirror it"]}])
+
+    def pick(task, user, max_tokens=0):
+        if "already took the candidates" in task:
+            seen["user"] = user
+            return more
+        return SPOT if "deserves to become a permanent memory" in task else ""
+    d.brain = pick          # type: ignore[method-assign]
+    segs, _, _ = d.sip_one()
+    assert [c["topic"] for c in d.spot(segs)] == ["archive-on-slow-disk", "mirror-hunch"]
+    assert "=== ALREADY TAKEN ===" in seen["user"] and "archive-on-slow-disk" in seen["user"]
+
+
+def test_a_draft_edited_while_judged_gets_no_verdict(tmp_path):
+    """The verdict binds the bytes the model read. A draft that changed under the
+    judge must not be poured on the old verdict — and one that vanished must not
+    raise, or a single removed file would end the drain for every other draft."""
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE, "draw the last line": "POUR\nreason: fine"})
+    assert d.run(chunks=1)["drafts"] == ["archive-on-slow-disk"]
+    orig = d.judge_draft
+
+    def racing(path):
+        j = orig(path)
+        open(path, "a", encoding="utf-8").write("\n")
+        return j
+    d.judge_draft = racing          # type: ignore[method-assign]
+    out = d.drain()
+    assert out["poured"] == 0 and out["tossed"] == 0 and out["left"] == 1
+    assert store.read("archive-on-slow-disk") == ""
+
+    def vanishing(path):
+        j = orig(path)
+        os.remove(path)
+        return j
+    d.judge_draft = vanishing       # type: ignore[method-assign]
+    out = d.drain()
+    assert out["poured"] == 0 and out["left"] == 0
+    assert store.read("archive-on-slow-disk") == ""

@@ -267,6 +267,9 @@ def test_extension_heading_date_is_the_journals_not_the_models(tmp_path):
     # a heading with no date at all gets the date put in front
     d.scribe = lambda task, u, max_tokens=0: "SECTION: ## the verdict log\nBODY:\nnew fact\n"   # type: ignore
     assert d._compose_extension(c)["body"].startswith("## 2026-08-20 the verdict log")
+    # and no SECTION line at all: the heading is the date, from the journal
+    d.scribe = lambda task, u, max_tokens=0: "BODY:\nnew fact\n"   # type: ignore
+    assert d._compose_extension(c)["body"].startswith("## 2026-08-20\n")
 
 
 # ── round four: the index-line rewriter wears the floor ──────────────────────
