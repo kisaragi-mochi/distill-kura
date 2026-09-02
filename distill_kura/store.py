@@ -439,13 +439,9 @@ class Store:
         parser — a memory's frontmatter is four or five plain `key: value` lines by
         construction, and pulling in a parser for that would add a dependency to a
         project that has none."""
-        if not text.startswith("---"):
-            return {}
-        end = text.find("\n---", 3)
-        if end == -1:
-            return {}
+        block, _ = Store._split(text)          # one definition of where the block ends
         out: dict[str, str] = {}
-        for line in text[3:end].splitlines():
+        for line in block.splitlines():
             m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$", line)
             if m and m.group(2).strip():
                 out.setdefault(m.group(1), m.group(2).strip().strip("\"'"))
@@ -704,7 +700,7 @@ class Store:
             fm_raw, body = self._split(text)
             if not fm_raw:
                 return {"ok": False, "error": f"{s} has no frontmatter to annotate"}
-            fm = self.frontmatter(s)
+            fm = self._frontmatter_of(text)    # the text already in hand, under the lock
             # Reading through tags() hides an unreadable tags line (it returns () by
             # design, for doctor); writing that () back would ERASE the tags. An
             # unreadable line is a refusal, not a haircut.
@@ -722,7 +718,7 @@ class Store:
             # newlines and the parser strips the ends, so a sentence with a
             # trailing space was signed as-written, read back stripped, and the
             # memory wore `tampered` forever — from one keystroke of whitespace.
-            new_ann = {**self.annotations(s),
+            new_ann = {**self._annotations_of(fm),
                        **{k: str(v).replace("\n", " ").strip()
                           for k, v in (annotations or {}).items()
                           if str(v).replace("\n", " ").strip()}}

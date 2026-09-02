@@ -241,3 +241,16 @@ def test_a_tagged_memory_is_byte_stable_across_a_read_write_cycle(tmp_path):
     # The file is legible as the JSON it claims to be.
     line = [l for l in first.decode().splitlines() if l.strip().startswith("tags:")][0]
     assert json.loads(line.split(":", 1)[1]) == ["a-tag", "b-tag"]
+
+
+def test_an_unterminated_frontmatter_block_is_no_frontmatter_at_all(tmp_path):
+    """`_frontmatter_of` and `_split` must agree on where the block ends — they used
+    to carry two copies of the rule. An opening `---` with no closing one is the edge
+    that would show a disagreement, and nothing exercised it."""
+    s = make(tmp_path)
+    s.remember_direct("m", "d", "b")
+    torn = "---\nname: m\ndescription: d\nno closing fence here\n"
+    with open(s.file_of("m"), "w", encoding="utf-8") as f:
+        f.write(torn)
+    assert s.frontmatter("m") == {}
+    assert Store._split(torn) == ("", torn)
