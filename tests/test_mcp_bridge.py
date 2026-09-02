@@ -52,6 +52,8 @@ class FakeKura(BaseHTTPRequestHandler):
         if self.path.startswith("/prefill"):
             return self._json({"text": "<<<KURA-MAP store=maker>>>\n- [A](a.md) — t\n"
                                        "<<<END KURA-MAP>>>\n", "etag": "e1"})
+        if self.path.startswith("/doctor"):
+            return self._json({"memories": 1, "dead_links": [], "islands": []})
         if self.path.startswith("/stores"):
             return self._json({"default": "maker",
                                "stores": {"maker": {"label": "m", "memories": 1,
@@ -128,6 +130,18 @@ def test_writable_bridge_offers_and_performs_the_write():
         assert "kura_remember" in [t["name"] for t in out[1]["result"]["tools"]]
         assert out[2]["result"]["isError"] is False
         assert any("remember" in c for c in FakeKura.calls)
+    finally:
+        srv.shutdown()
+
+
+def test_kura_doctor_relays_the_store_health_as_json():
+    """The tool had no test at all: a dispatch-table slip would have gone unnoticed."""
+    srv, url = start()
+    try:
+        out = speak(url, [INIT, call("kura_doctor", {})])
+        assert out[1]["result"]["isError"] is False
+        assert json.loads(out[1]["result"]["content"][0]["text"])["memories"] == 1
+        assert any(c.startswith("GET /doctor") for c in FakeKura.calls)
     finally:
         srv.shutdown()
 
