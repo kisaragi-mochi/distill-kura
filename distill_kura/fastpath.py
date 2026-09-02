@@ -36,8 +36,8 @@ from typing import TYPE_CHECKING
 
 from .store import LINK                  # the index-link grammar, defined once
 
-if TYPE_CHECKING:                       # types only: this module is a layer ON TOP
-    from .store import Store            # of the store API, never under it
+if TYPE_CHECKING:                       # types only: this module is a layer on top of
+    from .store import Store            # the store — it reads, it never writes
 
 # The heads' weights in the vote. `name` dominates because a whole slug or title
 # inside the question is nearly a citation; `char2` barely counts because two

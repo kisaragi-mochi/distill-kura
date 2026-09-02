@@ -795,7 +795,12 @@ class Store:
         replay applies a leftover transaction's FINAL bytes, so it must run before any
         new mutation — a write that landed first would be silently overwritten by the
         older promise. Every mutation goes through here, so replay cannot be forgotten.
-        `replay=False` is for `doctor()` alone, which replays explicitly to report it."""
+        `replay=False` is for `doctor()` alone, which replays explicitly to report it.
+
+        Package-internal, but not store-internal: the composite operations that must
+        look like one write enter here too — `tidy` (distill/pipeline.py), the loom's
+        `persist` and the trail's write. Underscore means "inside distill_kura", not
+        "inside this class"; it is not part of the published API."""
         os.makedirs(self.still, exist_ok=True)
         with open(os.path.join(self.still, "store.lock"), "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
