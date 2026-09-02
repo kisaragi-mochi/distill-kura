@@ -1,5 +1,5 @@
 {
-  "comment": "Worldline benchmark cases. Each case is one utterance a person might open a session with, and what a well-remembering house should do with it. target_slugs: reaching any one counts. acceptable_related: neighbours that also count as landing well (reported separately, never required). must_not_anchor: landing here is a wrong branch. Category 'unknown' has empty target_slugs: success is answering from nothing, i.e. opening NOTHING. Adapt the slugs to the store you run against; a case whose targets are absent from the store is skipped honestly, never scored.",
+  "comment": "Worldline benchmark cases. Each case is one utterance a person might open a session with, and what a well-remembering house should do with it. target_slugs: reaching any one counts. acceptable_related: neighbours that also count as landing well (reported separately, never required). must_not_anchor: landing here is a wrong branch. obsolete_slugs: landing here is an OBSOLETE branch — the memory was thrown away and the fixture says so; counted apart from wrong_branch. Category 'unknown' has empty target_slugs: success is answering from nothing, i.e. opening NOTHING. Every slug here exists in memories.json (seed a fresh store from it); against another store a case whose targets are absent is skipped honestly, never scored.",
   "cases": [
     {"id": "wf-direct-1", "utterance": "continued: the freetoken-hybrid experiment", "target_slugs": ["freetoken-hybrid"], "acceptable_related": ["exl3-cpu"], "must_not_anchor": [], "category": "direct-name"},
     {"id": "wf-direct-2", "utterance": "pick up the sazanami-pcie-audit where we left it", "target_slugs": ["sazanami-pcie-audit"], "acceptable_related": [], "must_not_anchor": [], "category": "direct-name"},
@@ -13,8 +13,8 @@
     {"id": "wf-reversal-1", "utterance": "やっぱり前の方式に戻そうと思う", "target_slugs": ["inference-backend-choice"], "acceptable_related": [], "must_not_anchor": [], "category": "reversal"},
     {"id": "wf-reversal-2", "utterance": "見直したら、あの判断は取り消しで", "target_slugs": ["storage-tiering-doctrine"], "acceptable_related": [], "must_not_anchor": [], "category": "reversal"},
 
-    {"id": "wf-superseded-1", "utterance": "推論サーバーどうする? あの古いプランでいい?", "target_slugs": ["inference-backend-choice"], "acceptable_related": [], "must_not_anchor": ["old-abandoned-plan"], "category": "superseded-plan"},
-    {"id": "wf-superseded-2", "utterance": "記憶の保存先、例の撤回した案で進める?", "target_slugs": ["memory-store-layout"], "acceptable_related": [], "must_not_anchor": ["sqlite-first-draft"], "category": "superseded-plan"},
+    {"id": "wf-superseded-1", "utterance": "推論サーバーどうする? あの古いプランでいい?", "target_slugs": ["inference-backend-choice"], "acceptable_related": [], "must_not_anchor": [], "category": "superseded-plan", "obsolete_slugs": ["old-abandoned-plan"]},
+    {"id": "wf-superseded-2", "utterance": "記憶の保存先、例の撤回した案で進める?", "target_slugs": ["memory-store-layout"], "acceptable_related": [], "must_not_anchor": [], "category": "superseded-plan", "obsolete_slugs": ["sqlite-first-draft"]},
 
     {"id": "wf-cross-1", "utterance": "オプション取引のヘッジの話から離れるけど、GPUの電力ってどうだったっけ", "target_slugs": ["gpu-power-measure"], "acceptable_related": [], "must_not_anchor": ["lna-options-hedge"], "category": "cross-domain"},
     {"id": "wf-cross-2", "utterance": "蔵の話はおいといて。PCIeの安定性、あれ原因判明した?", "target_slugs": ["pcie-audit-findings"], "acceptable_related": [], "must_not_anchor": [], "category": "cross-domain"},
@@ -29,6 +29,17 @@
     {"id": "wf-near-2", "utterance": "quantizationの件", "target_slugs": ["exl3-quantization"], "acceptable_related": [], "must_not_anchor": ["gguf-quantization"], "category": "near-collision"},
 
     {"id": "wf-unknown-1", "utterance": "そういえば京都の家の改修どうしよう", "target_slugs": [], "acceptable_related": [], "must_not_anchor": [], "category": "unknown"},
-    {"id": "wf-unknown-2", "utterance": "learned the piano tuning trick yet?", "target_slugs": [], "acceptable_related": [], "must_not_anchor": [], "category": "unknown"}
+    {"id": "wf-unknown-2", "utterance": "learned the piano tuning trick yet?", "target_slugs": [], "acceptable_related": [], "must_not_anchor": [], "category": "unknown"},
+
+    {"id": "wf-prefix-1", "utterance": "fan install — the throughput number, what was it", "target_slugs": ["fan-install-throughput"], "acceptable_related": [], "must_not_anchor": ["fan-install-dimm-side"], "category": "prefix-collision"},
+    {"id": "wf-prefix-2", "utterance": "fan install, the DIMM side — did we ever measure it", "target_slugs": ["fan-install-dimm-side"], "acceptable_related": [], "must_not_anchor": ["fan-install-throughput"], "category": "prefix-collision"},
+
+    {"id": "wf-callsign-only-1", "utterance": "全員野球", "target_slugs": ["zenin-yakyu"], "acceptable_related": ["freetoken-hybrid"], "must_not_anchor": [], "category": "callsign"},
+
+    {"id": "wf-obsolete-1", "utterance": "archive on the slow disk, right? the morning rule", "target_slugs": ["archive-on-nas"], "acceptable_related": ["storage-tiering-doctrine"], "must_not_anchor": [], "obsolete_slugs": ["archive-on-slow-disk"], "category": "obsolete-resurrection"},
+
+    {"id": "wf-ja-only-1", "utterance": "柿の木、そろそろ切る時期でしたっけ", "target_slugs": ["kaki-no-ki"], "acceptable_related": [], "must_not_anchor": [], "category": "japanese-only"},
+
+    {"id": "wf-unknown-3", "utterance": "the greenhouse heater — did the part arrive?", "target_slugs": [], "acceptable_related": [], "must_not_anchor": [], "category": "unknown"}
   ]
 }

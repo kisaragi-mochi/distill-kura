@@ -68,6 +68,27 @@ def _distiller(reg: Registry, store: Store):
     return Distiller(reg, store)
 
 
+_WL_COLS = ("runnable", "target_reached", "wrong_branch", "obsolete_branch",
+            "honest_unknown", "remembered_but_unreachable", "unnecessary_opens",
+            "thinker_calls_total", "opened_mean")
+
+
+def _worldline_table(r: dict) -> str:
+    """Per resident variant, the map's size and the raw counts side by side — the
+    guide's §9 comparison in one glance. Counts, not a score: a column that went
+    up and a column that went down are meant to be read together."""
+    head = ["variant", "resident_tokens", *_WL_COLS]
+    rows = [head]
+    for name, v in r.get("variants", {}).items():
+        sm = v["summary"]
+        rows.append([name, str(v["resident_tokens"]), *[str(sm.get(c, "")) for c in _WL_COLS]])
+    widths = [max(len(row[i]) for row in rows) for i in range(len(head))]
+    lines = ["  ".join(c.ljust(widths[i]) for i, c in enumerate(row)) for row in rows]
+    lines.insert(1, "  ".join("-" * w for w in widths))
+    return (f"worldline  store={r['store']}  routing={r['routing']}  cases={r['cases']}\n"
+            + "\n".join(lines))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="kura", description="distilled long-term memory for agents")
     ap.add_argument("-c", "--config", help="path to kura.toml (default: ./kura.toml)")
@@ -162,6 +183,16 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--no-cues", action="store_true",
                    help="run the fastpath tier without the callsign pre-head — the "
                         "comparison that isolates what the shared vocabulary buys")
+    b.add_argument("--resident", default="canonical",
+                   help="resident-map variants to put the SAME cases in front of, "
+                        "comma-separated: canonical (the full index), woven (the "
+                        "production cloth, no model calls), or a name given by "
+                        "--resident-file. Default: canonical")
+    b.add_argument("--resident-file", action="append", default=[], metavar="NAME=PATH",
+                   help="a text file to wear as the resident map under NAME (repeatable) "
+                        "— how a map from a module that does not exist yet gets measured")
+    b.add_argument("--json", action="store_true",
+                   help="dump the full result with traces (default: a per-variant table)")
 
     p = sub.add_parser("init", help="create a new store")
     p.add_argument("name")
@@ -251,18 +282,47 @@ def main(argv: list[str] | None = None) -> int:
             # A retention run that scores badly should not look like a passing command.
             return 0 if r["score"] >= 0.9 else 1
         if a.bcmd == "worldline":
+            from . import worldline as wl
+            from .thinker import Endpoint
             try:
-                r = bench.worldline(reg, store, a.cases, routing=a.routing,
-                                    hops=a.hops, trace_path=a.trace,
-                                    agent_url=a.agent_url, agent_model=a.agent_model,
-                                    use_cues=not a.no_cues)
-            except ValueError as e:
-                sys.exit(str(e))            # a mode conflict, named, not a traceback
-            print(json.dumps(r, ensure_ascii=False, indent=1))
+                files = {}
+                for spec in a.resident_file:
+                    name, sep, path = spec.partition("=")
+                    if not sep or not name or not path:
+                        raise ValueError(f"--resident-file wants NAME=PATH, got {spec!r}")
+                    files[name] = path
+                names = [n.strip() for n in a.resident.split(",") if n.strip()]
+                variants = wl.resident_variants(store, names, files,
+                                                prefill_cfg=reg.prefill_cfg_for(store))
+                thinker = reg.models_for(store).thinker
+                identity = None
+                if a.routing == "agent-only":
+                    if a.agent_url:
+                        thinker = Endpoint(url=a.agent_url, model=a.agent_model or "agent")
+                    identity = {"url": thinker.url, "model": thinker.model}
+                elif a.agent_url or a.agent_model:
+                    # The same refusal bench.worldline() makes: full ALWAYS runs the
+                    # configured thinker, or the routing modes stop being comparable.
+                    raise ValueError("--agent-url/--agent-model measure agent-only routing; "
+                                     f"--routing {a.routing!r} always uses the configured thinker")
+                r = wl.run(store, wl.load_cases(a.cases), routing=a.routing,
+                           thinker=thinker, fastpath_cfg=reg.fastpath_cfg_for(store),
+                           hops=a.hops,
+                           trace_path=a.trace
+                           or os.path.join(store.still, "worldline-traces.jsonl"),
+                           agent=identity, use_cues=not a.no_cues,
+                           resident_variants=variants)
+            except (ValueError, OSError) as e:
+                sys.exit(str(e))            # a mode conflict or a bad file, named, not a traceback
+            if a.json:
+                print(json.dumps(r, ensure_ascii=False, indent=1))
+            else:
+                print(_worldline_table(r))
             # A wrong branch (an abandoned plan anchoring a case) is the one result
-            # that must never read as a passing run; nothing runnable is the other.
+            # that must never read as a passing run — and a resurrected obsolete
+            # plan is the worse form of it; nothing runnable is the other.
             s = r["summary"]
-            return 0 if s["runnable"] and not s["wrong_branch"] else 1
+            return 0 if s["runnable"] and not s["wrong_branch"] and not s["obsolete_branch"] else 1
         sys.exit("kura bench {compress|retention}")
 
     if a.cmd in ("weave", "prefill", "trail"):

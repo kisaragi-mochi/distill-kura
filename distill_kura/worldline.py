@@ -16,9 +16,16 @@ own cognition behind a retriever):
                  rescue is a different mode's measurement.
     full         the production recall path.
 
+Resident variants (the guide's §9) put the SAME cases in front of different maps:
+`canonical` (the full index), `woven` (the production cloth, no model calls), and
+any named text handed in from a file — so a map produced by a module that does not
+exist yet can be measured the day it does. agent-only is the variant judge: the
+other two routes let a rescue path hide a map that has grown too thin.
+
 Traces are raw metrics only. There is deliberately no composite score: report the
 counts and the costs and read them together, or the number starts optimizing for
-itself.
+itself. `explanation_burden` is left out on purpose — it needs a human in the
+loop (M8) and a proxy would be measured instead of the thing.
 """
 from __future__ import annotations
 
@@ -33,6 +40,7 @@ from .thinker import Endpoint
 from .tokens import estimate
 
 ROUTES = ("agent-only", "fastpath", "full")
+BUILTIN_VARIANTS = ("canonical", "woven")
 
 # The conversation model, playing itself: it sees exactly what a real agent wears
 # (the resident map) and answers with slugs. Nothing about kura's retrieval stack
@@ -59,6 +67,60 @@ def load_cases(path: str) -> list[dict]:
     if not isinstance(cases, list):
         raise ValueError(f"{path}: expected a JSON array of cases (or {{\"cases\": [...]}})")
     return cases
+
+
+def seed(store: Store, path: str) -> list[str]:
+    """Plant the benchmark's fixture memories (bench/worldline/memories.json) into
+    a store. The shipped cases name these slugs, so a fresh store seeded from the
+    file runs every case instead of skipping them all — and no case ever has to
+    point at a house's private memories to be runnable."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    mems = data.get("memories") if isinstance(data, dict) else data
+    if not isinstance(mems, list):
+        raise ValueError(f"{path}: expected a JSON array of memories (or {{\"memories\": [...]}})")
+    planted: list[str] = []
+    for m in mems:
+        r = store.remember_direct(m["slug"], m["description"], m.get("body", ""),
+                                  type_=m.get("type", "project"), tags=m.get("tags"))
+        if not r.get("ok", True):
+            # A refused write is a store policy, not a fixture — say so, or the
+            # whole run skips honestly for a reason nobody can see.
+            raise RuntimeError(f"seeding {m['slug']!r} refused: {r.get('error')}")
+        planted.append(m["slug"])
+    return planted
+
+
+def resident_variants(store: Store, names, files: dict[str, str] | None = None,
+                      prefill_cfg: dict | None = None) -> dict[str, str]:
+    """name → resident text, for every variant the caller asked for.
+
+    `canonical` is the store's index; `woven` is what the loom would give right
+    now WITHOUT a model (`generate=False`) — a benchmark must not spend GPU
+    seconds, and a cloth that needed a model to exist is not the cloth in
+    production anyway. Anything else must be in `files` (name → path): an unknown
+    name is refused loudly, because a typo that fell back to canonical would
+    print a perfectly healthy comparison of one map against itself."""
+    files = dict(files or {})
+    out: dict[str, str] = {}
+    for name in names:
+        if name in out:
+            continue
+        if name in files:
+            with open(files[name], encoding="utf-8") as f:
+                out[name] = f.read()
+        elif name == "canonical":
+            out[name] = store.index_text()
+        elif name == "woven":
+            from .prefill import loom_for
+            out[name] = loom_for(store, prefill_cfg).weave(generate=False).text
+        else:
+            raise ValueError(f"unknown resident variant {name!r}: builtins are "
+                             f"{BUILTIN_VARIANTS}, files are {sorted(files) or 'none'}")
+    for name in files:
+        if name not in out:
+            out[name] = open(files[name], encoding="utf-8").read()
+    return out
 
 
 def _clean(name: str) -> str:
@@ -101,15 +163,18 @@ def _agent_answer(raw: str, store: Store) -> dict:
 def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = None,
              resident: str | None = None, fastpath_cfg: dict | None = None,
              hops: int = 1, agent: dict | None = None,
-             use_cues: bool = True) -> dict:
-    """One utterance, one routing mode, one honest trace row."""
+             use_cues: bool = True, resident_variant: str = "canonical") -> dict:
+    """One utterance, one routing mode, one resident map, one honest trace row."""
     t0 = time.perf_counter()
     resident = store.index_text() if resident is None else resident
     tr = {"case": case.get("id", ""), "category": case.get("category", ""),
-          "routing": routing, "resident_tokens": estimate(resident),
+          "routing": routing, "resident_variant": resident_variant,
+          "resident_tokens": estimate(resident),
           "first_tool": "", "opened": [], "related_reached": [],
           "thinker_calls": 0, "fastpath_used": False, "recall_context_tokens": 0,
-          "target_reached": False, "wrong_branch": False, "skipped": None,
+          "target_reached": False, "wrong_branch": False, "obsolete_branch": False,
+          "remembered_but_unreachable": False, "unnecessary_opens": [],
+          "skipped": None,
           "proposed_slugs": [], "invalid_slugs": [], "format_error": False,
           "cue_hit": None, "cue_ambiguous": False,
           "agent": agent if routing == "agent-only" else None}
@@ -180,9 +245,28 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
             # that hands back look-alikes for a question it knows nothing about
             # scores worse than one that says "not remembered".
             tr["target_reached"] = not tr["opened"]
-        tr["related_reached"] = [s for s in (case.get("acceptable_related") or [])
-                                 if s in tr["opened"]]
-        tr["wrong_branch"] = any(s in tr["opened"] for s in (case.get("must_not_anchor") or []))
+        related = [s for s in (case.get("acceptable_related") or []) if s]
+        tr["related_reached"] = [s for s in related if s in tr["opened"]]
+        # An obsolete memory is one the fixture MARKS obsolete: it was thrown away,
+        # and landing on it resurrects a dead plan. Counted apart from an ordinary
+        # wrong branch (a live neighbour), because the two fail differently and a
+        # single count would let a rise in resurrections hide under a fall in
+        # near-misses. The map is not consulted for the mark — a benchmark that
+        # read tags to decide what counts would move with the store under test.
+        obsolete = [s for s in (case.get("obsolete_slugs") or []) if s]
+        tr["obsolete_branch"] = any(s in tr["opened"] for s in obsolete)
+        tr["wrong_branch"] = any(s in tr["opened"] and s not in obsolete
+                                 for s in (case.get("must_not_anchor") or []))
+        # "The memory exists, the door was too narrow": the target is IN the store
+        # (the absent case skipped above) and the map-reading route did not reach
+        # it. Only the routes that answer from the map count — in `full` the
+        # thinker's rescue is exactly what hides a thin map.
+        tr["remembered_but_unreachable"] = bool(
+            want and routing in ("agent-only", "fastpath") and not tr["target_reached"])
+        # Doors opened that were neither the target nor a neighbour the fixture
+        # accepts: the cost side of a wider trigger. For the unknown category every
+        # opening is unnecessary, which is the same statement as target_reached.
+        tr["unnecessary_opens"] = [s for s in tr["opened"] if s not in want and s not in related]
     tr["elapsed_ms"] = round((time.perf_counter() - t0) * 1000, 1)
     return tr
 
@@ -200,9 +284,17 @@ def summarize(traces: list[dict]) -> dict:
             "skipped": len(traces) - n,
             "target_reached": sum(1 for t in ran if t["target_reached"]),
             "wrong_branch": sum(1 for t in ran if t["wrong_branch"]),
+            "obsolete_branch": sum(1 for t in ran if t.get("obsolete_branch")),
             "related_touched": sum(len(t["related_reached"]) for t in ran),
+            # The unknown category answered from nothing. `honest_unknown` is the
+            # guide's name (§9); the older key stays so existing readers keep working.
+            "honest_unknown": sum(
+                1 for t in ran if t["category"] == "unknown" and t["target_reached"]),
             "unknown_refused_correctly": sum(
                 1 for t in ran if t["category"] == "unknown" and t["target_reached"]),
+            "remembered_but_unreachable": sum(
+                1 for t in ran if t.get("remembered_but_unreachable")),
+            "unnecessary_opens": sum(len(t.get("unnecessary_opens") or []) for t in ran),
             "thinker_calls_total": sum(t["thinker_calls"] for t in ran),
             "fastpath_direct_total": sum(1 for t in ran if t["fastpath_used"]),
             "cue_direct_total": sum(1 for t in ran if t.get("cue_hit") is not None),
@@ -215,17 +307,34 @@ def run(store: Store, cases: list[dict], routing: str = "full",
         thinker: Endpoint | None = None, resident: str | None = None,
         fastpath_cfg: dict | None = None, hops: int = 1,
         trace_path: str | None = None, agent: dict | None = None,
-        use_cues: bool = True) -> dict:
+        use_cues: bool = True,
+        resident_variants: dict[str, str] | None = None) -> dict:
+    """Every case under every resident variant, in one result.
+
+    `resident_variants` (name → map text) is the comparison the guide's §9 asks
+    for; without it the single `resident` runs as variant "canonical" (or
+    "resident" when the caller handed in its own text, so a trace never claims
+    a map it did not wear). The cases are the same objects for every variant —
+    the point is that only the map changes."""
     if routing not in ROUTES:
         raise ValueError(f"routing must be one of {ROUTES}, got {routing!r}")
-    traces = [run_case(store, c, routing, thinker=thinker, resident=resident,
-                       fastpath_cfg=fastpath_cfg, hops=hops, agent=agent,
-                       use_cues=use_cues) for c in cases]
+    if not resident_variants:
+        resident_variants = {"canonical" if resident is None else "resident": resident}
+    traces: list[dict] = []
+    variants: dict[str, dict] = {}
+    for name, text in resident_variants.items():
+        rows = [run_case(store, c, routing, thinker=thinker, resident=text,
+                         fastpath_cfg=fastpath_cfg, hops=hops, agent=agent,
+                         use_cues=use_cues, resident_variant=name) for c in cases]
+        variants[name] = {"resident_tokens": estimate(text or ""),
+                          "summary": summarize(rows)}
+        traces.extend(rows)
     if trace_path:
         with open(trace_path, "a", encoding="utf-8") as f:
             for t in traces:
                 f.write(json.dumps(t, ensure_ascii=False) + "\n")
-    result = {"store": store.name, "routing": routing, "cases": len(traces),
+    result = {"store": store.name, "routing": routing, "cases": len(cases),
+              "variants": variants,
               "summary": summarize(traces), "traces": traces}
     if routing == "agent-only":
         # Bookkeeping only: who was measured must be on record with the numbers.
