@@ -33,6 +33,22 @@ def test_verbatim_quote_survives():
     assert kept[0]["classes"] == ["USER"]
 
 
+def test_a_legacy_ken_or_me_tag_still_names_the_class_it_meant():
+    """The house once wrote [KEN] and [ME]. If those stopped mapping to USER and SELF,
+    an old quote would silently take the class of whatever haystack it was found in —
+    and the class is what decides what may be claimed."""
+    kept, _, _ = gate([{
+        "topic": "index-split", "kind": "project", "why": "a decision about the index",
+        "quotes": ["[KEN] let's move the index to a separate file"],
+    }], SEGS)
+    assert kept[0]["evidence"][0]["class"] == "USER"
+    kept, _, _ = gate([{
+        "topic": "pruning-needed", "kind": "project", "why": "my own judgement, a read",
+        "quotes": ["[ME] I think the index will need pruning before long"],
+    }], SEGS)
+    assert kept[0]["evidence"][0]["class"] == "SELF"
+
+
 def test_fabricated_quote_is_dropped():
     kept, dropped, _ = gate([{
         "topic": "invented", "kind": "project", "why": "sounds plausible",

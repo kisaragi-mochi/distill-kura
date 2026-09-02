@@ -34,6 +34,24 @@ _FACT_IN_IDEA_CLOTHING = re.compile(
     r"\b(user|human|ken|owner|they)\b.{0,24}\b(proposed|approved|decided|asked|chose|said|"
     r"confirmed|requested|wants|noted|instructed)\b", re.I)
 
+# A quote's claimed class, with the two legacy spellings the house used to write.
+_QUOTE_TAG = re.compile(r"\[(USER|TOOL|ACT|SELF|KEN|ME)\]\s*(.*)", re.S)
+
+# A [SELF]-only candidate has to SAY it is a judgement; these are the words that say so.
+_JUDGEMENT_WORDS = re.compile(r"judge|judgement|judgment|opinion|read it|見立て|判断", re.I)
+
+_ANY_DIGIT = re.compile(r"\d")
+
+# Narrower than _FACT_IN_IDEA_CLOTHING on purpose: that one reads an idea-hatch blob
+# (topic + why) and may cast wide, this one reads finished prose that is about to be
+# stored, where a wider net would refuse honest sentences. Do not unify them.
+_ATTRIBUTES_TO_HUMAN = [
+    re.compile(r"ケン(は|が|の指示|の決裁|さんが|確定|裁定|方針|決定|号令|決裁|指示|裁決|承認)", re.I),
+    re.compile(r"ケン\s*[:：]", re.I),
+    re.compile(r"\b(the user|the human|the owner|ken)\b\s+\w*\s*"
+               r"(decided|asked|approved|chose|instructed|said|ruled|confirmed)", re.I),
+]
+
 
 def norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
@@ -61,7 +79,7 @@ def gate(cands: list[dict], segs: list[Segment], store_text: str = "") -> tuple[
         echoed = 0
         for q in (c.get("quotes") or [])[:6]:
             q = str(q)
-            m = re.match(r"\[(USER|TOOL|ACT|SELF|KEN|ME)\]\s*(.*)", q, re.S)
+            m = _QUOTE_TAG.match(q)
             claimed, body = (m.group(1), m.group(2)) if m else (None, q)
             claimed = {"KEN": "USER", "ME": "SELF"}.get(claimed, claimed)   # legacy tags
             body = norm(body)[:MAX_QUOTE]
@@ -83,12 +101,12 @@ def gate(cands: list[dict], segs: list[Segment], store_text: str = "") -> tuple[
             continue
 
         judgement = classes == {"SELF"}
-        if judgement and not re.search(r"judge|judgement|judgment|opinion|read it|見立て|判断",
-                                       f"{c.get('why', '')} {c.get('topic', '')}", re.I):
+        if judgement and not _JUDGEMENT_WORDS.search(
+                f"{c.get('why', '')} {c.get('topic', '')}"):
             dropped.append({**c, "why_dropped": "turning the agent's own words into a fact"})
             continue
 
-        claims_number = bool(re.search(r"\d", f"{c.get('why', '')} {c.get('topic', '')}"))
+        claims_number = bool(_ANY_DIGIT.search(f"{c.get('why', '')} {c.get('topic', '')}"))
         grounded = bool(classes & {"TOOL", "ACT"})
         entry = {**c,
                  "evidence": good,
@@ -378,9 +396,8 @@ def attributes_to_human(text: str, classes: list[str], words: list[str] | None =
         return False
     # The house writes "ケン確定 / ケン裁定 / ケン方針 / ケン決定 / ケン: ..." at least as
     # often as "ケンが決めた"; a floor that knew only the verb forms let a cue rewrite
-    # who decided while every 2-gram stayed in place.
-    pat = words or [r"ケン(は|が|の指示|の決裁|さんが|確定|裁定|方針|決定|号令|決裁|指示|裁決|承認)",
-                    r"ケン\s*[:：]",
-                    r"\b(the user|the human|the owner|ken)\b\s+\w*\s*"
-                    r"(decided|asked|approved|chose|instructed|said|ruled|confirmed)"]
-    return any(re.search(p, text, re.I) for p in pat)
+    # who decided while every 2-gram stayed in place. The default vocabulary lives in
+    # _ATTRIBUTES_TO_HUMAN; `words` lets a caller floor a text against its own list.
+    if words is not None:
+        return any(re.search(p, text, re.I) for p in words)
+    return any(p.search(text) for p in _ATTRIBUTES_TO_HUMAN)
