@@ -30,14 +30,14 @@ memory below the cut appears not to exist.
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from dataclasses import dataclass
 
 from .store import Store
 from .tokens import estimate
 from .trail import Trail
-from .weave import Loom
+from .weave import (DEFAULT_FRESH_DAYS, DEFAULT_PINNED_TYPES,
+                    DEFAULT_TRIGGER_TOKENS, Loom)
 
 DEFAULT_HEADER = """=== {label} — long-term memory, index ===
 This is the map of everything remembered here: one line per memory, written as a
@@ -299,11 +299,12 @@ def loom_for(store: Store, cfg: dict | None = None, scribe=None) -> Loom:
     return Loom(
         store,
         scribe=scribe,
-        fresh_days=cfg.get("fresh_days", 14.0),
-        pinned_types=tuple(cfg.get("pinned_types", ("feedback", "user"))),
-        trigger_tokens=int(cfg.get("trigger_tokens", 24)),
+        fresh_days=cfg.get("fresh_days", DEFAULT_FRESH_DAYS),
+        pinned_types=cfg.get("pinned_types", DEFAULT_PINNED_TYPES),
+        trigger_tokens=cfg.get("trigger_tokens", DEFAULT_TRIGGER_TOKENS),
         verbatim_after=cfg.get("verbatim_after"),
-        out_path=cfg.get("cloth_path") or os.path.join(store.still, "index.woven.md"),
+        # None/"" -> Loom's own default under the store's `_still/`
+        out_path=cfg.get("cloth_path"),
     )
 
 

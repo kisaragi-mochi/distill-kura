@@ -105,6 +105,9 @@ MARKERS = ("⚠", "★")
 CLAUSE_END = re.compile(r"(?<=[。;；])\s*|(?<=\.)(?<!\d\.)(?:\s+|$)|\s+—\s+|\s+/\s+")
 DEFAULT_FRESH_DAYS = 14.0
 DEFAULT_PINNED_TYPES = ("feedback", "user")
+# The cloth's name under the store's `_still/`. Named because prefill.loom_for restated
+# the same join; the other file names in this module each occur exactly once.
+CLOTH_NAME = "index.woven.md"
 BACKUPS_KEPT = 20
 
 # Words that make a trigger useless because they would fit any memory in the store.
@@ -189,7 +192,7 @@ class Loom:
         self.trigger_tokens = int(trigger_tokens)
         self.verbatim_after = verbatim_after
         self.backups = int(backups)
-        self.out_path = out_path or os.path.join(store.still, "index.woven.md")
+        self.out_path = out_path or os.path.join(store.still, CLOTH_NAME)
         # Which canonical index the cloth on disk was verified against — a sidecar,
         # because nothing volatile may ride inside the injected map itself.
         self.state_path = self.out_path + ".state.json"
