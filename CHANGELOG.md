@@ -216,6 +216,16 @@ alone recovers only the unknowns — as designed, it is the exit for stores over
 ceiling, not a map. Defaults are unchanged; the one change the run bought is the trail
 header above.
 
+### Review follow-ups landed (2026-09-02 afternoon)
+Of sixteen bug-class findings from the morning review, twelve were already fixed at HEAD
+by the day's work and were left alone; four were real and are fixed with regression
+tests: a tended watcher's child tracks now receive the config path the registry
+actually resolved (not the bare flag); `bench compress` attributes memories through the
+verified manifest loader, never a raw read of a file named by its hash; a second pour of
+one slug no longer renames onto the earlier `.md.poured` and destroys it; and the seed
+ledger's sow/confirm run under a lock with per-pid temp files, so parallel runners no
+longer lose seeds or truncate each other.
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the
