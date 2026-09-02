@@ -259,6 +259,14 @@ def verify_tags(proposed, evidence: list[dict], recurred_ok: bool = False
     kept: list[str] = []
     basis: dict[str, dict] = {}
     refused: dict[str, str] = {}
+
+    def keep(t: str, cls: str, quote: str | None = None) -> None:
+        """A kept tag and the evidence it rests on, recorded together — the two must
+        never drift apart, or the manifest says a tag exists for a reason nobody can
+        read. `formative` rests on a CLASS, not a quote, and passes none."""
+        kept.append(t)
+        basis[t] = {"class": cls} if quote is None else {"class": cls, "quote": quote}
+
     for t in tags:
         if t in FORGETTING_TAGS:
             refused[t] = "reserved for the forgetting pass; a model may not assign it"
@@ -266,18 +274,18 @@ def verify_tags(proposed, evidence: list[dict], recurred_ok: bool = False
             # Both are claims about the human — what they felt, what they undertook
             # — and neither can rest on tool output or the agent's prose.
             if user_quotes:
-                kept.append(t); basis[t] = {"class": "USER", "quote": user_quotes[0]}
+                keep(t, "USER", user_quotes[0])
             else:
                 refused[t] = "needs the human's own words; no [USER] quote survived"
         elif t == "entrusted":
             q = next((q for q in user_quotes if _ENTRUST.search(q)), None)
             if q:
-                kept.append(t); basis[t] = {"class": "USER", "quote": q}
+                keep(t, "USER", q)
             else:
                 refused[t] = "needs a [USER] quote that asks for this to be kept"
         elif t == "recurred":
             if recurred_ok:
-                kept.append(t); basis[t] = {"class": "USER", "quote": user_quotes[0] if user_quotes else ""}
+                keep(t, "USER", user_quotes[0] if user_quotes else "")
             else:
                 refused[t] = "recurrence is decided against a prior memory, not proposed"
         elif t == "landmine":
@@ -288,13 +296,13 @@ def verify_tags(proposed, evidence: list[dict], recurred_ok: bool = False
             # the class that can later protect the memory absolutely.
             hit = warn or fail
             if hit:
-                kept.append(t); basis[t] = {"class": hit["class"], "quote": hit["text"]}
+                keep(t, hit["class"], hit["text"])
             else:
                 refused[t] = ("needs an actual failure in [TOOL] output or a warning/correction "
                               "in the human's words; a quiet tool line is neither")
         elif t == "formative":
             if classes - {"SELF"}:
-                kept.append(t); basis[t] = {"class": sorted(classes - {"SELF"})[0]}
+                keep(t, sorted(classes - {"SELF"})[0])
             else:
                 refused[t] = "needs more than the agent's own prose"
         else:
