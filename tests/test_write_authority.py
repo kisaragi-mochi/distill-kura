@@ -161,6 +161,10 @@ def test_swapping_the_directory_for_a_symlink_afterwards_is_refused(tmp_path):
     r = s.remember_direct("planted", "d", "b")
     assert r["ok"] is False and "no longer resolves" in r["error"]
     assert not (tmp_path / "private" / "planted.md").exists()
+    # the annotate door carries its own copy of the same guard
+    ra = s.annotate_direct("planted", tags=["decision"])
+    assert ra["ok"] is False and "no longer resolves" in ra["error"]
+    assert not (tmp_path / "private" / "planted.md").exists()
 
 
 def test_a_second_pour_of_one_slug_does_not_destroy_the_first_poured_draft(tmp_path):

@@ -112,6 +112,17 @@ def test_an_unknown_annotation_key_is_refused(tmp_path):
     assert set(ANNOTATION_KEYS) == {"belongs_because", "keep", "may_fade"}
 
 
+def test_the_annotate_door_also_refuses_an_unknown_annotation_key(tmp_path):
+    """Both doors carry their own copy of the key check; only the write door was
+    tested, so a slip on the annotate side would have been silent."""
+    s = make(tmp_path)
+    s.remember_direct("m", "d", "b")
+    before = open(s.file_of("m"), encoding="utf-8").read()
+    r = s.annotate_direct("m", annotations={"importance": "high"})
+    assert not r["ok"] and "importance" in r["error"]
+    assert open(s.file_of("m"), encoding="utf-8").read() == before
+
+
 # ── annotating in place ──────────────────────────────────────────────────
 
 def test_annotate_merges_tags_and_a_second_identical_merge_touches_nothing(tmp_path):
