@@ -89,6 +89,26 @@ the shadow keeps measuring. The measurable gain of M4 so far is the one it force
 upstream: the production trigger now faces the same floors (34/67 house hooks were
 wearing a re-bound number, an invented marker, a dropped negation or a reversed arrow).
 
+### Pay-forward measured (M5)
+
+`kura bench payforward --mouth NAME` makes a `[[payforward.mouths]]` entry price its
+own warmth, condition by condition, reading `timings.prompt_n` back from each reply —
+the mouth's own count of what it reprocessed, the only witness that counts. Six
+conditions, in order: `cold-full` (the whole resident block, cache off — skippable
+with `--skip-cold`, minutes on a CPU mouth); `restore-spine+trail` (the current-etag
+slot file restored, then map+trail sent — should reprocess ≈ the trail plus the probe);
+`trail-changed` (one synthetic line appended to the trail in memory only — ≈ the
+changed tail); `map-changed` (spine restored, one character changed in the LAST index
+line — from the change to the end); `map-changed-first-line` (the change in the FIRST
+line — nearly the whole map, the proof that a volatile header re-prices everything);
+`warm-repeat` (the row-2 request again, re-armed from the spine file, no bake — the
+in-process prefix cache). When no slot file exists for the current etag the spine is
+baked first, exactly as `kura pay-forward` bakes it (probe, save, ledger advance), and
+shown as its own `bake-spine` row. Nothing is written to the store, no modified map or
+trail reaches disk, the mouth is left restored on the current-etag spine, and the run
+exits 0 unless the mouth is unreachable. The test fake is a llama.cpp in miniature: a
+per-slot KV string, common-prefix reprocessing, and save/restore by filename.
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the

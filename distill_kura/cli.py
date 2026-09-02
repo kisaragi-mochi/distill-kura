@@ -14,6 +14,7 @@
     kura trail [-s eq]              rebuild the Hot Trail appended after the map
     kura pay-forward [-s eq]          bake the map into each mouth's KV slot, save it to disk
     kura bench compress [-s eq]       what the store cost against the journal it came from
+    kura bench payforward --mouth N   what the pay-forward spine buys, priced by the mouth
     kura init <name> --path DIR       create a store and print the TOML to paste
     kura distill catchup [-s eq]      start from today: mark every journal drunk up to now
     kura distill run [-s eq]          one pass: drink → spot → gate → write drafts
@@ -86,6 +87,24 @@ def _worldline_table(r: dict) -> str:
     lines = ["  ".join(c.ljust(widths[i]) for i, c in enumerate(row)) for row in rows]
     lines.insert(1, "  ".join("-" * w for w in widths))
     return (f"worldline  store={r['store']}  routing={r['routing']}  cases={r['cases']}\n"
+            + "\n".join(lines))
+
+
+def _payforward_table(r: dict) -> str:
+    """One line per condition: what the mouth said it reprocessed (prompt_n), how long
+    the call took, and what the row varied. prompt_n IS the finding — a spine is warm
+    when the number is the trail's size, cold when it is the map's."""
+    def cell(v) -> str:
+        return "—" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v))
+    head = ["condition", "prompt_n", "prompt_ms", "wall_s", "note"]
+    rows = [head] + [[x["condition"], cell(x["prompt_n"]), cell(x["prompt_ms"]),
+                      cell(x["wall_s"]), x["note"]] for x in r["rows"]]
+    widths = [max(len(row[i]) for row in rows) for i in range(len(head))]
+    lines = ["  ".join(c.ljust(widths[i]) if i < 4 else c
+                       for i, c in enumerate(row)) for row in rows]
+    lines.insert(1, "  ".join("-" * w for w in widths))
+    return (f"bench payforward  mouth={r['mouth']}  store={r['store']}  etag={r['etag']}"
+            f"  map={r['map_tokens_est']}t  trail={r['trail_tokens_est']}t ({r['trail']})\n"
             + "\n".join(lines))
 
 
@@ -169,6 +188,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="a command that reads text on stdin and prints a token count. "
                         "Without one, figures are labelled `estimated`.")
     b.add_argument("--session", help="only batches whose source key contains this")
+    b = bsub.add_parser("payforward", help="what the pay-forward spine buys, one mouth: "
+                                           "cold, restored spine + trail, changed trail, "
+                                           "changed map, warm repeat")
+    b.add_argument("--mouth", required=True, help="the [[payforward.mouths]] name to measure")
+    b.add_argument("--json", action="store_true")
+    b.add_argument("--skip-cold", action="store_true",
+                   help="skip cold-full — the whole prefill with no cache, minutes on a CPU mouth")
     b = bsub.add_parser("retention", help="is what mattered still findable?")
     b.add_argument("--questions", default="bench/fixtures/questions.json")
     b.add_argument("--hops", type=int, default=1)
@@ -329,7 +355,24 @@ def main(argv: list[str] | None = None) -> int:
             # plan is the worse form of it; nothing runnable is the other.
             s = r["summary"]
             return 0 if s["runnable"] and not s["wrong_branch"] and not s["obsolete_branch"] else 1
-        sys.exit("kura bench {compress|retention}")
+        if a.bcmd == "payforward":
+            from . import bench_payforward as bpf
+            try:
+                r = bpf.run(reg, mouth=a.mouth, skip_cold=a.skip_cold)
+            except KeyError as e:
+                sys.exit(e.args[0])             # a typo'd --mouth must not read as a measurement
+            except OSError as e:
+                sys.exit(f"mouth {a.mouth!r} unreachable: {e}")   # exit 1, with the reason
+            if r.get("warning"):
+                print(f"⚠ {r['warning']}", file=sys.stderr)
+            if r.get("final_restore_error"):
+                print(f"⚠ {r['final_restore_error']}", file=sys.stderr)
+            if a.json:
+                print(json.dumps(r, ensure_ascii=False, indent=1))
+            else:
+                print(_payforward_table(r))
+            return 0
+        sys.exit("kura bench {compress|retention|payforward}")
 
     if a.cmd in ("weave", "prefill", "trail"):
         from . import prefill as prefill_mod

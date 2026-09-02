@@ -209,6 +209,22 @@ cannot list the directory, so pruning from here would be a guess about files it 
 see. They scale with map length times the model's KV width (that 16k-token map was
 1.5 GB), so sweep `--slot-save-path` by hand when it grows.
 
+### Measuring it: `kura bench payforward`
+
+```bash
+kura bench payforward --mouth cpu-mouth            # add --skip-cold on a CPU mouth
+```
+
+One row per condition; the number that matters is `prompt_n` — the mouth's OWN count
+of prompt tokens it reprocessed, not our estimate. Reading it: `restore-spine+trail`
+near `trail_tokens_est` means the spine is warm; `trail-changed` smaller still means
+only the tail moved; `map-changed-first-line` back near `cold-full` is the volatile-
+header proof — one character at the front re-prices everything behind it;
+`warm-repeat` small means the prefix cache is doing its job with no disk involved.
+If no slot file exists for the current etag, a `bake-spine` row appears first (the
+pay-forward bake, paid once). Exit 0 unless the mouth is unreachable (1, with the
+reason); the store is never written and the mouth is left warm on the current spine.
+
 ## Scheduling by hand, and exit codes
 
 ```bash
