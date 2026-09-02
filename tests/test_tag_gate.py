@@ -607,3 +607,22 @@ def test_a_draft_edited_while_judged_gets_no_verdict(tmp_path):
     out = d.drain()
     assert out["poured"] == 0 and out["left"] == 0
     assert store.read("archive-on-slow-disk") == ""
+
+
+def test_the_drafts_listing_says_slug_classes_and_trigger(tmp_path):
+    """`kura drafts` reads this. It is a listing, not a gate: a hand-dropped draft is
+    listed too — nothing about being listed says a draft may be poured."""
+    from distill_kura.distill import drafts_of
+    journal(str(tmp_path / "journals" / "a.jsonl"), LINES)
+    reg, store = build(tmp_path)
+    d = Distiller(reg, store)
+    script(d, {"deserves to become a permanent memory": SPOT, "actually NEW": "NEW\nnothing",
+               "You write the final memory": SCRIBE, "draw the last line": "POUR\nreason: fine"})
+    assert d.run(chunks=1)["drafts"] == ["archive-on-slow-disk"]
+    os.makedirs(d.drafts_dir, exist_ok=True)
+    with open(os.path.join(d.drafts_dir, "by-hand.md"), "w", encoding="utf-8") as f:
+        f.write("<!-- kind: project   evidence classes: SELF\n-->\n"
+                "TITLE: Bad\nDESC: something the human never said\n\nbody\n")
+    assert drafts_of(store) == [
+        ("archive-on-slow-disk", "TOOL,USER", "the archive lives on the slow disk"),
+        ("by-hand", "SELF", "something the human never said")]

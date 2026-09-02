@@ -43,6 +43,12 @@ CHUNK_CHARS = 200_000        # one batch ≈ what a long-context reader swallows
 MIN_DRINK = 6_000            # less raw material than this is not worth a pass
 
 
+def _drafts_dir(still: str) -> str:
+    """Where staged drafts live. One spelling: a second one would be a directory
+    nothing drains."""
+    return os.path.join(still, "drafts")
+
+
 def _log(s: str) -> None:
     print(f"{datetime.now().strftime('%H:%M:%S')} {s}", flush=True)
 
@@ -175,7 +181,7 @@ class Distiller:
         elif self.profile["state"] == "broken":
             _log(f"⚠ learned profile not read — {self.profile['why']}")
         self.still = store.still
-        self.drafts_dir = os.path.join(self.still, "drafts")
+        self.drafts_dir = _drafts_dir(self.still)
         self.marks = Watermarks(os.path.join(self.still, "watermark.json"))
         self.seeds = Seeds(os.path.join(self.still, "seeds.jsonl"))
         os.makedirs(self.drafts_dir, exist_ok=True)
@@ -1243,8 +1249,10 @@ class Distiller:
 
 
 def drafts_of(store: Store) -> list[tuple[str, str, str]]:
+    """(slug, evidence classes, trigger) for every staged draft — a listing for a
+    person, not a gate: it reads the file as it stands and checks no mark."""
     out = []
-    for p in sorted(glob.glob(os.path.join(store.still, "drafts", "*.md"))):
+    for p in sorted(glob.glob(os.path.join(_drafts_dir(store.still), "*.md"))):
         t = open(p, encoding="utf-8").read()
         d = re.search(r"^DESC:\s*(.+)$", t, re.M)
         cls = re.search(r"evidence classes:\s*(\S+)", t)
