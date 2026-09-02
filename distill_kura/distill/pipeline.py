@@ -647,6 +647,14 @@ class Distiller:
         return self.store.gate_key()          # one key per store, shared with the curation mark
 
     @staticmethod
+    def _draft_head(raw: str) -> str:
+        """The comment header a draft carries — everything above `-->`.
+
+        The envelope (kind, evidence manifest, gate mark) lives here and nowhere
+        else, so every reader of it splits the same way, in one place."""
+        return raw.split("-->")[0]
+
+    @staticmethod
     def _draft_body(raw: str) -> str:
         return re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S).strip()
 
@@ -667,7 +675,7 @@ class Distiller:
 
     def _envelope_of(self, raw: str) -> tuple[str, str, str] | None:
         """(kind, manifest_hex, mark) from a draft's header — None if any is absent."""
-        head = raw.split("-->")[0]
+        head = self._draft_head(raw)
         k = self._ENV_KIND.search(head)
         m = self._ENV_MAN.search(head)
         g = self._ENV_MARK.search(head)
@@ -694,7 +702,7 @@ class Distiller:
         # stays here for the drafts the floor never saw — one written by hand into the
         # directory, or one carried over from an older distiller — because the answer
         # to "should this be a memory?" must not depend on which version staged it.
-        if "🚫" in raw.split("-->")[0]:
+        if "🚫" in self._draft_head(raw):
             return {"ok": False, "why": "credits the human with no [USER] evidence; not poured"}
         if not self._draft_mark_valid(slug, raw):
             return {"ok": False,
@@ -735,7 +743,7 @@ class Distiller:
             new_body = add
         # The pour has been through the gate, so it uses the verified door: a store set
         # to `distiller-only` accepts this and refuses a bare tool call.
-        man = re.search(r"evidence_manifest:\s*(sha256:[0-9a-f]{64})", raw.split("-->")[0])
+        man = re.search(r"evidence_manifest:\s*(sha256:[0-9a-f]{64})", self._draft_head(raw))
         r = self.store.pour_verified(slug_out, desc, new_body,
                                      type_=kind.group(1) if kind else "project",
                                      title=title,
@@ -776,8 +784,8 @@ class Distiller:
 
     def judge_draft(self, path: str) -> dict:
         raw = open(path, encoding="utf-8").read()
-        head = raw.split("-->")[0]
-        body = re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S).strip()
+        head = self._draft_head(raw)
+        body = self._draft_body(raw)
         slug = os.path.basename(path)[:-3]
         judged_sha = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         # ask() collapses every infrastructure failure to None (unreachable, timeout,
@@ -920,7 +928,7 @@ class Distiller:
                     env = self._envelope_of(raw)
                     keep = re.sub(r"gate:\s*[0-9a-f]{32}",
                                   f"gate: {self._mark(j['slug'], env[0], env[1], body)}",
-                                  raw.split("-->")[0]) + "-->\n"
+                                  self._draft_head(raw)) + "-->\n"
                     open(p, "w", encoding="utf-8").write(keep + body)
                     fixed.append(j["slug"])
                     _log(f"  ✎ fix  {j['slug']} — {j['why'][:70]}")
