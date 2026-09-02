@@ -32,6 +32,13 @@ from dataclasses import dataclass, field
 from .tokens import estimate
 
 INDEX = "MEMORY.md"
+
+# The two shapes of an index link, in one place — three modules were carrying their own
+# copies. LINK_TARGET is title-less ON PURPOSE: the loom's postcondition must catch a
+# bare `](x.md)` fragment a trimmer emitted, and `known_slugs` must see it too. The `]`
+# anchor is what keeps prose like `作法(AGENTS.md)` from counting as a link.
+LINK_TARGET = re.compile(r"\]\(([^)]+)\.md\)")
+LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\.md\)")
 # Files that live in a store directory by convention and are NOT memories. The store's
 # own charter was being counted as a memory the moment one was written — it appeared in
 # `doctor` as unindexed and would have been walked by recall.
@@ -321,7 +328,7 @@ class Store:
         """Slugs as the index names them (what a model may echo back)."""
         # Only link TARGETS: `作法(AGENTS.md)` in a line's prose used to match and
         # produce an index orphan that was never a memory.
-        return re.findall(r"\]\(([^)]+)\.md\)", self._uncommented(self.index_text()))
+        return LINK_TARGET.findall(self._uncommented(self.index_text()))
 
     def titles(self) -> dict[str, str]:
         """index display title (lowercased) → slug. Models sometimes answer with the
@@ -342,8 +349,7 @@ class Store:
             built: dict[str, str] = {}
             # Every link on the line, not just the first: one line often carries a
             # small family of related memories.
-            for t, slug in re.findall(r"\[([^\]]+)\]\(([^)]+)\.md\)",
-                                      self._uncommented(self.index_text())):
+            for t, slug in LINK.findall(self._uncommented(self.index_text())):
                 built.setdefault(t.strip().lower(), slug.strip())
             self._titles = (stamp, built)
         return self._titles[1]

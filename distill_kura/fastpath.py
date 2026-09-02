@@ -34,6 +34,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .store import LINK                  # the index-link grammar, defined once
+
 if TYPE_CHECKING:                       # types only: this module is a layer ON TOP
     from .store import Store            # of the store API, never under it
 
@@ -60,7 +62,6 @@ _TOKEN = re.compile(
     r"|[0-9]+(?:\.[0-9]+)?"           # numbers
     r"|[ァ-ヿ]+"                       # katakana runs
 )
-_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\.md\)")
 
 
 def _norm(s: str) -> str:
@@ -116,10 +117,10 @@ def _index_lines(store: Store) -> tuple[dict[str, str], dict[str, str]]:
     titles: dict[str, str] = {}
     hooks: dict[str, str] = {}
     for line in store._uncommented(store.index_text()).splitlines():
-        pairs = _LINK.findall(line)
+        pairs = LINK.findall(line)
         if not pairs:
             continue
-        prose = _LINK.sub(lambda m: m.group(1), line).strip().lstrip("-• \t")
+        prose = LINK.sub(lambda m: m.group(1), line).strip().lstrip("-• \t")
         for title, slug in pairs:
             slug = slug.strip()
             titles.setdefault(slug, title.strip())

@@ -61,7 +61,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from .store import FROZEN, Store, contained
+from .store import FROZEN, LINK_TARGET, Store, contained
 from .thinker import Endpoint
 from .tokens import estimate
 
@@ -71,7 +71,7 @@ ENTRY = re.compile(r"^(\s*-\s*)\[([^\]]+)\]\(([^)]+)\.md\)\s+—\s+(.+)$")
 # Such a line is passed through UNTOUCHED: rewriting it from the first slug's layer
 # would swallow the other links, and a memory that vanishes from the map is gone for
 # good as far as the agent is concerned. Losing a line is not a compression win.
-MULTI = re.compile(r"\]\([^)]+\.md\)")
+MULTI = LINK_TARGET
 
 # Budget a trigger in TOKENS, not characters. The same idea costs ~24 tokens whether it
 # is written in 26 Japanese characters or 96 English ones; a character limit silently
@@ -156,7 +156,7 @@ def _links_per_line(text: str, verbatim_after: str | None = None) -> list[str]:
     allowed to span newlines silently joins a truncated line to the next one's link."""
     out: list[str] = []
     for line in text.splitlines():
-        out += re.findall(r"\]\(([^)\n]+\.md)\)", line)
+        out += [t + ".md" for t in LINK_TARGET.findall(line)]
     return out
 
 

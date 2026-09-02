@@ -192,3 +192,16 @@ path = "{tmp_path / 'main'}"
         assert "gate" in str(e)
     else:
         raise AssertionError("a wrong type must not load")
+
+
+def test_a_grouped_index_line_gives_every_slug_on_it_the_same_hook(tmp_path):
+    """`LINK.sub` — the substitution that turns a line into its prose — had no test
+    with more than one link on the line, which is the only case it exists for."""
+    s = a_store(tmp_path)
+    with open(s.index_path, "a", encoding="utf-8") as f:
+        f.write("- optane family — [A](ssd-tier-mission.md)/[B](cooling.md) — the D-type board\n")
+    titles, hooks = fastpath._index_lines(s)
+    assert titles["ssd-tier-mission"] and titles["cooling"]
+    for slug in ("ssd-tier-mission", "cooling"):
+        assert "optane family" in hooks[slug] and "D-type board" in hooks[slug]
+        assert "](" not in hooks[slug]          # the links themselves are gone
