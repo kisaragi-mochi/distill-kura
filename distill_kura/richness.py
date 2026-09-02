@@ -349,8 +349,16 @@ def table(r: dict) -> str:
     cr = m["candidate_rate"]
     out.append(f"1 candidate rate        {_frac(cr['candidates'], cr['segments'], cr['rate'])}"
                f"  over {cr['batches']} batches")
-    for k, v in cr["per_source"].items():
+    # The spread, not the census: the five sources that fed the most segments, and
+    # a count for the rest. On the house store the full list was 60 agent
+    # transcripts and buried the table it was meant to explain.
+    srcs = sorted(cr["per_source"].items(), key=lambda kv: (-kv[1]["segments"], kv[0]))
+    for k, v in srcs[:5]:
         out.append(f"    {k[:48]:<48} {_frac(v['candidates'], v['segments'], v['rate'])}")
+    if len(srcs) > 5:
+        rest = srcs[5:]
+        c = sum(v["candidates"] for _, v in rest); n = sum(v["segments"] for _, v in rest)
+        out.append(f"    {'+' + str(len(rest)) + ' more sources':<48} {_frac(c, n, _rate(c, n))}")
 
     rj = m["rejections"]
     out.append(f"2 rejections            {_cell(rj['dropped'])} dropped")
