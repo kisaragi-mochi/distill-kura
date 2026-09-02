@@ -103,7 +103,7 @@ distill_kura/
   tokens.py      per-script token estimation (fitted, not guessed)
   bench.py       measure instead of claim: store_ratio, map_ratio, retention
   mcp.py         MCP stdio bridge (stdlib only, single file, droppable anywhere)
-  tend.py        the watcher: quiet = journal mtime; drain → distil → weave → tidy; exit 2 rests
+  tend.py        the watcher: quiet = journal mtime; drain → distil → weave → trail → pay-forward → tidy; exit 2 rests
   cli.py         `kura`
   distill/
     sources.py   journal adapters + evidence classing. Add formats here.

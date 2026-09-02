@@ -15,7 +15,7 @@
     kura constellation [-s eq]      the sector map: which `## ` heading holds what
     kura edges [-s eq] [--slug S]   typed worldline edges — derived routing state
     kura pay-forward [-s eq]          bake the map into each mouth's KV slot, save it to disk
-    kura bench compress [-s eq]       what the store cost against the journal it came from
+    kura bench compress|retention     what the store cost / is what mattered still findable
     kura bench payforward --mouth N   what the pay-forward spine buys, priced by the mouth
     kura metrics richness [-s eq]     did it stop remembering LIES or stop remembering (§15)
     kura init <name> --path DIR       create a store and print the TOML to paste
@@ -113,7 +113,8 @@ def _payforward_table(r: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="kura", description="distilled long-term memory for agents")
-    ap.add_argument("-c", "--config", help="path to kura.toml (default: ./kura.toml)")
+    ap.add_argument("-c", "--config", help="path to kura.toml (default: $KURA_CONFIG, "
+                    "then ./kura.toml, then ~/.config/distill-kura/kura.toml)")
     ap.add_argument("-s", "--store", help="store or mode name (default: the configured default)")
     sub = ap.add_subparsers(dest="cmd")
 
@@ -455,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(_payforward_table(r))
             return 0
-        sys.exit("kura bench {compress|retention|payforward}")
+        sys.exit("kura bench {" + "|".join(bsub.choices) + "}")
 
     if a.cmd in ("weave", "prefill", "trail"):
         from . import prefill as prefill_mod
