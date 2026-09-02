@@ -252,6 +252,91 @@ class Tender:
             self.proc = None
             self.proc_track = ""
 
+    def _stop_child(self, why: str, grace: float = 5.0) -> None:
+        """Stop the running track and leave NO process behind: terminate, a short
+        grace, then kill — and wait after each, so the pid is really gone (and reaped)
+        by the time this returns. `kill` above is the watcher's long-grace version;
+        a `--once` run that is about to exit cannot afford to wait twenty seconds and
+        must not hand a live child back to the scheduler."""
+        p = self.proc
+        self.proc, self.proc_track = None, ""
+        if p is None:
+            return
+        if p.poll() is None:
+            _log(self.log_path, f"⏹ stopped — {why}")
+            for stop in (p.terminate, p.kill):
+                try:
+                    stop()
+                except Exception:
+                    pass
+                try:
+                    p.wait(timeout=grace)
+                    return
+                except Exception:
+                    continue
+        try:
+            p.wait(timeout=grace)
+        except Exception:
+            pass
+
+    # ── one shot, for a scheduler ─────────────────────────────────────────
+    def run_once(self, timeout_s: float = 3600.0, poll_s: float = 0.05) -> dict:
+        """One tick, wait for whatever it started, and say — honestly — what happened.
+
+        The exit code a scheduler reads is settled here, and the five ways a `--once`
+        run can end stay five: nothing-to-do (2), the track failed (1), the human came
+        back (1), the child died badly (1), the deadline passed with the track still
+        running (1). The last one used to exit 0 — "started something, deadline
+        expired, exit 0" reads as completed, so a scheduler never retried and the work
+        was silently dropped for good.
+        """
+        stamp = self.tick(0.0)
+        self._once_stamp = stamp
+        if not self.proc:
+            return {"ok": True, "code": 2, "error": None, "reason": "nothing-to-do",
+                    "track": "", "pid": None, "retryable": False}
+        track, pid = self.proc_track, self.proc.pid
+        deadline = time.time() + float(timeout_s)
+        while self.proc.poll() is None:
+            if time.time() >= deadline:
+                self._stop_child(f"--once deadline passed after {int(timeout_s)}s")
+                return self._once_record(
+                    {"ok": False, "code": 1, "error": "timeout",
+                     "reason": f"still running after {timeout_s:g}s",
+                     "track": track, "pid": pid, "retryable": True})
+            if self.yield_on_return and stamp and self.newest_mtime() != stamp:
+                self._stop_child("the journal changed: the human is back")
+                return self._once_record(
+                    {"ok": False, "code": 1, "error": "yielded",
+                     "reason": "the human returned", "track": track,
+                     "pid": pid, "retryable": True})
+            time.sleep(poll_s)
+        rc = self.proc.returncode
+        self.reap()
+        if rc == 0:
+            return self._once_record({"ok": True, "code": 0, "error": None,
+                                      "reason": "done", "track": track, "pid": pid,
+                                      "retryable": False})
+        if rc == 2:
+            return self._once_record({"ok": True, "code": 2, "error": None,
+                                      "reason": "nothing-to-do", "track": track, "pid": pid,
+                                      "retryable": False})
+        if rc == 1:
+            # The track ran and reported failure — a model that would not answer, a
+            # mouth that was down, a lock another runner held. Retryable, and NOT the
+            # same thing as the child dying under us.
+            return self._once_record({"ok": False, "code": 1, "error": "track-failed",
+                                      "reason": "the track reported failure (rc=1)",
+                                      "track": track, "pid": pid, "retryable": True})
+        return self._once_record({"ok": False, "code": 1, "error": "child-error",
+                                  "reason": f"child ended with rc={rc}",
+                                  "track": track, "pid": pid, "retryable": True})
+
+    def _once_record(self, r: dict) -> dict:
+        _log(self.log_path, ("· " if r["ok"] else "✗ ") + "once " +
+             json.dumps(r, ensure_ascii=False))
+        return r
+
     # ── choosing the next track ───────────────────────────────────────────
     def _trail_time_stale(self) -> bool:
         """Does a trail that EXISTS need rebuilding for time alone? Cheap and

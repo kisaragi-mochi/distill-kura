@@ -403,3 +403,99 @@ def test_a_fresh_heartbeat_from_a_dead_pid_is_not_alive_and_says_which_death(tmp
     state = st.tend_state()
     assert state["alive"] is False and state["age_s"] == 0
     assert f"pid {dead} is gone" in state["why"]
+
+
+def _quiet(tmp_path, **kw):
+    reg, st, cfg, j = build(tmp_path, **kw)
+    old = time.time() - 3600
+    os.utime(j, (old, old))                                 # quiet for an hour
+    return reg, st, cfg, j
+
+
+def _sleeper(t, seconds=60):
+    t._cmd = lambda track: [sys.executable, "-c",           # type: ignore
+                            f"import time; time.sleep({seconds})"]
+
+
+def test_once_that_times_out_exits_one_with_a_retryable_record(tmp_path):
+    """The failure this prevents: a `--once` whose deadline passed while the track was
+    still running exited 0. A scheduler reads "started something → deadline expired →
+    exit 0" as completed and never retries, so the work is dropped for good."""
+    reg, st, cfg, j = _quiet(tmp_path)
+    t = Tender(reg, st, cfg, idle_min=10)
+    _sleeper(t)
+    r = t.run_once(timeout_s=0.3, poll_s=0.02)
+    assert r["code"] == 1
+    assert r["ok"] is False and r["error"] == "timeout" and r["retryable"] is True
+    assert r["track"] == "distill"
+    log = open(os.path.join(st.still, "tend.log"), encoding="utf-8").read()
+    assert '"error": "timeout"' in log and '"retryable": true' in log
+
+
+def test_once_with_nothing_to_do_is_two_and_a_completed_track_is_zero(tmp_path):
+    reg, st, cfg, j = _quiet(tmp_path)
+    t = Tender(reg, st, cfg, idle_min=10)
+    _stub(t, 2)
+    assert t.run_once(timeout_s=120)["code"] == 2            # honestly nothing to do
+    t2 = Tender(reg, st, cfg, idle_min=10)
+    _stub(t2, 0, '{"drafts": []}')
+    r = t2.run_once(timeout_s=120)
+    assert r["code"] == 0 and r["ok"] is True and r["error"] is None
+
+
+def test_the_five_once_outcomes_stay_five(tmp_path):
+    """nothing-to-do, a track that failed, a yield because the human returned, a child
+    that died badly, and a timeout are five different things. Collapsed into one
+    "didn't work", a scheduler cannot tell a retry from a rest from a bug."""
+    reg, st, cfg, j = _quiet(tmp_path)
+    seen = {}
+
+    t = Tender(reg, st, cfg, idle_min=10); _stub(t, 2)
+    seen["nothing"] = t.run_once(timeout_s=120)
+
+    t = Tender(reg, st, cfg, idle_min=10); _stub(t, 1)
+    seen["failed"] = t.run_once(timeout_s=120)
+
+    t = Tender(reg, st, cfg, idle_min=10)
+    t._cmd = lambda track: [sys.executable, "-c",            # type: ignore
+                            "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"]
+    seen["child"] = t.run_once(timeout_s=120)
+
+    t = Tender(reg, st, cfg, idle_min=10); _sleeper(t)
+    seen["timeout"] = t.run_once(timeout_s=0.3, poll_s=0.02)
+
+    t = Tender(reg, st, cfg, idle_min=10); _sleeper(t)
+    real, calls = t.newest_mtime, []
+
+    def moved():                                             # the human types
+        calls.append(1)
+        return real() + (0 if len(calls) == 1 else 1)
+    t.newest_mtime = moved                                   # type: ignore
+    seen["yield"] = t.run_once(timeout_s=120, poll_s=0.02)
+
+    assert seen["nothing"]["code"] == 2
+    assert all(seen[k]["code"] == 1 for k in ("failed", "child", "timeout", "yield"))
+    marks = [(r.get("error"), r.get("reason")) for r in seen.values()]
+    assert len(set(marks)) == 5, marks
+    assert seen["failed"]["error"] == "track-failed"
+    assert seen["child"]["error"] == "child-error"
+    assert seen["timeout"]["error"] == "timeout"
+    assert seen["yield"]["error"] == "yielded"
+    assert seen["nothing"]["error"] is None and seen["nothing"]["reason"] == "nothing-to-do"
+
+
+def test_once_leaves_no_child_running_when_it_returns(tmp_path):
+    """A `--once` that returns while its track is still alive leaves an orphan holding
+    the GPU seat the conversation needs — and the next run finds it there."""
+    reg, st, cfg, j = _quiet(tmp_path)
+    t = Tender(reg, st, cfg, idle_min=10)
+    _sleeper(t, 300)
+    r = t.run_once(timeout_s=0.3, poll_s=0.02)
+    assert r["error"] == "timeout" and t.proc is None
+    dead = r["pid"]
+    assert dead
+    try:
+        os.kill(dead, 0)                    # really gone, not merely signalled
+        raise AssertionError(f"pid {dead} is still running after --once returned")
+    except ProcessLookupError:
+        pass

@@ -159,6 +159,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--poll", type=float, default=15.0, help="seconds between looks at the journal")
     p.add_argument("--no-yield", action="store_true", help="do not stop a running track when the human returns (editor on a separate seat)")
     p.add_argument("--once", action="store_true", help="one tick, then exit (for schedulers and tests)")
+    p.add_argument("--timeout", type=float, default=3600.0,
+                   help="--once only: seconds to wait for the track it started; when the "
+                        "deadline passes the track is stopped and the run exits 1 (timeout)")
 
     p = sub.add_parser("doctor", help="health check")
     p.add_argument("--all", action="store_true", help="every store, not just one")
@@ -599,20 +602,16 @@ def main(argv: list[str] | None = None) -> int:
         t = Tender(reg, store, reg.config_path, idle_min=a.idle_min, poll_s=a.poll,
                    backoff_min=a.backoff_min, yield_on_return=(False if a.no_yield else None))
         if a.once:
-            stamp = t.tick(0.0)
-            # give a started track a moment, then report what it said
-            if t.proc:
-                try:
-                    t.proc.wait(timeout=3600)
-                except Exception:
-                    pass
-                t.reap()
-            t.beat(0.0, stamp)
+            # 0 = the requested work completed, 1 = it was attempted or required and
+            # did not complete (failed, yielded, child error, timed out), 2 = there was
+            # honestly nothing to do. The timeout used to fall through as 0, so a
+            # scheduler read "started, deadline passed" as done and never retried.
+            r = t.run_once(timeout_s=a.timeout)
+            t.beat(0.0, getattr(t, "_once_stamp", 0.0))
             print(json.dumps({"store": store.name, "done": t.done,
-                              "next_ok": {k: int(v) for k, v in t.next_ok.items()}}, ensure_ascii=False))
-            # A tick that did no work is exit 2 ("nothing to do") — the old always-0
-            # made a scheduler that saw "worked" rest while the queue never emptied.
-            return 0 if any((t.done or {}).values()) else 2
+                              "next_ok": {k: int(v) for k, v in t.next_ok.items()},
+                              **r}, ensure_ascii=False))
+            return int(r["code"])
         t.watch()
         return 0
 
