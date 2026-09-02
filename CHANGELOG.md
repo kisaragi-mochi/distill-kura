@@ -240,6 +240,11 @@ The degraded word tier (`pick_by_words`, used only when the thinker is unreachab
 now matches link TARGETS with the `](` anchor, as `known_slugs` and `doctor` already
 did — a prose parenthetical such as `(AGENTS.md)` no longer scores as a memory while
 the line's real memory goes unscored.
+Wave 3 closed four structural edges: HTTP routes match exactly (a `/healthz` probe is a
+404, not `/health` wearing another name); `[prefill]`/`[fastpath]` refuse unknown keys like
+the store tables do (a typo in an every-turn switch is now loud, not silent); the gate
+format version is one constant with its signed string derived; `gate_key()` reads the
+key file through one path on every outcome.
 Left for a decision or a later wave: a single `_parse_scribe`, an `_Envelope` type,
 fsync-unified atomic writes, and the twenty-one structure/split findings.
 
