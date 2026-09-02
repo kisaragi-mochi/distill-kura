@@ -388,3 +388,36 @@ def test_the_two_counts_reach_the_summary_and_the_table(tmp_path):
     from distill_kura.cli import _worldline_table
     head = _worldline_table(out).splitlines()[1]
     assert "truncated" in head and "reasoning_only" in head
+
+
+# ── which questions were answered ───────────────────────────────────────────
+
+def test_two_byte_different_case_files_have_different_shas(tmp_path):
+    """The digest is of the file's bytes, so a case edited in place — same count,
+    same path — cannot pass itself off as the old set."""
+    a = tmp_path / "a.json"
+    b = tmp_path / "b.json"
+    cases = wl.load_cases(CASES)
+    a.write_text(json.dumps({"cases": cases}), encoding="utf-8")
+    b.write_text(json.dumps({"cases": cases}) + "\n", encoding="utf-8")
+    ca, sa = wl.load_case_set(str(a))
+    cb, sb = wl.load_case_set(str(b))
+    assert ca == cb and len(sa) == 64 and sa != sb
+    assert wl.load_cases(str(a)) == ca        # the old shape still works
+
+
+def test_the_case_set_sha_is_on_every_row_and_on_the_result(tmp_path):
+    s = build(tmp_path)
+    cases, sha = wl.load_case_set(CASES)
+    out = wl.run(s, cases, "fastpath", case_set_sha=sha,
+                 resident_variants=wl.resident_variants(s, ["canonical", "woven"]))
+    assert out["case_set_sha"] == sha
+    assert out["traces"] and all(t["case_set_sha"] == sha for t in out["traces"])
+
+
+def test_the_cli_header_carries_the_case_set_sha(tmp_path, capsys):
+    cfg = _cfg(tmp_path)
+    main(["-c", cfg, "-s", "m", "bench", "worldline", "--cases", CASES,
+          "--routing", "fastpath"])
+    sha = wl.load_case_set(CASES)[1]
+    assert f"case_set_sha={sha[:12]}" in capsys.readouterr().out

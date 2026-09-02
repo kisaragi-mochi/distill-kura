@@ -69,7 +69,8 @@ def worldline(reg: Registry, store: Store, cases_path: str, routing: str = "full
     elif agent_url or agent_model:
         raise ValueError("--agent-url/--agent-model measure agent-only routing; "
                          f"--routing {routing!r} always uses the configured thinker")
-    return wl.run(store, wl.load_cases(cases_path), routing=routing,
+    cases, cases_sha = wl.load_case_set(cases_path)
+    return wl.run(store, cases, routing=routing, case_set_sha=cases_sha,
                   thinker=thinker, resident=pf.text,
                   fastpath_cfg=reg.fastpath_cfg_for(store), hops=hops,
                   trace_path=trace_path

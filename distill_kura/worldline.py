@@ -62,13 +62,26 @@ AGENT_SYS = (
 )
 
 
-def load_cases(path: str) -> list[dict]:
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+def load_case_set(path: str) -> tuple[list[dict], str]:
+    """The cases AND the sha256 of the file's bytes.
+
+    Two runs are only comparable if they answered the same questions. The count
+    cannot say that — a case edited in place keeps the count — and neither can a
+    path, which names a file that changes under it. The digest is of the RAW
+    BYTES, not of the parsed cases: reformatting the file is a change a reader
+    should see, because a re-indented file is a file someone touched."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    data = json.loads(raw.decode("utf-8"))
     cases = data.get("cases") if isinstance(data, dict) else data
     if not isinstance(cases, list):
         raise ValueError(f"{path}: expected a JSON array of cases (or {{\"cases\": [...]}})")
-    return cases
+    return cases, hashlib.sha256(raw).hexdigest()
+
+
+def load_cases(path: str) -> list[dict]:
+    """The cases alone — the older shape, still exactly what it was."""
+    return load_case_set(path)[0]
 
 
 def seed(store: Store, path: str) -> list[str]:
@@ -171,11 +184,16 @@ def _map_sha(text: str) -> str:
 def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = None,
              resident: str | None = None, fastpath_cfg: dict | None = None,
              hops: int = 1, agent: dict | None = None,
-             use_cues: bool = True, resident_variant: str = "canonical") -> dict:
+             use_cues: bool = True, resident_variant: str = "canonical",
+             case_set_sha: str = "") -> dict:
     """One utterance, one routing mode, one resident map, one honest trace row."""
     t0 = time.perf_counter()
     resident = store.index_text() if resident is None else resident
     tr = {"case": case.get("id", ""), "category": case.get("category", ""),
+          # WHICH questions this row answered. A trace outlives the file it came
+          # from; without the digest, two JSONL rows from two edits of cases.json
+          # are indistinguishable and quietly averageable.
+          "case_set_sha": case_set_sha,
           "routing": routing, "resident_variant": resident_variant,
           "resident_sha": _map_sha(resident),
           "resident_tokens": estimate(resident),
@@ -360,7 +378,8 @@ def run(store: Store, cases: list[dict], routing: str = "full",
         fastpath_cfg: dict | None = None, hops: int = 1,
         trace_path: str | None = None, agent: dict | None = None,
         use_cues: bool = True,
-        resident_variants: dict[str, str] | None = None) -> dict:
+        resident_variants: dict[str, str] | None = None,
+        case_set_sha: str = "") -> dict:
     """Every case under every resident variant, in one result.
 
     `resident_variants` (name → map text) is the comparison the guide's §9 asks
@@ -377,7 +396,8 @@ def run(store: Store, cases: list[dict], routing: str = "full",
     for name, text in resident_variants.items():
         rows = [run_case(store, c, routing, thinker=thinker, resident=text,
                          fastpath_cfg=fastpath_cfg, hops=hops, agent=agent,
-                         use_cues=use_cues, resident_variant=name) for c in cases]
+                         use_cues=use_cues, resident_variant=name,
+                         case_set_sha=case_set_sha) for c in cases]
         variants[name] = {"resident_tokens": estimate(text or ""),
                           "resident_sha": _map_sha(text or ""),
                           "summary": summarize(rows)}
@@ -387,6 +407,7 @@ def run(store: Store, cases: list[dict], routing: str = "full",
             for t in traces:
                 f.write(json.dumps(t, ensure_ascii=False) + "\n")
     result = {"store": store.name, "routing": routing, "cases": len(cases),
+              "case_set_sha": case_set_sha,
               "variants": variants,
               "summary": summarize(traces), "traces": traces}
     if routing == "agent-only":

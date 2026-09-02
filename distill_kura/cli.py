@@ -94,7 +94,11 @@ def _worldline_table(r: dict) -> str:
     widths = [max(len(row[i]) for row in rows) for i in range(len(head))]
     lines = ["  ".join(c.ljust(widths[i]) for i, c in enumerate(row)) for row in rows]
     lines.insert(1, "  ".join("-" * w for w in widths))
-    return (f"worldline  store={r['store']}  routing={r['routing']}  cases={r['cases']}\n"
+    # The case-set digest rides the header, not a footnote: a table read without
+    # it cannot say whether it may be compared with the table beside it.
+    sha = r.get("case_set_sha") or ""
+    return (f"worldline  store={r['store']}  routing={r['routing']}  cases={r['cases']}"
+            + (f"  case_set_sha={sha[:12]}" if sha else "") + "\n"
             + "\n".join(lines))
 
 
@@ -429,7 +433,8 @@ def main(argv: list[str] | None = None) -> int:
                     # configured thinker, or the routing modes stop being comparable.
                     raise ValueError("--agent-url/--agent-model measure agent-only routing; "
                                      f"--routing {a.routing!r} always uses the configured thinker")
-                r = wl.run(store, wl.load_cases(a.cases), routing=a.routing,
+                cases, cases_sha = wl.load_case_set(a.cases)
+                r = wl.run(store, cases, routing=a.routing, case_set_sha=cases_sha,
                            thinker=thinker, fastpath_cfg=reg.fastpath_cfg_for(store),
                            hops=a.hops,
                            trace_path=a.trace
