@@ -236,6 +236,10 @@ the pipeline, hoisted gate vocabularies, `Store.profile_check` as the single pro
 judgement, a stale "degraded" label and a bad `hops` no longer read as outages, and
 the README/OPERATING/DESIGN passages brought back to what the code does. New tests
 pin CLI exit codes, server routes (ETag/304/text), and the branches that had none.
+The degraded word tier (`pick_by_words`, used only when the thinker is unreachable)
+now matches link TARGETS with the `](` anchor, as `known_slugs` and `doctor` already
+did — a prose parenthetical such as `(AGENTS.md)` no longer scores as a memory while
+the line's real memory goes unscored.
 Left for a decision or a later wave: a single `_parse_scribe`, an `_Envelope` type,
 fsync-unified atomic writes, and the twenty-one structure/split findings.
 
