@@ -766,6 +766,21 @@ class Store:
                 return True
         return False
 
+    def _proven_transition(self, man: dict, old: str, new: str) -> dict | None:
+        """The manifest's proof that the HUMAN said old → new, or None.
+
+        The door does not trust its caller: the pipeline runs the same relation to
+        decide whether to knock, and this runs it again on the same manifest. A
+        proposal (even a refused `superseded` tag) is not a proof — only one [USER]
+        sentence that retires the old memory AND names this successor in it."""
+        from .distill.transition import find_transition
+
+        titles = {sl: t for t, sl in self.titles().items()}
+        r = find_transition(man.get("quotes") or [],
+                            {"slug": old, "title": titles.get(old, "")},
+                            {"slug": new, "title": titles.get(new, "")})
+        return r if r and r.get("kind") == "superseded" else None
+
     def retire(self, old_slug: str, new_slug: str, manifest_hex: str) -> dict:
         """Mark the OLD memory's index line as superseded by the new one.
 
@@ -798,6 +813,12 @@ class Store:
                 return {"ok": False, "error": "the manifest carries no [USER] evidence naming "
                                               f"{old!r}; a tool line or the agent's own prose "
                                               f"cannot retire a memory"}
+            if not self._proven_transition(man, old, new):
+                return {"ok": False, "error": f"no explicit succession in the human's words: "
+                                              f"the manifest has no single [USER] quote that "
+                                              f"retires {old!r} and names {new!r} as what "
+                                              f"replaces it (a memory merely mentioned, or a "
+                                              f"`superseded` tag proposed, is not a proof)"}
             cur = self.index_text()
             commented = self._commented_lines(cur)
             out: list[str] = []

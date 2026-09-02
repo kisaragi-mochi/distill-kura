@@ -95,12 +95,19 @@ def _names(text: str, *candidates: str) -> str | None:
     return None
 
 
+# Words that fit any title in any store: two of them are not a name.
+_STOP = {"the", "a", "an", "of", "for", "and", "or", "to", "in", "on", "with", "that",
+         "this", "it", "its", "is", "was", "are", "we", "our", "you", "how", "what",
+         "から", "こと", "もの", "ため", "する", "した", "など", "よう"}
+
+
 def _words(*sources: str) -> list[str]:
-    """The words a title/topic contributes, deduped, order kept."""
+    """The words a title/topic contributes, deduped, order kept. Filler is dropped:
+    "the" + "new" from "the new way" must not stand in for naming a memory."""
     out: list[str] = []
     for s in sources:
         for w in _WORD.findall(_norm(s)):
-            if len(w) >= 2 and w not in out:
+            if len(w) >= 2 and w not in _STOP and w not in out:
                 out.append(w)
     return out
 

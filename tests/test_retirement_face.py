@@ -41,7 +41,7 @@ def a_manifest(store: Store, quotes: list[dict]) -> str:
 
 def user_manifest(store: Store) -> str:
     return a_manifest(store, [{"class": "USER",
-                               "text": "stop using old-way, we do it the new way now"}])
+                               "text": "stop using old-way, now use new-way"}])
 
 
 def hook_of(store: Store, slug: str) -> str:
@@ -71,7 +71,7 @@ def test_the_face_is_written_in_the_script_of_the_old_trigger(tmp_path):
     s.init_files()
     s.remember("k3-plan", "K3をSSD階層で走らせる計画。純CPUで10 tok/sを狙う", "本文")
     s.remember("k3-new", "新しい計画", "本文")
-    h = a_manifest(s, [{"class": "USER", "text": "k3-plan はもうやめる。新しい方でいく"}])
+    h = a_manifest(s, [{"class": "USER", "text": "k3-plan はやめて、今後は k3-new で行く"}])
     assert s.retire("k3-plan", "k3-new", h)["ok"]
     hook = hook_of(s, "k3-plan")
     assert hook.startswith("退役: ") and "／現在は [[k3-new]]" in hook
@@ -81,7 +81,7 @@ def test_a_user_quote_naming_the_old_title_is_enough(tmp_path):
     """The human says the memory's NAME, not its slug — the way people talk."""
     s = a_store(tmp_path)
     title = next(t for t, sl in s.titles().items() if sl == "old-way")
-    h = a_manifest(s, [{"class": "USER", "text": f"we are done with {title}, use the new one"}])
+    h = a_manifest(s, [{"class": "USER", "text": f"instead of {title} we now use new-way"}])
     assert s.retire("old-way", "new-way", h)["ok"]
 
 
@@ -117,6 +117,21 @@ def test_a_tool_only_manifest_cannot_retire(tmp_path):
     r = s.retire("old-way", "new-way", h)
     assert not r["ok"] and "[USER]" in r["error"]
     assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_a_manifest_that_only_names_the_old_memory_cannot_retire(tmp_path):
+    """The door does not trust its caller. A [USER] quote that merely MENTIONS the
+    old memory — or retires it without naming a successor — is not the human saying
+    old → new, and `現在は [[new]]` may only be written by that sentence."""
+    s = a_store(tmp_path)
+    for text in ("old-way is what got us here, remember",
+                 "old-way はもうやめよう。ところで別件で new-way の話だけど",
+                 "old-way はもうやめる"):
+        h = a_manifest(s, [{"class": "USER", "text": text}])
+        r = s.retire("old-way", "new-way", h)
+        assert not r["ok"], text
+        assert "no explicit succession in the human's words" in r["error"], text
+        assert not Store.is_faced(hook_of(s, "old-way")), text
 
 
 def test_a_tampered_manifest_cannot_retire(tmp_path):
@@ -169,7 +184,7 @@ def test_a_second_different_successor_is_refused(tmp_path):
     s.remember("third-way", "a later idea", "BODY")
     h = user_manifest(s)
     assert s.retire("old-way", "new-way", h)["ok"]
-    h2 = a_manifest(s, [{"class": "USER", "text": "old-way is dead, third-way now"}])
+    h2 = a_manifest(s, [{"class": "USER", "text": "we replaced old-way with third-way"}])
     r = s.retire("old-way", "third-way", h2)
     assert not r["ok"] and "already wears" in r["error"]
     assert "[[new-way]]" in hook_of(s, "old-way")
@@ -218,7 +233,7 @@ def a_long_faced_store(tmp_path):
                "K3をSSD階層で走らせる計画。純CPUで10 tok/sを狙う。作戦帳はCAMPAIGN.mdに置き、"
                "職人はDSH-Qwenが担当し、監督は雲のユキが受け持つ長い長い説明の行", "本文")
     s.remember("k3-new", "新しい計画", "本文")
-    h = a_manifest(s, [{"class": "USER", "text": "k3-plan はもうやめる。新しい方でいく"}])
+    h = a_manifest(s, [{"class": "USER", "text": "k3-plan はやめて、今後は k3-new で行く"}])
     assert s.retire("k3-plan", "k3-new", h)["ok"]
     _aged(s, "k3-plan")
     return s
@@ -303,7 +318,7 @@ def test_the_distiller_retires_on_the_humans_own_words(tmp_path):
     s = a_store(tmp_path, policy="distiller-only")
     dis = a_distiller(tmp_path, s)
     r = stage_and_pour(tmp_path, dis,
-                       [{"class": "USER", "text": "stop using old-way — we do the newer way now"}],
+                       [{"class": "USER", "text": "stop using old-way — switch to newer-way"}],
                        ["USER"])
     assert r["ok"] and r["retired"] == "old-way"
     assert Store.is_faced(hook_of(s, "old-way")) and "[[newer-way]]" in hook_of(s, "old-way")
@@ -360,7 +375,7 @@ def test_the_drain_counts_the_transition_in_its_metrics_row(tmp_path):
     dis.stage({"slug": "newer-way", "kind": "project", "title": "the newer way",
                "description": "what we do instead now", "body": "BODY",
                "evidence": [{"class": "USER",
-                             "text": "stop using old-way — we do the newer way now"}],
+                             "text": "stop using old-way — switch to newer-way"}],
                "classes": ["USER"], "tags": [], "tag_basis": {},
                "tags_refused": {"superseded": "reserved for the forgetting pass"}},
               str(src))
