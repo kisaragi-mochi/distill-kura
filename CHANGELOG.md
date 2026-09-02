@@ -75,6 +75,23 @@ already sharing the projects, people, decisions, failures and turns of phrase.
   absent is silence and the heads run exactly as before. `kura bench worldline
   --no-cues` runs the comparison that isolates what the shared vocabulary buys.
 
+- **Callsigns hardened (receipts are the authority)**: a cue becomes a ROUTE only
+  through an immutable receipt — content-addressed, HMAC-signed with the store's
+  own gate key — issued the moment the association becomes real (a draft that
+  actually POURED, an extension that POURED, or a COVERED verdict against a slug
+  that exists). A staged or TOSSed draft's manifest carries provenance, never a
+  route. The reader trusts nothing it is handed: every receipt is re-verified on
+  build (file hash, HMAC, schema, slug membership, the manifest's hash, cue
+  class/quote/substring/length — "it was gated when issued" is not an argument),
+  and the pointed-to receipt is verified AGAIN on every direct hit. `_still/
+  cues.json` is a marked cache over a two-ended stamp (store revision + a hash of
+  the receipt set, so a COVERED cue — which moves no canonical byte — is visible
+  immediately); a rewritten slug, a forged revision, an inserted fake cue or a
+  corrupt file each mean rebuild-from-receipts, and a cache the disk refuses to
+  hold is answered from memory — a cache failure is never a recall failure.
+  Several cues naming the SAME memory route together (a world has several
+  names); cues naming different memories remain silence.
+
 ### The full-repo review (2026-09): every finding verified, then fixed
 
 A review pass over every module, with each finding verified against the code (and
