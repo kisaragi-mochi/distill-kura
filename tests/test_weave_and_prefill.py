@@ -771,3 +771,15 @@ def test_build_from_cfg_honours_the_window_in_the_config(tmp_path):
     from distill_kura import prefill as pf
     s = a_store(tmp_path, n_old=40)
     assert pf.build_from_cfg(s, None, {"window_tokens": 1200}).stats["over_ceiling"] is True
+
+def test_the_loom_leaves_no_tmp_debris_and_names_its_tmp_per_process(tmp_path, monkeypatch):
+    """Three writers in this module hand-rolled the same tmp+replace. The per-process
+    tmp name is what keeps two weaves running side by side from tearing each other's
+    ledger, and nothing checked it."""
+    s = a_store(tmp_path)
+    seen = []
+    real = os.replace
+    monkeypatch.setattr(os, "replace", lambda a, b: (seen.append(a), real(a, b))[1])
+    Loom(s, scribe=None).write()
+    assert not [f for f in os.listdir(s.still) if ".tmp" in f]
+    assert seen and all(t.endswith(f".tmp.{os.getpid()}") for t in seen)

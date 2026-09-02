@@ -141,6 +141,20 @@ def _sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
+def _replace_text(path: str, text: str) -> None:
+    """Write `text` to `path` atomically, through a per-process sibling tmp.
+
+    Per-process, not a fixed name: two weaves running side by side shared one tmp and
+    the loser's `os.replace` raised FileNotFoundError out of the middle of a weave.
+    Deliberately does NOT fsync — the cloth, its stamp and the hook ledger are all
+    rebuildable, and paying for durability on every weave would be a different trade
+    from the one `Store._replace_file` makes for canonical files."""
+    tmp = path + f".tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
 def _sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
@@ -308,13 +322,7 @@ class Loom:
         blob = json.dumps({"payload": hooks, "mark": self._hooks_mark(hooks)},
                           ensure_ascii=False, indent=1, sort_keys=True)
         os.makedirs(self.store.still, exist_ok=True)
-        # Per-process, like the two writers below: two weaves running side by side
-        # shared one fixed tmp name, and the loser's os.replace raised
-        # FileNotFoundError out of the middle of a weave.
-        tmp = self.hooks_path + f".tmp.{os.getpid()}"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(blob)
-        os.replace(tmp, self.hooks_path)
+        _replace_text(self.hooks_path, blob)
 
     # ── mechanical trimming (the no-model path) ──────────────────────────
     @staticmethod
@@ -792,10 +800,7 @@ class Loom:
                     os.remove(os.path.join(bdir, old))
                 except OSError:
                     pass
-        tmp = self.out_path + f".tmp.{os.getpid()}"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(cloth.text)
-        os.replace(tmp, self.out_path)
+        _replace_text(self.out_path, cloth.text)
         # The cloth first, its record second: a crash between the two leaves an
         # unprovable cloth (served as stale — safe), never a fresh stamp on old text.
         self._record_state(current, _sha256(cloth.text), current_rev)
@@ -815,10 +820,8 @@ class Loom:
         if self._state() == record:
             return                               # no churn when nothing changed
         os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
-        tmp = self.state_path + f".tmp.{os.getpid()}"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(record, f, ensure_ascii=False, indent=1, sort_keys=True)
-        os.replace(tmp, self.state_path)
+        _replace_text(self.state_path,
+                      json.dumps(record, ensure_ascii=False, indent=1, sort_keys=True))
 
     # ── reading it back ──────────────────────────────────────────────────
     def cloth_on_disk(self) -> str | None:
