@@ -465,6 +465,53 @@ that table shows no new wrong or obsolete branch and no rise in
 `remembered_but_unreachable` — the memory that exists but cannot be reached.
 
 
+## Reading a worldline run (and promoting on one)
+
+`kura bench worldline` prints two tables. The first is every runnable case per
+resident variant. The second, `paired-format-valid`, restricts the same counts to
+the cases that came back in a readable format in EVERY variant of that run — a map
+that garbles the questions it finds hard scores those rows as failures for itself
+and never for its rival, so the first table can move for a reason that has nothing
+to do with the map. Promote on the second.
+
+The header carries `case_set_sha`, the sha256 of the cases file's bytes, and so
+does every trace row. Two runs whose digests differ answered different questions;
+their numbers are not comparable, whatever the case counts say.
+
+In agent-only routing three columns say how a reply failed, not merely that it
+did: `format_error` (the whole reply was not the JSON array that was asked for),
+`truncated` (the model hit the token cap) and `reasoning_only` (the visible answer
+was empty while the model reasoned at length). The last two never excuse the
+first — a cut reply and a reply that was all private thinking are both answers
+nobody was given — they only say which repair is worth making: raise `max_tokens`,
+or lower the reasoning effort. The trace's `reply_head` keeps the witness, prefixed
+`[reasoning] ` when there was nothing visible to show.
+
+To compare two runs:
+
+```bash
+kura bench worldline --routing agent-only --resident canonical,woven --json > A.json
+# change something, run again
+kura bench worldline --routing agent-only --resident canonical,woven --json > B.json
+kura bench worldline-compare A.json B.json        # --json for the raw numbers
+```
+
+It refuses outright when the two `case_set_sha` values differ. Per variant present
+in both it prints recovery over all cases, recovery over the cases that were
+format-valid in every variant of both runs, the `format_error` delta, and the four
+safety counts with their deltas. There is no composite score, and there will not
+be one: the day a single number exists, it is what gets optimized.
+
+Promote a map change only on:
+
+> an improvement clearly above the run-to-run noise envelope observed on the frozen
+> case set, reproduced by two independent readers, with no worsening of wrong
+> branch, obsolete resurrection, remembered-but-unreachable, or format_error
+
+Current observed noise envelope: about ±2 / 42 (house set v1, 2026-09-02);
+re-measure when the case count changes.
+
+
 ## Typed worldline edges (M7)
 
 `kura edges` prints the typed edges the store implies — `continues`, `next`,

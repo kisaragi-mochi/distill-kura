@@ -358,6 +358,9 @@ def summarize(traces: list[dict]) -> dict:
                 1 for t in ran if t["category"] == "unknown" and t["target_reached"]),
             "remembered_but_unreachable": sum(
                 1 for t in ran if t.get("remembered_but_unreachable")),
+            # A count, not a footnote: a map that lifts recovery while breaking the
+            # output format has not improved anything a reader can act on.
+            "format_error": sum(1 for t in ran if t.get("format_error")),
             "unnecessary_opens": sum(len(t.get("unnecessary_opens") or []) for t in ran),
             # Two ways an agent-only row can fail that a bare format_error count
             # cannot tell apart: the cap cut the reply, or the whole budget went
@@ -371,6 +374,101 @@ def summarize(traces: list[dict]) -> dict:
             "resident_tokens_mean": mean([t["resident_tokens"] for t in ran]),
             "opened_mean": mean([len(t["opened"]) for t in ran]),
             "elapsed_ms_mean": mean([t["elapsed_ms"] for t in ran])}
+
+
+def valid_case_ids(traces: list[dict]) -> set[str]:
+    """The cases that were format-valid in EVERY variant of a run.
+
+    A variant that answers three cases in a readable format and garbles the rest
+    is not better than one that answers all forty in a readable format — but its
+    all-cases recovery can look better, because a garbled row is a failure for it
+    and a scored row for the other. Comparing over the intersection removes that:
+    the same questions, answered readably by everyone, or the row is nobody's."""
+    per: dict[str, set[str]] = {}
+    for t in traces:
+        v = t.get("resident_variant", "")
+        ok = not t.get("skipped") and not t.get("format_error")
+        per.setdefault(v, set())
+        if ok:
+            per[v].add(t.get("case", ""))
+    if not per:
+        return set()
+    ids = set.intersection(*per.values())
+    ids.discard("")
+    return ids
+
+
+def paired_valid(traces: list[dict], ids: set[str] | None = None) -> dict:
+    """Per variant, the counts restricted to `ids` (default: the cases valid in
+    every variant). The promotion view — never a score, still just counts."""
+    ids = valid_case_ids(traces) if ids is None else ids
+    out: dict[str, dict] = {}
+    for t in traces:
+        v = t.get("resident_variant", "")
+        row = out.setdefault(v, {"cases": 0, "target_reached": 0, "wrong_branch": 0,
+                                 "obsolete_branch": 0, "remembered_but_unreachable": 0})
+        if t.get("case", "") not in ids or t.get("skipped"):
+            continue
+        row["cases"] += 1
+        for k in ("target_reached", "wrong_branch", "obsolete_branch",
+                  "remembered_but_unreachable"):
+            if t.get(k):
+                row[k] += 1
+    return out
+
+
+def compare(a: dict, b: dict, name_a: str = "A", name_b: str = "B") -> dict:
+    """Two worldline results, read side by side.
+
+    Refuses outright when the case-set digests differ: a comparison of two
+    different question sets is not a weaker comparison, it is a wrong one, and
+    printing it with a warning would let it be quoted anyway.
+
+    No composite score. Recovery is given twice — over all cases, and over the
+    cases that were format-valid in every variant of BOTH runs — with the four
+    safety counts beside it, because the only reading that means anything is
+    "recovery rose and none of these did"."""
+    sa, sb = a.get("case_set_sha") or "", b.get("case_set_sha") or ""
+    if sa != sb:
+        raise ValueError(
+            f"case sets differ ({name_a} case_set_sha={sa[:12] or 'missing'}, "
+            f"{name_b} case_set_sha={sb[:12] or 'missing'}): these two runs answered "
+            "different questions and must not be compared")
+    ids = valid_case_ids(a.get("traces") or []) & valid_case_ids(b.get("traces") or [])
+    pa = paired_valid(a.get("traces") or [], ids)
+    pb = paired_valid(b.get("traces") or [], ids)
+    va, vb = a.get("variants") or {}, b.get("variants") or {}
+    rows: dict[str, dict] = {}
+    for name in [n for n in va if n in vb]:
+        sm_a, sm_b = va[name]["summary"], vb[name]["summary"]
+
+        def rate(sm: dict) -> float | None:
+            n = sm.get("runnable") or 0
+            return round(sm.get("target_reached", 0) / n, 3) if n else None
+
+        def prate(p: dict) -> float | None:
+            n = p.get("cases") or 0
+            return round(p.get("target_reached", 0) / n, 3) if n else None
+
+        p_a = pa.get(name, {"cases": 0})
+        p_b = pb.get(name, {"cases": 0})
+        rows[name] = {
+            "all_cases": {"runnable_a": sm_a.get("runnable", 0),
+                          "runnable_b": sm_b.get("runnable", 0),
+                          "recovery_a": rate(sm_a), "recovery_b": rate(sm_b)},
+            "paired_valid": {"cases": min(p_a.get("cases", 0), p_b.get("cases", 0)),
+                             "cases_a": p_a.get("cases", 0),
+                             "cases_b": p_b.get("cases", 0),
+                             "recovery_a": prate(p_a), "recovery_b": prate(p_b)},
+            "format_error": {"a": sm_a.get("format_error", 0),
+                             "b": sm_b.get("format_error", 0),
+                             "delta": sm_b.get("format_error", 0) - sm_a.get("format_error", 0)},
+            "safety": {k: {"a": sm_a.get(k, 0), "b": sm_b.get(k, 0),
+                           "delta": sm_b.get(k, 0) - sm_a.get(k, 0)}
+                       for k in ("wrong_branch", "obsolete_branch",
+                                 "remembered_but_unreachable", "format_error")}}
+    return {"case_set_sha": sa, "a": name_a, "b": name_b,
+            "paired_valid_cases": len(ids), "variants": rows}
 
 
 def run(store: Store, cases: list[dict], routing: str = "full",
@@ -409,6 +507,9 @@ def run(store: Store, cases: list[dict], routing: str = "full",
     result = {"store": store.name, "routing": routing, "cases": len(cases),
               "case_set_sha": case_set_sha,
               "variants": variants,
+              # The promotion view: the same cases, format-valid everywhere, so a
+              # variant cannot look better by garbling the cases it finds hard.
+              "paired_valid": paired_valid(traces),
               "summary": summarize(traces), "traces": traces}
     if routing == "agent-only":
         # Bookkeeping only: who was measured must be on record with the numbers.

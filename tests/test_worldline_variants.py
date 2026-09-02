@@ -237,7 +237,9 @@ def test_cli_prints_one_row_per_variant_with_tokens(tmp_path, capsys):
     lines = [l for l in out.splitlines() if l.strip()]
     assert lines[1].startswith("variant") and "resident_tokens" in lines[1]
     assert "remembered_but_unreachable" in lines[1] and "obsolete_branch" in lines[1]
-    rows = {l.split()[0]: l for l in lines[3:]}
+    first = lines[:next(i for i, l in enumerate(lines)
+                        if l.startswith("paired-format-valid"))]
+    rows = {l.split()[0]: l for l in first[3:]}
     assert set(rows) == {"canonical", "woven", "shadow"}
     assert int(rows["shadow"].split()[1]) < int(rows["canonical"].split()[1])
     # tier zero never names a dead plan the fixture does not bait it with by slug,
@@ -421,3 +423,142 @@ def test_the_cli_header_carries_the_case_set_sha(tmp_path, capsys):
           "--routing", "fastpath"])
     sha = wl.load_case_set(CASES)[1]
     assert f"case_set_sha={sha[:12]}" in capsys.readouterr().out
+
+
+# ── the promotion view: paired over the format-valid cases, and compare ──────
+
+class ByVariantStub:
+    """Answers differently depending on which map it is shown, so a paired
+    comparison has something to be paired about."""
+    def __init__(self, by_marker: dict, default="[]"):
+        self.by_marker, self.default = by_marker, default
+
+    def ask_full(self, system, user, max_tokens=400, timeout=None, temperature=None):
+        content = self.default
+        for marker, reply in self.by_marker.items():
+            if marker in system:
+                content = reply.get(user, reply.get("*", self.default))
+                break
+        return {"content": content, "reasoning": "", "finish_reason": "stop"}
+
+
+def _two_variant_run(tmp_path, marker_reply):
+    s = build(tmp_path)
+    cases, sha = wl.load_case_set(CASES)
+    thin = tmp_path / "thin.md"
+    thin.write_text("# thin map — MARKER-THIN\n", encoding="utf-8")
+    vs = {"canonical": s.index_text(), "thin": thin.read_text(encoding="utf-8")}
+    return wl.run(s, cases[:4], "agent-only", thinker=marker_reply,
+                  resident_variants=vs, case_set_sha=sha)
+
+
+def test_paired_valid_counts_only_the_cases_readable_everywhere(tmp_path):
+    """A variant that garbles the cases it finds hard must not look better for it:
+    such a row is a failure for one side and simply absent for the other."""
+    out = _two_variant_run(tmp_path, ByVariantStub(
+        {"MARKER-THIN": {"*": "sorry, I can't tell"}}, default="[]"))
+    pv = out["paired_valid"]
+    assert set(pv) == {"canonical", "thin"}
+    # `thin` was unreadable on every case, so nothing is paired at all.
+    assert pv["thin"]["cases"] == 0 and pv["canonical"]["cases"] == 0
+    # ...while the all-cases summary still shows canonical answering.
+    assert out["variants"]["canonical"]["summary"]["format_error"] == 0
+    assert out["variants"]["thin"]["summary"]["format_error"] > 0
+
+
+def test_paired_valid_matches_the_summary_when_every_row_is_readable(tmp_path):
+    out = _two_variant_run(tmp_path, ByVariantStub({}, default="[]"))
+    for name, v in out["variants"].items():
+        assert out["paired_valid"][name]["cases"] == v["summary"]["runnable"]
+        assert (out["paired_valid"][name]["target_reached"]
+                == v["summary"]["target_reached"])
+
+
+def test_the_paired_table_is_printed_under_the_first(tmp_path, capsys):
+    cfg = _cfg(tmp_path)
+    main(["-c", cfg, "-s", "m", "bench", "worldline", "--cases", CASES,
+          "--routing", "fastpath"])
+    out = capsys.readouterr().out
+    assert "paired-format-valid" in out
+    tail = out.split("paired-format-valid", 1)[1]
+    for col in ("cases", "target_reached", "wrong_branch", "obsolete_branch",
+                "remembered_but_unreachable"):
+        assert col in tail
+
+
+def _result_file(tmp_path, name, sha, *, canonical_target=1, thin_target=0,
+                 wrong=0, fmt=0):
+    """A minimal worldline result, hand-built so a compare test says exactly what
+    it means instead of depending on how a fixture happens to score."""
+    traces = []
+    for variant, hits in (("canonical", canonical_target), ("thin", thin_target)):
+        for i in range(2):
+            traces.append({"case": f"c{i}", "resident_variant": variant,
+                           "case_set_sha": sha, "skipped": None,
+                           "format_error": False, "target_reached": i < hits,
+                           "wrong_branch": False, "obsolete_branch": False,
+                           "remembered_but_unreachable": False})
+    variants = {
+        "canonical": {"resident_tokens": 10, "resident_sha": "x",
+                      "summary": {"runnable": 2, "target_reached": canonical_target,
+                                  "wrong_branch": wrong, "obsolete_branch": 0,
+                                  "remembered_but_unreachable": 0,
+                                  "format_error": fmt}},
+        "thin": {"resident_tokens": 5, "resident_sha": "y",
+                 "summary": {"runnable": 2, "target_reached": thin_target,
+                             "wrong_branch": 0, "obsolete_branch": 0,
+                             "remembered_but_unreachable": 0, "format_error": 0}}}
+    p = tmp_path / name
+    p.write_text(json.dumps({"store": "m", "routing": "agent-only", "cases": 2,
+                             "case_set_sha": sha, "variants": variants,
+                             "traces": traces}), encoding="utf-8")
+    return str(p)
+
+
+def test_compare_refuses_two_different_case_sets(tmp_path):
+    a = _result_file(tmp_path, "a.json", "aaa")
+    b = _result_file(tmp_path, "b.json", "bbb")
+    with pytest.raises(SystemExit) as e:
+        main(["bench", "worldline-compare", a, b])
+    msg = str(e.value)
+    assert "case sets differ" in msg and "must not be compared" in msg
+
+
+def test_compare_prints_recovery_twice_and_the_safety_deltas(tmp_path, capsys):
+    a = _result_file(tmp_path, "a.json", "s1", canonical_target=1, fmt=2)
+    b = _result_file(tmp_path, "b.json", "s2".replace("s2", "s1"),
+                     canonical_target=2, fmt=0)
+    rc = main(["bench", "worldline-compare", a, b])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "paired-format-valid cases (valid in every variant of BOTH runs): 2" in out
+    assert "all cases" in out and "paired valid" in out
+    assert "format_error       A 2  B 0  delta -2" in out
+    for k in ("wrong_branch", "obsolete_branch", "remembered_but_unreachable"):
+        assert k in out
+    assert "delta +0" in out                # an unmoved safety count still shows its sign
+
+
+def test_compare_json_carries_the_numbers(tmp_path, capsys):
+    a = _result_file(tmp_path, "a.json", "s1", canonical_target=1)
+    b = _result_file(tmp_path, "b.json", "s1", canonical_target=2)
+    main(["bench", "worldline-compare", a, b, "--json"])
+    c = json.loads(capsys.readouterr().out)
+    assert c["paired_valid_cases"] == 2
+    v = c["variants"]["canonical"]
+    assert v["all_cases"]["recovery_a"] == 0.5 and v["all_cases"]["recovery_b"] == 1.0
+    assert v["paired_valid"]["cases"] == 2
+    assert v["safety"]["wrong_branch"]["delta"] == 0
+    assert "score" not in json.dumps(c)     # no composite, on purpose
+
+
+def test_compare_pairs_only_cases_valid_in_both_files(tmp_path):
+    a = json.loads(open(_result_file(tmp_path, "a.json", "s1"), encoding="utf-8").read())
+    b = json.loads(open(_result_file(tmp_path, "b.json", "s1"), encoding="utf-8").read())
+    # one case went unreadable in B's thin variant: it leaves the paired set for BOTH.
+    for t in b["traces"]:
+        if t["case"] == "c1" and t["resident_variant"] == "thin":
+            t["format_error"] = True
+    c = wl.compare(a, b)
+    assert c["paired_valid_cases"] == 1
+    assert c["variants"]["canonical"]["paired_valid"]["cases"] == 1

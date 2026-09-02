@@ -125,5 +125,17 @@ remembered_but_unreachable, unnecessary_opens, thinker_calls_total, opened_mean)
 traces. Traces are also appended to `<store>/_still/worldline-traces.jsonl`
 (override with `--trace PATH`).
 
+A second table, `paired-format-valid`, repeats the counts over only the cases that
+came back readable in EVERY variant of the run — the view to promote on, because a
+map that garbles what it finds hard would otherwise be flattered by the first
+table. The header and every trace row carry `case_set_sha` (sha256 of the cases
+file's bytes): two runs with different digests answered different questions.
+
+In `agent-only` the answer read is the model's visible `content` only. `truncated`
+(the token cap was hit) and `reasoning_only` (nothing visible said while the model
+reasoned) sit beside `format_error` and never excuse it — they say which repair to
+make. `kura bench worldline-compare A.json B.json` reads two `--json` results side
+by side; see the promotion rule in `docs/OPERATING.md`.
+
 Exit code: 0 when something ran and no case landed a wrong or obsolete branch;
 1 otherwise.

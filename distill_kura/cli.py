@@ -102,6 +102,58 @@ def _worldline_table(r: dict) -> str:
             + "\n".join(lines))
 
 
+_WL_PAIRED_COLS = ("cases", "target_reached", "wrong_branch", "obsolete_branch",
+                   "remembered_but_unreachable")
+
+
+def _worldline_paired_table(r: dict) -> str:
+    """The same counts over the cases every variant answered in a readable format.
+    A variant that garbles what it finds hard scores those rows as failures for
+    itself and never for its rival, so the all-cases table can move for a reason
+    that has nothing to do with the map. This is the table to promote on."""
+    paired = r.get("paired_valid") or {}
+    if not paired:
+        return ""
+    head = ["variant", *_WL_PAIRED_COLS]
+    rows = [head] + [[name, *[str(v.get(c, "")) for c in _WL_PAIRED_COLS]]
+                     for name, v in paired.items()]
+    widths = [max(len(row[i]) for row in rows) for i in range(len(head))]
+    lines = ["  ".join(c.ljust(widths[i]) for i, c in enumerate(row)) for row in rows]
+    lines.insert(1, "  ".join("-" * w for w in widths))
+    return "paired-format-valid  (cases readable in EVERY variant)\n" + "\n".join(lines)
+
+
+def _worldline_compare_text(c: dict) -> str:
+    """Two runs side by side. Recovery twice, the safety counts with their signs,
+    and no composite — the reading is 'recovery rose and none of these did'."""
+    def pct(v) -> str:
+        return "—" if v is None else f"{v:.3f}"
+
+    def signed(n: int) -> str:
+        return f"{n:+d}"
+
+    out = [f"worldline-compare  case_set_sha={(c['case_set_sha'] or '')[:12]}  "
+           f"A={c['a']}  B={c['b']}",
+           f"paired-format-valid cases (valid in every variant of BOTH runs): "
+           f"{c['paired_valid_cases']}"]
+    for name, v in c["variants"].items():
+        al, pv = v["all_cases"], v["paired_valid"]
+        out.append(f"\n[{name}]")
+        out.append(f"  all cases          recovery A {pct(al['recovery_a'])} "
+                   f"({al['runnable_a']} runnable)  B {pct(al['recovery_b'])} "
+                   f"({al['runnable_b']} runnable)")
+        out.append(f"  paired valid       recovery A {pct(pv['recovery_a'])}  "
+                   f"B {pct(pv['recovery_b'])}   over {pv['cases']} cases")
+        fe = v["format_error"]
+        out.append(f"  format_error       A {fe['a']}  B {fe['b']}  "
+                   f"delta {signed(fe['delta'])}")
+        out.append("  safety (lower is better):")
+        for k, d in v["safety"].items():
+            out.append(f"    {k:<28} A {d['a']:>4}  B {d['b']:>4}  "
+                       f"delta {signed(d['delta'])}")
+    return "\n".join(out)
+
+
 def _payforward_table(r: dict) -> str:
     """One line per condition: what the mouth said it reprocessed (prompt_n), how long
     the call took, and what the row varied. prompt_n IS the finding — a spine is warm
@@ -249,6 +301,13 @@ def main(argv: list[str] | None = None) -> int:
                         "— how a map from a module that does not exist yet gets measured")
     b.add_argument("--json", action="store_true",
                    help="dump the full result with traces (default: a per-variant table)")
+    b = bsub.add_parser("worldline-compare",
+                        help="two `bench worldline --json` result files, side by side: "
+                             "recovery over all cases and over the cases both runs "
+                             "answered readably, with the safety counts. No score.")
+    b.add_argument("a", help="the baseline result file (bench worldline --json > A.json)")
+    b.add_argument("b", help="the candidate result file")
+    b.add_argument("--json", action="store_true")
 
     p = sub.add_parser("metrics", help="read-only gauges over a store's _still logs")
     msub = p.add_subparsers(dest="mcmd")
@@ -379,6 +438,24 @@ def main(argv: list[str] | None = None) -> int:
             return 0                            # the whole fleet is covered
         return 2                                # every mouth VERIFIED fresh — the scheduler may rest
 
+    # Two finished result files, compared. Deliberately before the store is
+    # resolved: the reading is entirely in the files, and demanding a live store
+    # to read two JSON files would stop the comparison happening anywhere but the
+    # machine that produced it.
+    if a.cmd == "bench" and a.bcmd == "worldline-compare":
+        from . import worldline as wl
+        try:
+            with open(a.a, encoding="utf-8") as f:
+                ra = json.load(f)
+            with open(a.b, encoding="utf-8") as f:
+                rb = json.load(f)
+            c = wl.compare(ra, rb, os.path.basename(a.a), os.path.basename(a.b))
+        except (ValueError, OSError) as e:
+            sys.exit(str(e))         # a mismatched case set is a refusal, not a warning
+        print(json.dumps(c, ensure_ascii=False, indent=1) if a.json
+              else _worldline_compare_text(c))
+        return 0
+
     store = _store(reg, a.store)
 
     if a.cmd == "metrics":
@@ -447,6 +524,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(r, ensure_ascii=False, indent=1))
             else:
                 print(_worldline_table(r))
+                paired = _worldline_paired_table(r)
+                if paired:
+                    print()
+                    print(paired)
             # A wrong branch (an abandoned plan anchoring a case) is the one result
             # that must never read as a passing run — and a resurrected obsolete
             # plan is the worse form of it; nothing runnable is the other.
