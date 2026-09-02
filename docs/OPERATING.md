@@ -472,3 +472,43 @@ store moves; delete it freely. `kura glance` shows up to three as `RELATIONS:` u
 its token target, the Hot Trail gains `↳ source continues → target` lines for fresh
 breadcrumbs only, and `kura bench worldline` reports `edge_says_obsolete` per trace.
 `kura doctor` carries the edge counts on its health line.
+
+
+## The richness gauge (plan §15)
+
+`kura metrics richness` answers one question in two parts: is the store still
+remembering, and is what it remembers still true? It reads the `_still/*.jsonl`
+logs the distiller already writes — nothing is called, nothing is written — and
+prints each number with its denominator, for the whole range and again per rolling
+window (`--window DAYS`, default 7) so a trend shows. `--since DAYS` bounds the
+range; `--json` gives the whole dict.
+
+What each number means:
+
+- **candidate rate** — candidates the brain found per journal segment drunk, also
+  per `source_key`; a spread means one journal drifted, not the house.
+- **rejections** — what the gate refused and why (`why_dropped` counts), the share
+  that carried a `reason`, and how many claimed numbers nothing grounded.
+- **USER survival** — `by_class.USER` candidates against `gated_kept`. The writer
+  records no per-class keeps, so the kept cell says "not recorded by the writer";
+  the gauge invents no proxy.
+- **seeds / SELF retreat** — ideas diverted to `_still/seeds.jsonl` per
+  `gated_kept`, plus what the drain TOSSed or quarantined.
+- **callsigns** — cue receipts issued, receipts refused, cues the gate refused on
+  dropped candidates.
+- **remembered_but_unreachable** — per resident variant: the map said it, recall
+  could not open it.
+- **per resident_sha** — target-reached per map identity, so a re-weave is
+  compared with the map that actually wore the traces.
+- **fallback thinker** — reads by `why` and how often recall fell back to the
+  thinker; recall's own "how" (fastpath vs meaning) reaches no log, and the
+  output says so and names the writer that would have to carry it.
+
+The one warning, computed not judged: when the latest window shows gate
+rejections up AND `gated_kept` down against the previous window —
+
+    WARN richness: rejections up (a→b), kept down (c→d) — is the gate learning
+    honesty or silence?
+
+It is a gauge, not a gate: exit code stays 0, and a human decides what the
+pattern means.

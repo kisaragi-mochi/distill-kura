@@ -17,6 +17,7 @@
     kura pay-forward [-s eq]          bake the map into each mouth's KV slot, save it to disk
     kura bench compress [-s eq]       what the store cost against the journal it came from
     kura bench payforward --mouth N   what the pay-forward spine buys, priced by the mouth
+    kura metrics richness [-s eq]     did it stop remembering LIES or stop remembering (§15)
     kura init <name> --path DIR       create a store and print the TOML to paste
     kura distill catchup [-s eq]      start from today: mark every journal drunk up to now
     kura distill run [-s eq]          one pass: drink → spot → gate → write drafts
@@ -236,6 +237,19 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--json", action="store_true",
                    help="dump the full result with traces (default: a per-variant table)")
 
+    p = sub.add_parser("metrics", help="read-only gauges over a store's _still logs")
+    msub = p.add_subparsers(dest="mcmd")
+    m = msub.add_parser("richness",
+                        help="did the store stop remembering LIES, or stop "
+                             "remembering? (plan §15) — candidate rate, rejection "
+                             "reasons, evidence survival, unreachable, fallback; "
+                             "pure aggregation, never writes")
+    m.add_argument("--json", action="store_true")
+    m.add_argument("--since", type=float, default=None, metavar="DAYS",
+                   help="only rows from the last DAYS days")
+    m.add_argument("--window", type=float, default=7.0, metavar="DAYS",
+                   help="rolling window size, so a trend is visible (default 7)")
+
     p = sub.add_parser("init", help="create a new store")
     p.add_argument("name")
     p.add_argument("--path", required=True)
@@ -353,6 +367,20 @@ def main(argv: list[str] | None = None) -> int:
         return 2                                # every mouth VERIFIED fresh — the scheduler may rest
 
     store = _store(reg, a.store)
+
+    if a.cmd == "metrics":
+        from . import richness
+        if a.mcmd != "richness":
+            sys.exit("kura metrics {richness}")
+        r = richness.gauge(store, since_days=a.since, window_days=a.window)
+        if a.json:
+            print(json.dumps(r, ensure_ascii=False, indent=1))
+        else:
+            print(richness.table(r))
+        # §15's warning rides in the output and in r["warnings"], but it is a gauge,
+        # not a gate: the exit code stays 0 so a scheduler never mistakes "the store
+        # looks suspicious" for "the command failed".
+        return 0
 
     if a.cmd == "bench":
         from . import bench

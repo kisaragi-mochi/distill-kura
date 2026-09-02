@@ -2,6 +2,30 @@
 
 ## 0.3.0 — unreleased
 
+### Richness regression gauge (plan §15)
+
+`kura metrics richness` tells "the store stopped remembering lies" apart from "the
+store stopped remembering". Rejections going up is ambiguous — the gate may be
+learning honesty, or the writer may have gone quiet and the gate is all that is
+left — so the gauge reads the `_still/*.jsonl` logs their writers already record
+(metrics, dropped, tossed, seeds, reads, worldline traces) and never writes. Pure
+aggregation, no model, `--since DAYS` to bound the range, `--window DAYS` (default
+7) so every metric also appears per rolling window and a trend is visible. Each
+number carries its denominator; a malformed log line is counted (`bad_lines` per
+file) and skipped, never fatal. What it reports: candidate rate per raw journal
+(and per source key), the gate's rejection-reason distribution with
+`unverified_numbers` counted, USER evidence candidates against `gated_kept` (the
+writer records no per-class keeps, so that cell says "not recorded by the writer"
+rather than inventing a proxy), the seed-retreat rate with toss verdicts,
+callsign receipts against refusals, `remembered_but_unreachable` per resident
+variant, target-reached per `resident_sha` (the sha is the map's identity; the
+variant name only labels it), and the fallback-thinker rate — where it also names
+the honest hole that recall's "how" (fastpath vs meaning) reaches no log, and
+which writer would have to carry it. When the latest window shows gate rejections
+up AND `gated_kept` down against the previous window, one line prints:
+`WARN richness: rejections up (a→b), kept down (c→d) — is the gate learning
+honesty or silence?` — a gauge, not a gate: exit code 0 either way.
+
 ### M4 — the shortest cue that still recognises (shadow)
 
 The fixed 24-token trigger asked "how much can I cut?". M4 asks the plan's
