@@ -509,10 +509,15 @@ class Loom:
         return self._keep_markers(desc, self._mechanical(desc, title)), False
 
     # ── weaving ──────────────────────────────────────────────────────────
-    def weave(self, generate: bool = True) -> Cloth:
+    def weave(self, generate: bool = True, triggers: dict[str, str] | None = None) -> Cloth:
         """Build the cloth. `generate=False` reports what the current ledger would give
         without calling a model — that is what `status` uses, so asking the loom how big
-        the cloth is never costs a GPU second."""
+        the cloth is never costs a GPU second.
+
+        `triggers` (slug → text) is worn INSTEAD of the ledger for the trigger layer —
+        the adaptive shadow's shortest-safe cues, once a benchmark has earned them
+        (`adaptive_apply`), or a resident-map variant for that benchmark. The ledger
+        is not written from it, and the postcondition below still applies to it."""
         # The revision is captured BEFORE the index is read: a mutation landing in
         # between then shows as revision-moved at persist time, which is the safe
         # direction (a refused persist costs one re-weave; a missed one costs a lie).
@@ -555,6 +560,10 @@ class Loom:
                 continue
 
             stats["trigger"] += 1
+            if triggers is not None and triggers.get(slug):
+                stats["overridden"] = stats.get("overridden", 0) + 1
+                out.append(f"{bullet}[{title}]({slug}.md) — {triggers[slug]}")
+                continue
             entry = hooks.get(slug) if isinstance(hooks.get(slug), dict) else None
             # Reuse is keyed on the description's hash AND the budget it was written for.
             # Hashing only the description looks right and is wrong: changing
