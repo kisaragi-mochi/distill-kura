@@ -152,6 +152,12 @@ async function call(cfg, method, path, body, signal, headers = {}) {
 }
 
 const q = (store) => (store ? `?store=${encodeURIComponent(store)}` : "");
+// The kura this session is speaking from: a bound preset never leaves its own.
+const activeStore = (cfg, state) => (state.bound ? cfg.store : state.current);
+// "No map for this store" — the one shape, so a reader cannot wonder whether the
+// three places that build it differ on purpose.
+const emptyMap = (store, error) =>
+  ({ ok: false, store, served: "", text: "", etag: "", at: 0, ...(error ? { error } : {}) });
 const head = (store, extra) => `[kura: ${store || "default"}${extra ? " " + extra : ""}]`;
 
 /**
@@ -211,15 +217,15 @@ function mapCache(cfg, state) {
     // default-is-maker server threw the map away and transferred it again in full.
     isFor: (want) => state.map.ok && (state.map.store === want || state.map.served === want),
     text() {
-      return this.isFor(state.bound ? cfg.store : state.current) ? state.map.text : missing();
+      return this.isFor(activeStore(cfg, state)) ? state.map.text : missing();
     },
     invalidate(target) {
       if (state.map.store !== target && state.map.served !== target) {
-        state.map = { ok: false, store: target, served: "", text: "", etag: "", at: 0 };
+        state.map = emptyMap(target);
       }
     },
     async refresh() {
-      const target = state.bound ? cfg.store : state.current;
+      const target = activeStore(cfg, state);
       // A timer refresh for store A and a kura_use-triggered refresh for store B can
       // interleave: A's request is still in flight when current moves to B, and A's
       // late failure then downgraded B's resident map (ok=false) — or a late 200
@@ -247,8 +253,7 @@ function mapCache(cfg, state) {
           // Another await, another chance to have been superseded.
           if (gen !== this.gen) return false;
           if (!legit) {
-            state.map = { ok: false, store: target, served: "", text: "", etag: "", at: 0,
-                          error: `asked for ${target}, served ${d.store}` };
+            state.map = emptyMap(target, `asked for ${target}, served ${d.store}`);
             return false;
           }
         }
@@ -432,7 +437,9 @@ function tools(cfg, state) {
       isConcurrencySafe: () => true,
       async execute(_args, exec) {
         const d = await call(cfg, "GET", "/stores", undefined, exec?.signal);
-        const cur = (state.bound ? cfg.store : state.current) || d.default;
+        // This tool is only registered when the session is not bound, so there is
+        // no bound branch to take here.
+        const cur = state.current || d.default;
         const rows = Object.entries(d.stores || {}).map(([n, s]) => {
           const modes = Object.entries(d.modes || {}).filter(([, t]) => t === n).map(([m]) => m);
           return `  ${n === cur ? "*" : "·"} ${n}: ${s.label} — ${s.memories} memories` +
@@ -557,7 +564,7 @@ function apply(ctx, config) {
   const state = {
     current: cfg.store,
     bound: cfg.store !== "" && !cfg.allowSwitch,
-    map: { ok: false, store: cfg.store, served: "", text: "", etag: "", at: 0 },
+    map: emptyMap(cfg.store),
     // selector → the store the server resolves it to; a mode's target does not move.
     resolved: new Map(),
   };
