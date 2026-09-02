@@ -45,6 +45,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+try:                                   # documented launch: `python3 -m distill_kura.mcp`
+    from . import __version__ as BRIDGE_VERSION
+except ImportError:                    # copied out as a bare script: still runs
+    BRIDGE_VERSION = "unknown"
+
 KURA = os.environ.get("KURA_URL", "http://127.0.0.1:8085").rstrip("/")
 _RAW_STORE = os.environ.get("KURA_STORE")
 STORE = (_RAW_STORE or "").strip()                      # "" = free mode
@@ -375,7 +380,7 @@ def main() -> None:
         if method == "initialize":
             reply(mid, {"protocolVersion": params.get("protocolVersion") or PROTOCOL_VERSION,
                         "capabilities": {"tools": {"listChanged": False}},
-                        "serverInfo": {"name": "kura", "version": "0.1.0"},
+                        "serverInfo": {"name": "kura", "version": BRIDGE_VERSION},
                         "instructions": INSTRUCTIONS.format(label=LABEL)})
         elif method == "ping":
             reply(mid, {})

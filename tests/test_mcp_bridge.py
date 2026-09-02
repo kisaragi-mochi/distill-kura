@@ -307,6 +307,20 @@ def test_initialize_carries_instructions_that_fit_a_2kb_cap():
         srv.shutdown()
 
 
+def test_initialize_reports_the_running_build_not_a_frozen_0_1_0():
+    """The bridge used to hardcode serverInfo.version, so an MCP host's server list
+    said 0.1.0 while /health said the real version — the two mouths of one process
+    disagreeing about which build is answering."""
+    import distill_kura
+
+    srv, url = start()
+    try:
+        out = speak(url, [INIT])
+        assert out[0]["result"]["serverInfo"]["version"] == distill_kura.__version__
+    finally:
+        srv.shutdown()
+
+
 def test_kura_map_serves_the_whole_index():
     srv, url = start()
     try:
