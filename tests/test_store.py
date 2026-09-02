@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from distill_kura.store import Store   # noqa: E402
+from distill_kura.store import Store, is_memory_file   # noqa: E402
 
 
 def make(tmp_path, name="t") -> Store:
@@ -186,3 +186,116 @@ def test_gate_key_corruption_is_loud_never_regenerated(tmp_path):
     open(p, "wb").write(b"short")
     with pytest.raises(RuntimeError):
         s.gate_key()          # a new key would orphan every mark — refuse loudly
+
+
+def test_a_memory_is_indexed_even_when_the_comment_names_its_slug(tmp_path):
+    """The index header is an HTML comment holding an EXAMPLE link. Judging "already
+    indexed" against the RAW index let that example stand in for the memory's own entry
+    line: the file was written, nothing pointed at it, and recall could not see it —
+    invisible in the one place that is read every turn."""
+    s = make(tmp_path)
+    assert "(its-slug.md)" in s.index_text()      # the format hint, straight from init_files
+    r = s.remember("its-slug", "the real trigger", "body", title="Its Slug")
+    assert r["ok"] and r["indexed"] is True
+    assert "- [Its Slug](its-slug.md) — the real trigger" in s.index_text()
+    assert s.known_slugs() == ["its-slug"]
+    assert s.doctor()["not_in_index"] == []
+
+
+def test_a_rewrite_refreshes_the_entry_line_not_the_comments_example(tmp_path):
+    """The same confusion from the other side: a comment whose example is shaped exactly
+    like an entry line was edited in place of the memory's real line, leaving the index
+    still speaking the old fact and the hint quietly rewritten."""
+    s = make(tmp_path)
+    s.remember("its-slug", "old trigger", "old body", title="Its Slug")
+    example = "<!-- Each entry line is:\n- [Example](its-slug.md) — an example, not a memory.\n-->"
+    s._write_index(example + "\n" + s.index_text())
+    s.remember("its-slug", "new trigger", "new body", title="Its Slug")
+    idx = s.index_text()
+    assert example in idx                                    # the hint, byte for byte
+    assert "- [Its Slug](its-slug.md) — new trigger" in idx
+    assert "old trigger" not in idx
+    assert sum(1 for l in idx.splitlines()
+               if l.startswith("- [Its Slug]")) == 1        # refreshed, not duplicated
+    assert s.known_slugs() == ["its-slug"]
+
+
+def test_a_wal_intent_naming_a_store_kept_file_is_quarantined(tmp_path):
+    """The intent is data, not authority. `_write` will never produce `charter.md` or
+    `memory.md` as a target, so replay must not accept one: a corrupted or forged
+    transaction would otherwise overwrite the file every worker of the store reads
+    first, on nothing but its own say-so."""
+    import hashlib
+    import json
+    s = make(tmp_path)
+    charter = os.path.join(s.path, "charter.md")
+    with open(charter, "w", encoding="utf-8") as f:
+        f.write("the real charter\n")
+
+    def forge(txid, target):
+        txdir = os.path.join(s._wal_dir, txid)
+        os.makedirs(txdir)
+        payload = b"bytes nobody poured\n"
+        with open(os.path.join(txdir, "payload-0"), "wb") as f:
+            f.write(payload)
+        with open(os.path.join(txdir, "intent.json"), "w", encoding="utf-8") as f:
+            json.dump({"txid": txid, "slug": "x", "op": "write", "next_revision": 99,
+                       "files": [{"payload": "payload-0", "target": target,
+                                  "sha256": hashlib.sha256(payload).hexdigest()}]}, f)
+        return txdir
+
+    assert s._wal_intact(forge("00000000000000000001-1", "charter.md")) is None
+    assert s._wal_intact(forge("00000000000000000002-1", "memory.md")) is None
+    rep = s._wal_replay()
+    assert rep["replayed"] == []
+    assert rep["quarantined"] == ["00000000000000000001-1", "00000000000000000002-1"]
+    assert open(charter, encoding="utf-8").read() == "the real charter\n"
+    assert not os.path.exists(os.path.join(s.path, "memory.md"))
+    assert s.revision() != 99                       # the counter did not honour the promise
+    assert s.doctor()["broken_wal"] == rep["quarantined"]     # loud, not swept up
+    # One predicate, both doors: every name the writer refuses is a name replay refuses.
+    for slug in ("charter", "memory", "MEMORY", "profile"):
+        assert not s.remember(slug, "d", "b")["ok"], slug
+        assert not is_memory_file(f"{slug}.md".lower()), slug
+
+
+def test_titles_follow_an_index_rewritten_by_another_writer(tmp_path):
+    """`resolve()` accepts an index title, so the title map is part of name resolution.
+    Built once and dropped only by whichever writer remembered to drop it, it outlived a
+    tidy or a rename done anywhere else — this Store kept snapping answers onto a title
+    the index no longer carries, and could not find the one it does."""
+    s = make(tmp_path)
+    s.remember("ssd-tier-mission", "running a model off an SSD tier", "body",
+               title="Old Title")
+    assert s.resolve("Old Title") == "ssd-tier-mission"      # the map is now warm
+    other = Store(name="t", path=s.path, label="t")          # the distiller, another process
+    other._write_index(s.index_text().replace("Old Title", "New Title"))
+    assert s.resolve("New Title") == "ssd-tier-mission"
+    assert "old title" not in s.titles()
+    assert s.resolve("Old Title") is None
+
+
+def test_a_write_over_an_escaping_symlink_inherits_no_neighbours_frontmatter(tmp_path):
+    """A rewrite keeps the old file's metadata, and it used to read that metadata through
+    the FUZZY resolver. A symlink pointing out of the store is not a memory of the store,
+    so the name snapped to the nearest neighbour by word overlap and the new memory was
+    born wearing that neighbour's session id and tags — provenance invented from a name."""
+    s = make(tmp_path)
+    s.pour_verified("alpha-fact", "the neighbour", "neighbour body",
+                    meta={"session": "neighbour-session"}, tags=["decision"])
+    outside = tmp_path / "outside.md"
+    outside.write_text("---\nname: outside\n---\n\nnot ours\n", encoding="utf-8")
+    os.symlink(str(outside), s.file_of("alpha-fact-note"))
+    assert s.escaping() == ["alpha-fact-note"]               # excluded from every lookup
+    assert s.resolve("alpha-fact-note") == "alpha-fact"      # the snap that did the damage
+
+    r = s.pour_verified("alpha-fact-note", "its own trigger", "its own body")
+    assert r["ok"]
+    fm = s.frontmatter_exact("alpha-fact-note")
+    assert "session" not in fm and "curation_mark" not in fm
+    assert s.tags("alpha-fact-note") == ()
+    assert "its own body" in s.read_exact("alpha-fact-note")
+    assert "neighbour body" not in s.read_exact("alpha-fact-note")
+    # ...and the neighbour it used to borrow from is untouched.
+    assert s.frontmatter_exact("alpha-fact")["session"] == "neighbour-session"
+    assert s.tags("alpha-fact") == ("decision",)

@@ -42,7 +42,14 @@ function fakeKura() {
         res.end(JSON.stringify({ error: "no such memory" }));
       }
     } else if (req.url.startsWith("/memory/")) {
-      res.end(JSON.stringify({ text: "a whole memory" }));
+      const slug = decodeURIComponent(req.url.slice("/memory/".length).split("?")[0]);
+      if (slug === "nope") {
+        // EXACT reads: an unknown slug is a 404 by design, not a server fault.
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "no such memory" }));
+      } else {
+        res.end(JSON.stringify({ text: "a whole memory" }));
+      }
     } else if (req.url.startsWith("/prefill")) {
       const store = new URL(req.url, "http://x").searchParams.get("store") || "maker";
       res.end(JSON.stringify({
@@ -537,5 +544,125 @@ test("the map is re-fetched conditionally, and 304 keeps it", async () => {
     assert.equal(conditional, 1, "the refresh was not conditional");
     assert.equal(full, 1, "the map was transferred again despite being unchanged");
     assert.ok(sec.text({}).includes("the map"), "a 304 must keep the map, not blank it");
+  } finally { srv.close(); }
+});
+
+// ── a mode selector is a first-class selector ───────────────────────────────
+
+/**
+ * A kura server that knows a MODE: `talking` is not a store, it targets `eq`. Every
+ * answer names the STORE it resolved to, which is what the real server does.
+ */
+function modeKura() {
+  const seen = [];
+  const srv = createServer((req, res) => {
+    seen.push(req.url);
+    res.setHeader("content-type", "application/json");
+    if (req.url.startsWith("/stores")) {
+      res.end(JSON.stringify({
+        default: "maker",
+        stores: { maker: { label: "m", memories: 1 }, eq: { label: "e", memories: 2 } },
+        modes: { talking: "eq" },
+      }));
+    } else if (req.url.startsWith("/prefill")) {
+      const sel = new URL(req.url, "http://x").searchParams.get("store") || "maker";
+      const store = sel === "talking" ? "eq" : sel;
+      res.end(JSON.stringify({
+        text: `<<<KURA-MAP store=${store}>>>\ntrigger for ${store}\n<<<END KURA-MAP>>>\n`,
+        etag: `etag-${store}`, store,
+      }));
+    } else {
+      res.end(JSON.stringify({ memories: 3 }));
+    }
+  });
+  return new Promise((ok) => srv.listen(0, "127.0.0.1", () =>
+    ok({ srv, seen, url: `http://127.0.0.1:${srv.address().port}` })));
+}
+
+test("a preset bound to a MODE keeps its map", async () => {
+  // The break: the map's frame names the resolved STORE (eq), the plugin compared it
+  // against the selector it sent (talking), and every refresh threw the map away — so a
+  // mode-bound agent wore the MISSING note forever while its recall answered fine.
+  const { srv, url, seen } = await modeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url, store: "talking" });
+    const sec = ctx.sections.get("distill-kura:map");
+    await until(() => !sec.text({}).includes("MISSING"));
+    assert.match(sec.text({}), /trigger for eq/);
+    // The resolution is cached: a second fetch must not re-read /stores.
+    const stores = () => seen.filter((p) => p.startsWith("/stores")).length;
+    assert.equal(stores(), 1);
+    assert.match(await ctx.registered.get("kura_map").execute({}, {}), /trigger for eq/);
+    assert.equal(stores(), 1, "the mode resolution was looked up again");
+  } finally { srv.close(); }
+});
+
+test("switching to a mode name swaps the map, and says nothing failed", async () => {
+  const { srv, url } = await modeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url });
+    const sec = ctx.sections.get("distill-kura:map");
+    await until(() => sec.text({}).includes("trigger for maker"));
+    const out = await ctx.registered.get("kura_use").execute({ store: "talking" }, {});
+    assert.match(out, /Now recalling from 'talking'/);
+    assert.ok(!out.includes("could not be read"), out);
+    assert.match(sec.text({}), /trigger for eq/);
+    assert.ok(!sec.text({}).includes("MISSING"));
+  } finally { srv.close(); }
+});
+
+// ── what "degraded" means ──────────────────────────────────────────────────
+
+/** One recall against a server that reports the given `how`. */
+async function recallHow(how, extra = {}) {
+  const srv = createServer((_req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ store: "maker", how, picked: [], walked: [],
+                             elapsed_s: 0.0, context: "", ...extra }));
+  });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url: `http://127.0.0.1:${srv.address().port}`, prefill: false });
+    return await ctx.registered.get("kura_recall").execute({ question: "q" }, {});
+  } finally { srv.close(); }
+}
+
+test("a fastpath hit is a success, not a degradation", async () => {
+  // Tier zero IS the pick and the thinker is never asked. Flagging its 2 ms hit as
+  // degraded taught the agent to discount the ⚠ it must not learn to ignore.
+  const out = await recallHow("fastpath", { picked: ["a"], walked: ["a"], context: "text" });
+  assert.match(out, /\/ fastpath\]/);
+  assert.ok(!out.includes("⚠"), out);
+  const cue = await recallHow("fastpath-cue", { picked: ["a"], walked: ["a"], context: "t" });
+  assert.ok(!cue.includes("⚠"), cue);
+});
+
+test("an honest meaning→none is not a degradation", async () => {
+  // The thinker read the whole index and named nothing. That is an answer.
+  const out = await recallHow("meaning→none");
+  assert.match(out, /meaning→none/);
+  assert.ok(!out.includes("⚠"), out);
+  assert.match(out, /not remembered yet/);
+});
+
+test("only the word-overlap fallback is marked degraded", async () => {
+  const out = await recallHow("words(thinker unreachable)");
+  assert.match(out, /words\(thinker unreachable\)  ⚠ degraded/);
+  // A `how` the server did not send must not be printed as an empty tier.
+  assert.match(await recallHow(""), /\/ \?\]/);
+});
+
+test("kura_read says so for an unknown slug, instead of throwing", async () => {
+  const { srv, url } = await fakeKura();
+  try {
+    const ctx = fakeCtx();
+    apply(ctx, { url, store: "maker" });
+    const out = await ctx.registered.get("kura_read").execute({ slug: "nope" }, {});
+    assert.equal(out, "[kura: maker]\n(no memory called nope)");
+    assert.match(await ctx.registered.get("kura_read").execute({ slug: "held" }, {}),
+                 /a whole memory/);
   } finally { srv.close(); }
 });

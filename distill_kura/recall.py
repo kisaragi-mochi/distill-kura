@@ -36,11 +36,10 @@ PICK_SYS = (
 )
 
 
-def _clean(name: str) -> str:
-    """Tidy one pick. Models answer with `slug`, `slug.md`, `[slug]`, `path/slug.md` —
-    all the same intent, and the caller should not have to know which shape arrived."""
-    n = str(name).strip().strip("[]()`\"' ")
-    return n[:-3] if n.endswith(".md") else n
+# The words a question is scored by. Runs of one script only: a merged character
+# class glues `SSD推論` into one term that can then match nothing but that same
+# adjacency, and the memory it was reaching for is never scored at all.
+_TERMS = re.compile(r"[A-Za-z0-9]{2,}|[ァ-ヴー]{2,}|[一-龠]{2,}")
 
 
 def pick_by_meaning(store: Store, thinker: Endpoint, question: str, top: int) -> list[str] | None:
@@ -52,7 +51,10 @@ def pick_by_meaning(store: Store, thinker: Endpoint, question: str, top: int) ->
     if m:
         try:
             got = json.loads(m.group(0))
-            picked = [_clean(x) for x in got if isinstance(x, str)][:top]
+            # Models answer with `slug`, `slug.md`, `[slug]`, `path/slug.md` — all
+            # the same intent. `Store._clean` is where that shape-tidying lives; a
+            # second copy here drifted from it the moment either side was touched.
+            picked = [store._clean(x) for x in got if isinstance(x, str)][:top]
             if picked:
                 return picked
         except ValueError:
@@ -66,9 +68,15 @@ def pick_by_meaning(store: Store, thinker: Endpoint, question: str, top: int) ->
 
 
 def pick_by_words(store: Store, question: str, top: int) -> list[str]:
-    terms = re.findall(r"[A-Za-z0-9ァ-ヴー一-龠]{2,}", question)
+    """Last resort when the thinker is unreachable: rank index lines by word overlap.
+
+    Read through `_uncommented`, never the raw index. The header comment carries the
+    format hint, and its EXAMPLE link (`- [Title](its-slug.md)`) matched a question
+    about titles or triggers — so the degraded path handed back `its-slug`, a memory
+    that does not exist, and crowded a real one out of `top`."""
+    terms = _TERMS.findall(question)
     scored = []
-    for line in store.index_text().splitlines():
+    for line in store._uncommented(store.index_text()).splitlines():
         m = re.search(r"\(([^)]+)\.md\)", line)
         if not m:
             continue
@@ -87,7 +95,7 @@ def fit(text: str, question: str, budget: int) -> str:
         return text
     head_end = text.find("\n\n", text.find("---", 4) + 3)
     head = text[:max(0, head_end)][:600] if head_end > 0 else text[:600]
-    terms = [w for w in re.findall(r"[A-Za-z0-9]{2,}|[ァ-ヴー]{2,}|[一-龠]{2,}", question)]
+    terms = _TERMS.findall(question)
     rest = text[len(head):]
     paras = [x for x in rest.split("\n\n") if x.strip()]
     if any(len(x) > budget // 3 for x in paras):      # giant paragraph → split by line

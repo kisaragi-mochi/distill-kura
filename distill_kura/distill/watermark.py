@@ -68,11 +68,15 @@ class Watermarks:
                     k = src.key(path)
                     start = cur.get(k, 0)
                     # The reserve must be the window sip() will ACTUALLY consume with
-                    # the same budget — once it was 2.2× larger, the mark outran the
-                    # read, and every chunk's unread tail was skipped forever (two
-                    # thirds of a DSH journal, measured). Claiming less than sip reads
-                    # is recoverable (advance() moves the mark to the true stop);
-                    # claiming more is silent loss, the one unforgivable direction.
+                    # the same budget — twice now it has not been. In DSH it was 2.2×
+                    # larger; in the claude adapter it was budget*4 BYTES against a
+                    # read that stops on kept CHARACTERS (80 KB reserved, 30 KB read,
+                    # on an ASCII journal). Both times the mark outran the read and
+                    # every chunk's unread tail was skipped forever. Claiming less than
+                    # sip reads is recoverable (advance() moves the mark to the true
+                    # stop); claiming more is silent loss, the unforgivable direction.
+                    # So no adapter may compute this by a second rule: claim_bound()
+                    # takes the same walk sip() takes, and pays the second read.
                     end, approx = src.claim_bound(path, start, budget_chars)
                     if approx < min_chars or end <= start:
                         continue

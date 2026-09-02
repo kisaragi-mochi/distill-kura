@@ -82,12 +82,19 @@ DEFAULT_TRIGGER_TOKENS = 24
 # code that wrote it", so without a version the trimmer can be improved and nothing
 # happens. Observed exactly that: a fix for dropped ★ markers changed nothing until the
 # ledger was invalidated.
-LEDGER_VERSION = 7   # 7: triggers may not newly credit the human (6: the numeric floor)
+LEDGER_VERSION = 8   # 8: the mechanical trim faces the numeric floor too (7: attribution)
 
 # Markers that carry the point of a line. A trimmer that drops them keeps the words and
 # loses the meaning: ⚠️ says "this will bite you again", ★ says "this is the important
 # one". They cost one character and are the highest-value signal in the format.
 MARKERS = ("⚠", "★")
+# Where the mechanical trimmer may end its opening clause. The ASCII "." used to sit
+# in the same character class as 。 and ；, so it also matched the point inside a decimal:
+# "the bake took 796.5 seconds" was cut to "the bake took 796." and the trigger claimed
+# a measurement — 796, and then 5 from the leftovers — that the memory never contained.
+# A period ends a clause only when it is not holding a number together, so it counts
+# only with a non-digit before it and whitespace or the end of the line after.
+CLAUSE_END = re.compile(r"(?<=[。;；])\s*|(?<=\.)(?<!\d\.)(?:\s+|$)|\s+—\s+|\s+/\s+")
 DEFAULT_FRESH_DAYS = 14.0
 DEFAULT_PINNED_TYPES = ("feedback", "user")
 BACKUPS_KEPT = 20
@@ -284,9 +291,14 @@ class Loom:
         # The unit must not be followed by another letter. Without that guard
         # "3.7 seed" is read as "3.7 s" and rewritten as "3.7s" — the trimmer inventing
         # a measurement that was never taken, which is the one thing it must never do.
+        # The guard was there and inert: written `{unit}?`, the `?` bound to the trailing
+        # lookahead — so the unit was compulsory and its guard optional, exactly inverted,
+        # and "3.7 seed" did come back as "3.7s" and "796.5 seconds" as "796.5s". The
+        # unit stays compulsory (a bare digit out of "FP16" is noise, not a measurement);
+        # what it needed was for its own guard to bind to it.
         unit = r"(?:t/s|tok/s|GB|GiB|MB|KiB|TB|%|倍|秒|枚|層|件|ms|s|B)(?![A-Za-z])"
-        for m in re.finditer(rf"\d+(?:\.\d+)?\s*{unit}?"
-                             rf"(?:\s*(?:→|->)\s*\d+(?:\.\d+)?\s*{unit}?)?", norm):
+        for m in re.finditer(rf"\d+(?:\.\d+)?\s*{unit}"
+                             rf"(?:\s*(?:→|->)\s*\d+(?:\.\d+)?\s*{unit})?", norm):
             frag = re.sub(r"\s+", "", m.group(0))
             if len(frag) > 1:
                 out.append(frag)
@@ -313,6 +325,27 @@ class Loom:
     # damage, and a damaged line makes the reader distrust the whole map.
     _BREAKS = "。、．，・/｜|)）」』〕 \t"
 
+    # A number is one token even though it contains punctuation. A cut that lands
+    # inside it leaves half a number — "796.5" becomes "796." — and the trimmer has
+    # reported a measurement nobody took. The span mirrors the numeric floor's own token
+    # shape (`gate._SCI_OR_NUM`) on purpose: the floor reads "107.7/8" as ONE claim, so a
+    # trim that keeps only "107.7" is an invention by the floor's reckoning and would be
+    # thrown away downstream. The trailing digit is required, so a sentence-ending
+    # "796." keeps its period.
+    _NUMBER = re.compile(r"\d+(?:\.\d+)?[eE][+-]?\d+|\d[\d,.:/-]*\d|\d")
+
+    @classmethod
+    def _off_number(cls, text: str, cut: int) -> int:
+        """Move `cut` off the middle of a number: back to where the number starts, or —
+        when that would leave nothing at all — forward past its end. Over budget is a
+        cost; half a number is a lie."""
+        for m in cls._NUMBER.finditer(text):
+            if m.start() >= cut:
+                break
+            if cut < m.end():
+                return m.end() if not text[:m.start()].strip() else m.start()
+        return cut
+
     @classmethod
     def _soft_cut(cls, text: str, limit: int) -> str:
         """Cut to `limit`, backing up to the nearest break in the last fifth of it."""
@@ -321,7 +354,8 @@ class Loom:
         hard = text[:limit]
         floor = int(limit * 0.8)
         best = max((hard.rfind(ch) for ch in cls._BREAKS), default=-1)
-        return (hard[:best + 1] if best >= floor else hard).rstrip(cls._BREAKS + "-—")
+        cut = cls._off_number(text, best + 1 if best >= floor else limit)
+        return text[:cut].rstrip(cls._BREAKS + "-—")
 
     @classmethod
     def _balance(cls, text: str) -> str:
@@ -341,16 +375,18 @@ class Loom:
                 cut = min(cut, first_unclosed)
         return text[:cut].rstrip(" 、,/-—・(（[「『〔")
 
-    def _mechanical(self, desc: str) -> str:
+    def _mechanical(self, desc: str, title: str = "") -> str:
         """Trim without a model: keep the opening clause, then append salient fragments
         while the budget lasts. Never returns empty — a blank line drops the memory off
         the map entirely, which is far worse than a mediocre trigger."""
+        from .distill.gate import composed_number_violations
+        raw = re.sub(r"\s+", " ", desc).strip()
         clean = re.sub(r"\s+", " ", desc.replace("**", "")).strip()
         if estimate(clean) <= self.trigger_tokens:
             return clean
         limit = self._char_budget(clean)
         # Cut at the first clause boundary that still leaves something substantial.
-        head = re.split(r"(?<=[。.;；])\s*|(?:\s+—\s+)|(?:\s+/\s+)|(?:。)", clean)[0].strip()
+        head = CLAUSE_END.split(clean)[0].strip()
         if len(head) > limit or len(head) < min(12, limit):
             head = self._soft_cut(clean, limit)
         keep, used = [head], len(head)
@@ -359,7 +395,19 @@ class Loom:
                 continue
             keep.append(frag)
             used += len(frag) + 1
-        return self._balance(self._soft_cut(" ".join(keep), limit))
+        # A model-written trigger has to clear the numeric floor in `_acceptable` before
+        # it is worn; this fallback never went through that door, so a number the trim
+        # composed by accident landed on the resident map unchecked and pay-forward
+        # baked it into KV. Same floor, same source. A trim that cannot clear it is not
+        # patched up but abandoned for a wider one, and the last rung is the line itself:
+        # over budget, and made of nothing that was not already in the memory.
+        source = [{"text": f"{title} {desc}"}]
+        for cand in (self._balance(self._soft_cut(" ".join(keep), limit)),
+                     self._balance(head), clean, raw):
+            cand = cand.strip()
+            if cand and not composed_number_violations(cand, source):
+                return cand
+        return raw
 
     # ── quality bar ──────────────────────────────────────────────────────
     # Character 2-grams at 0.70, chosen by measurement rather than taste. On seven real
@@ -458,7 +506,7 @@ class Loom:
                         desc, self._balance(self._soft_cut(cand, self._char_budget(desc))))
                 if self._acceptable(cand, title, desc):
                     return cand, True
-        return self._keep_markers(desc, self._mechanical(desc)), False
+        return self._keep_markers(desc, self._mechanical(desc, title)), False
 
     # ── weaving ──────────────────────────────────────────────────────────
     def weave(self, generate: bool = True) -> Cloth:
@@ -523,7 +571,7 @@ class Loom:
             if not generate:
                 out.append(f"{bullet}[{title}]({slug}.md) — "
                            + (entry["hook"] if entry and entry.get("hook")
-                              else self._mechanical(desc)))
+                              else self._mechanical(desc, title)))
                 continue
             trigger, from_model = self._make_trigger(title, desc)
             stats["hooks_written"] += 1

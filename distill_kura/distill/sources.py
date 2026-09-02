@@ -97,7 +97,19 @@ class ClaudeCodeSource(Source):
                     return " ".join(x.get("text", "") for x in c if isinstance(x, dict))
         return ""
 
-    def sip(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int]:
+    def _walk(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int, int]:
+        """The one line-walk: sip() and claim_bound() both come through here.
+
+        A reserve computed by a second, cheaper rule drifts from the read. This bound
+        used to assume 4 bytes per character and reserve `budget * 4` bytes, while the
+        read stops when the KEPT characters reach the budget: on a 4000-line ASCII
+        journal it reserved 80 KB against a true stop of 30 KB, and the 50 KB between
+        was marked drunk without ever being read — 62% of every stretch, silently,
+        forever. English and code journals are the common case, so it was happening in
+        production. Same rules, same tally, same stopping condition, by construction.
+
+        Returns (segments, stop offset, kept chars).
+        """
         segs: list[Segment] = []
         total = 0
         with open(path, "rb") as h:
@@ -146,14 +158,30 @@ class ClaudeCodeSource(Source):
                     segs.append(Segment(cls, txt[:MAX_SEG]))
                     total += min(len(txt), MAX_SEG)
                 if total >= limit_chars:
-                    return segs, h.tell()
-            return segs, h.tell()
+                    return segs, h.tell(), total
+            return segs, h.tell(), total
+
+    def sip(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int]:
+        segs, end, _ = self._walk(path, start, limit_chars)
+        return segs, end
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
         size = os.path.getsize(path)
-        # sip() reads limit_chars*4 BYTES (a char is up to 4 in UTF-8); the reserve
-        # covers exactly that window so the mark never sits past unread bytes.
-        end = min(start + budget_chars * 4, size)
+        # A kept character never costs less than one byte of the line it came from
+        # (UTF-8 never shrinks, and the JSON scaffolding around the text is pure
+        # surplus), so a stretch shorter than the budget can never fill it: the walk
+        # would run to EOF. That makes this shortcut exact rather than estimated —
+        # which matters because catch_up() asks for the whole file with a budget of
+        # 2**40 and must not JSON-parse a year of journals to be told where it ends.
+        if size - start <= budget_chars:
+            return size, max(0, size - start)
+        # Otherwise walk the lines a second time: reserving costs a re-read of a few
+        # tens of KB, guessing costs journal. `approx` is the raw stretch, not the
+        # kept chars — it only feeds the "worth waking the model" filter, and erring
+        # HIGH there at worst spends a pass that finds nothing and moves on, while
+        # erring low would park the mark forever on a journal of nothing but
+        # sidechain and system-reminder lines.
+        _, end, _ = self._walk(path, start, budget_chars)
         return end, max(0, end - start)
 
 
@@ -232,7 +260,15 @@ class DshSource(Source):
             return Segment("TOOL", txt) if txt else None
         return None
 
-    def sip(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int]:
+    def _walk(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int, int]:
+        """The one event-walk, breaking only after a segment is counted — so the
+        reserved end is exactly where the read with this budget stops. Written twice,
+        these two loops drifted: breaking on unclassified events too let the marks run
+        ahead of the reads, and every chunk's unread tail was skipped forever (two
+        thirds of a DSH journal, measured). One walk cannot disagree with itself.
+
+        Returns (segments, sequence watermark, kept chars).
+        """
         segs: list[Segment] = []
         total, last = 0, start
         for d in self._lines(path):
@@ -248,25 +284,17 @@ class DshSource(Source):
             total += len(s.text)
             if total >= limit_chars:
                 break
+        return segs, last, total
+
+    def sip(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int]:
+        segs, last, _ = self._walk(path, start, limit_chars)
         return segs, last
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
-        # The SAME walk sip() takes, breaking only after a segment is counted — so
-        # the reserved end is exactly where sip() with this budget stops. Breaking on
-        # unclassified events too let the marks run ahead of the reads, and every
-        # chunk's unread tail was skipped forever (two thirds of a DSH journal).
-        total, end = 0, start
-        for d in self._lines(path):
-            seq = d.get("seq")
-            if seq is None or seq <= start:
-                continue
-            s = self._classify(d)
-            end = max(end, seq)
-            if not s:
-                continue
-            total += min(len(s.text), MAX_TOOL if s.cls == "TOOL" else MAX_SEG)
-            if total >= budget_chars:
-                break
+        # Exact in both numbers: the same walk, so the reserve lands on the same event
+        # the read stops at. The archive is decompressed twice (once to reserve, once
+        # to drink) — a few hundred ms against a stretch of journal lost in silence.
+        _, end, total = self._walk(path, start, budget_chars)
         return end, total
 
 
@@ -289,19 +317,51 @@ class TextSource(Source):
             out += glob.glob(os.path.join(root, "**", ext), recursive=True)
         return sorted(out, key=os.path.getmtime, reverse=True)
 
+    @staticmethod
+    def _stop(path: str, start: int, limit_chars: int) -> int:
+        """Where a sip of this budget ends — the one rule, so the reserve and the read
+        can never be computed differently. (Computing them separately is what marked
+        62% of a claude stretch drunk without reading it.)
+
+        A fixed byte window — 4 per char, the UTF-8 worst case — pulled BACK off a
+        half-written character: cutting mid-character lost that character twice over,
+        `errors="ignore"` dropping its head here and its tail on the next sip, with
+        nothing in the log to say a character had gone.
+        """
+        size = os.path.getsize(path)
+        end = min(start + limit_chars * 4, size)
+        if end >= size or end <= start:
+            return max(start, min(end, size))
+        n = min(4, end - start)             # a UTF-8 character is at most 4 bytes
+        with open(path, "rb") as h:
+            h.seek(end - n)
+            tail = h.read(n)
+        i = len(tail) - 1
+        while i >= 0 and (tail[i] & 0xC0) == 0x80:      # 10xxxxxx: a continuation byte
+            i -= 1
+        if i < 0:
+            return end                     # no lead byte in reach; leave the bytes be
+        b = tail[i]
+        need = 1 if b < 0x80 else 2 if b < 0xE0 else 3 if b < 0xF0 else 4
+        have = len(tail) - i
+        return end if have >= need else max(start + 1, end - have)
+
     def sip(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int]:
+        stop = self._stop(path, start, limit_chars)
         with open(path, "rb") as h:
             h.seek(start)
-            raw = h.read(limit_chars * 4).decode("utf-8", errors="ignore")
-            pos = h.tell()
+            raw = h.read(max(0, stop - start)).decode("utf-8", errors="ignore")
         segs = [Segment("USER", p.strip()[:MAX_SEG]) for p in raw.split("\n\n") if p.strip()]
-        return segs, pos
+        return segs, stop
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
-        size = os.path.getsize(path)
-        # sip() reads limit_chars*4 BYTES (a char is up to 4 in UTF-8); the reserve
-        # covers exactly that window so the mark never sits past unread bytes.
-        end = min(start + budget_chars * 4, size)
+        # Exact by construction: the same rule the read obeys. If the file GREW between
+        # the two, the reserve is the older, shorter stop — short is the recoverable
+        # direction (advance() carries the mark to wherever the read truly ended);
+        # long is the one that loses journal.
+        end = self._stop(path, start, budget_chars)
+        # `approx` is raw bytes, not kept chars: see ClaudeCodeSource.claim_bound for
+        # why this filter errs high.
         return end, max(0, end - start)
 
 

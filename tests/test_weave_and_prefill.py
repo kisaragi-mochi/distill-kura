@@ -20,7 +20,26 @@ import pytest   # noqa: E402
 from distill_kura.prefill import build, etag_of, loom_for, unreachable   # noqa: E402
 from distill_kura.store import Store                                     # noqa: E402
 from distill_kura.tokens import estimate                                 # noqa: E402
+from distill_kura.distill.gate import composed_number_violations        # noqa: E402
 from distill_kura.weave import Loom, WeaveError, _links_per_line         # noqa: E402
+
+
+# Real index lines from the household this store was built for: Japanese, English, and
+# both mixed with identifiers. Every one carries numbers, which is the point — a trigger
+# is worn on every turn, so a number the trimmer composed by accident is a lie the agent
+# reads all day and pay-forward bakes into KV.
+REAL_LINES = [
+    ("常駐して噛む脳", "★背景で日誌消化+前景0.15秒応答。記憶の新陳代謝はこの形。GPU普段0%=消化はタダ"),
+    ("蔵サービス", ":8085 記憶への唯一の入り口。索引常駐＋意味の再認＋リンク歩行0.4秒。雲/ローカル/足軽/声が共有"),
+    ("蔵の救命艇", "⚠️写しが8日止まり197本が世界に無かった。lifeboat.shで別盤・別筐体+復元ドリル済。地雷=sortロケール"),
+    ("Qwen3.6-35B-A3B NVFP4", "vLLM0.22無改造163t/s。27B pi-tune=grafted-MTPをignoreに/ThinkingCap=思考46%減"),
+    ("FreeToken/SAZANAMI", "★KV永続化 116秒→23ms(greedy一致)。床+限界費用で読む。投機がコードで勝った(18.907→23.139/k=4)"),
+    ("Huihui-Qwen3.8", "TP=8で単流107.7/8並列547.5 t/s・⚠️APC明示必須・FP16素体の口 :8019 TP=8 xhigh(門3/3)"),
+    ("GLM-5.2-for-3090検証", "⚠️実測1375KiB/expertでREADME 320KiB主張と矛盾・厳格PASS 4/75層(worst 0.866)→3090では不成立"),
+    ("表流しの実証", "★冷キャッシュ+MemoryMax=90Gで実証: 表領域0.1-3.5%常駐で code 51.43 t/s維持。所要=ファイル72.9GiB+anon≈83GB"),
+    ("bake and restore", "the bake took 796.5 seconds and the restore 0.655 seconds afterwards, measured cold"),
+    ("CPU推論はDIMMファン待ち", "the run finished at 43.7 t/s after the fans went in, which was the whole point of the week"),
+]
 
 
 def a_store(tmp_path, n_old: int = 6) -> Store:
@@ -118,7 +137,8 @@ def test_the_postcondition_actually_fires(tmp_path, monkeypatch):
     """The guard has to be able to fail, or it is decoration."""
     s = a_store(tmp_path, n_old=2)
     loom = Loom(s, scribe=None)
-    monkeypatch.setattr(loom, "_mechanical", lambda desc: "](ghost.md) invented")
+    monkeypatch.setattr(loom, "_mechanical",
+                        lambda desc, title="": "](ghost.md) invented")
     with pytest.raises(WeaveError):
         loom.weave()
 
@@ -162,6 +182,96 @@ def test_trimming_never_invents_a_unit(tmp_path):
     loom = Loom(a_store(tmp_path, n_old=1), scribe=None, trigger_tokens=6)
     out = loom._mechanical("persona JSON plus IDENTITY and a 3.7 seed and more words here")
     assert "3.7s" not in out
+
+
+def test_a_decimal_is_never_split_into_two_numbers(tmp_path):
+    """The observed bug: the clause splitter treated the ASCII "." as a full stop, so
+    "the bake took 796.5 seconds" was cut to "the bake took 796." and the trigger
+    reported 796 and 5 — two measurements that appear nowhere in the memory. Unlike a
+    model's candidate this path never faced the numeric floor, so the invented number
+    went onto the resident map and was worn on every turn."""
+    desc = "the bake took 796.5 seconds and the restore 0.655 seconds afterwards"
+    for tokens in (6, 8, 10, 12, 16, 24):
+        out = Loom(a_store(tmp_path, n_old=1), scribe=None,
+                   trigger_tokens=tokens)._mechanical(desc, "bake and restore")
+        assert "796." not in out or "796.5" in out, (tokens, out)
+        assert not composed_number_violations(
+            out, [{"text": f"bake and restore {desc}"}]), (tokens, out)
+
+
+def test_a_decimal_is_never_split_in_japanese(tmp_path):
+    """Same cut, a line with no spaces to fall back on. 。 and ； are real boundaries
+    and stay; the period inside 796.5 is not one."""
+    desc = "★焼成は796.5秒、復元は0.655秒だった。以後この形で運用する。⚠️冷キャッシュだと12,500GiB読み直し"
+    for tokens in (6, 8, 10, 12, 16, 24):
+        out = Loom(a_store(tmp_path, n_old=1), scribe=None,
+                   trigger_tokens=tokens)._mechanical(desc, "焼成と復元")
+        assert not composed_number_violations(
+            out, [{"text": f"焼成と復元 {desc}"}]), (tokens, out)
+
+
+def test_a_number_at_the_edge_of_the_budget_is_not_halved():
+    """The budget lands where it lands. Every character position is a possible cut, and
+    a cut inside a number invents one whichever mechanism made it — so the cut moves off
+    the number rather than the number being trimmed to fit. "107.7/8" counts as one
+    number here because the floor reads it as one claim."""
+    for text in ("the restore finished in 0.655 seconds after the bake wrote 12,500 GB to disk",
+                 "TP=8で単流107.7/8並列547.5 t/s・⚠️APC明示必須・FP16素体の口 :8019 xhigh",
+                 "measured 2026-08-22 at 1.23e-4 error over 4/75 layers, worst 0.866"):
+        for limit in range(6, len(text) + 3):
+            out = Loom._soft_cut(text, limit)
+            assert out.strip(), (limit, text)
+            assert not composed_number_violations(out, [{"text": text}]), (limit, out)
+
+
+def test_the_mechanical_trim_faces_the_numeric_floor_too(tmp_path):
+    """A model-written trigger has to clear the numeric floor in `_acceptable`; the
+    mechanical fallback did not, and it is the path that runs whenever the GPU is down —
+    so the unchecked line is the one worn on the worst day. Same floor, same source,
+    across every budget the loom is used at."""
+    s = a_store(tmp_path, n_old=1)
+    for tokens in (6, 8, 10, 12, 16, 24, 40):
+        loom = Loom(s, scribe=None, trigger_tokens=tokens)
+        for title, desc in REAL_LINES:
+            out = loom._keep_markers(desc, loom._mechanical(desc, title))
+            assert not composed_number_violations(
+                out, [{"text": f"{title} {desc}"}]), (tokens, title, out)
+
+
+def test_the_numeric_floor_on_the_trim_can_actually_fire(tmp_path, monkeypatch):
+    """The guard has to be able to fail, or it is decoration. With a fragment that no
+    honest cut could produce, the trim must reach for a wider one — never patch the
+    number out, never come back blank."""
+    desc = ("the ledger held steady all week. later the sheet showed the same figure "
+            "again and then a long tail of words that blows any sensible budget")
+    loom = Loom(a_store(tmp_path, n_old=1), scribe=None, trigger_tokens=16)
+    monkeypatch.setattr(Loom, "_salient", staticmethod(lambda text: ["923ms"]))
+    out = loom._mechanical(desc, "ledger")
+    assert "923" not in out
+    assert out.strip() and out in f"{desc}"
+
+
+def test_the_trim_is_never_blank(tmp_path):
+    """A blank trigger drops the memory off the map entirely, which is far worse than a
+    mediocre one — so no rung of the fallback may end in silence."""
+    s = a_store(tmp_path, n_old=1)
+    for tokens in (1, 2, 4, 6, 24):
+        loom = Loom(s, scribe=None, trigger_tokens=tokens)
+        for title, desc in REAL_LINES + [("digits", "123456789012345678901234567890"),
+                                         ("one", "0.6551234567890123456789012345")]:
+            assert loom._mechanical(desc, title).strip(), (tokens, title)
+
+
+def test_a_woven_line_never_carries_a_number_the_index_did_not(tmp_path):
+    """End to end, with no model reachable: what lands in the cloth is what gets worn."""
+    s = a_store(tmp_path, n_old=1)
+    for i, (title, desc) in enumerate(REAL_LINES):
+        s.remember(f"real-{i}", desc, "body")
+        os.utime(s.file_of(f"real-{i}"), (time.time() - 400 * 86400,) * 2)
+    cloth = Loom(s, scribe=None, trigger_tokens=12).weave().text
+    source = s.index_text()
+    for line in cloth.splitlines():
+        assert not composed_number_violations(line, [{"text": source}]), line
 
 
 def test_trimming_does_not_cut_mid_word_when_a_break_is_near(tmp_path):

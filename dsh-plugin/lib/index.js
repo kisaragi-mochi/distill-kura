@@ -155,6 +155,29 @@ const q = (store) => (store ? `?store=${encodeURIComponent(store)}` : "");
 const head = (store, extra) => `[kura: ${store || "default"}${extra ? " " + extra : ""}]`;
 
 /**
+ * Is `served` the store that the selector `sel` actually names?
+ *
+ * `?store=` accepts a store OR a mode name, and the server answers with the STORE it
+ * resolved to. Comparing that name against the selector we sent made every mode look
+ * like a server answering for the wrong kura: a preset bound to `talking` (a mode for
+ * the `eq` kura) threw its own map away on every refresh and wore the MISSING note
+ * forever, while recall — which sends the same selector — answered perfectly.
+ *
+ * Deliberately NOT "believe whatever the answer says". The check this feeds is the one
+ * that catches a server ignoring the selector entirely, and it must keep failing
+ * closed, so the resolution is read from /stores — the same table kura_use validates
+ * against — and only a mode that really does target `served` is accepted. It is cached
+ * because a mode's target does not move while the server is up.
+ */
+async function resolves(cfg, state, sel, served, signal) {
+  if (state.resolved.get(sel) === served) return true;
+  const d = await call(cfg, "GET", "/stores", undefined, signal);
+  if (((d.modes || {})[sel]) !== served) return false;
+  state.resolved.set(sel, served);
+  return true;
+}
+
+/**
  * The resident map, kept warm out of band.
  *
  * The prompt provider is synchronous and runs on every step, so it must never wait on
@@ -216,12 +239,18 @@ function mapCache(cfg, state) {
           state.map.at = Date.now();
           return true;
         }
-        // The server names the store it answered for. If that is not the one asked for,
-        // the map is not ours to show.
+        // The server names the STORE it answered for, and the selector may have been a
+        // MODE — a different name is then the resolution, not a betrayal. Only a name
+        // that /stores does not confirm means the map is not ours to show.
         if (d.store !== undefined && target && d.store !== target) {
-          state.map = { ok: false, store: target, text: "", etag: "", at: 0,
-                        error: `asked for ${target}, served ${d.store}` };
-          return false;
+          const legit = await resolves(cfg, state, target, d.store);
+          // Another await, another chance to have been superseded.
+          if (gen !== this.gen) return false;
+          if (!legit) {
+            state.map = { ok: false, store: target, served: "", text: "", etag: "", at: 0,
+                          error: `asked for ${target}, served ${d.store}` };
+            return false;
+          }
         }
         // Only swap when the content actually differs: replacing the string with an
         // identical one is free, but replacing it with a *re-ordered* one is not, and
@@ -356,9 +385,17 @@ function tools(cfg, state) {
         const to = target(args.store);
         const d = await call(cfg, "POST", "/recall" + q(to),
           { question: args.question, hops: args.hops ?? 1 }, exec?.signal);
-        const how = d.how === "meaning" ? "meaning" : `${d.how}  ⚠ degraded`;
+        // "Degraded" has one meaning, and it is not "anything but the usual tier": the
+        // thinker was unreachable and the pick fell back to word overlap (`how` =
+        // "words(...)"). Marking every other answer degraded cried wolf over the two
+        // that are working exactly as designed — tier zero's deterministic 2 ms hit
+        // (`fastpath`), and `meaning→none`, the thinker reading the whole index and
+        // honestly naming nothing. An agent that learns to discount the ⚠ stops
+        // noticing the one time the quality really did drop.
+        const how = String(d.how || "?");
+        const shown = how.startsWith("words") ? `${how}  ⚠ degraded` : how;
         return (
-          `${head(d.store || to, `${d.elapsed_s}s / ${how}`)}\n` +
+          `${head(d.store || to, `${d.elapsed_s}s / ${shown}`)}\n` +
           `picked: ${JSON.stringify(d.picked)}\nwalked: ${JSON.stringify(d.walked)}\n\n` +
           (d.context || "(nothing recalled — not remembered yet)")
         );
@@ -426,9 +463,10 @@ function tools(cfg, state) {
       async execute(args, exec) {
         const to = target(args.store);
         const d = await call(cfg, "GET", "/prefill" + q(to), undefined, exec?.signal);
-        // Same served-store check as refresh(): the server names the store it answered
-        // for, and a map describing a different kura is not ours to show.
-        if (d.store !== undefined && to && d.store !== to) {
+        // Same served-store check as refresh(), mode resolution included: a failed
+        // /stores lookup counts as "not confirmed", so this door also fails closed.
+        if (d.store !== undefined && to && d.store !== to &&
+            !(await resolves(cfg, state, to, d.store, exec?.signal).catch(() => false))) {
           return `${head(to)}\n` +
             `(the server answered for a different kura (${d.store}); the map for ${to} could not be read)`;
         }
@@ -456,6 +494,9 @@ function tools(cfg, state) {
           return `No kura called '${args.store}'. Known: ${JSON.stringify([...known])}`;
         }
         state.current = args.store;
+        // The listing already says which store a mode targets, so record it here and
+        // the refresh below does not have to ask for the same table again.
+        if ((d.modes || {})[args.store]) state.resolved.set(args.store, d.modes[args.store]);
         // Swap the resident map too, and say so honestly when it could not be fetched:
         // recalling from one kura while wearing another's index is the worst of both.
         const got = state.cache ? await state.cache.refresh() : true;
@@ -517,6 +558,8 @@ function apply(ctx, config) {
     current: cfg.store,
     bound: cfg.store !== "" && !cfg.allowSwitch,
     map: { ok: false, store: cfg.store, served: "", text: "", etag: "", at: 0 },
+    // selector → the store the server resolves it to; a mode's target does not move.
+    resolved: new Map(),
   };
   const cache = mapCache(cfg, state);
   state.cache = cache;

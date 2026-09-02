@@ -13,7 +13,8 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from distill_kura.distill.watermark import Watermarks   # noqa: E402
-from distill_kura.recall import fit, recall             # noqa: E402
+from distill_kura import fastpath                       # noqa: E402
+from distill_kura.recall import fit, pick_by_words, recall   # noqa: E402
 from distill_kura.registry import Registry              # noqa: E402
 from distill_kura.store import Store                    # noqa: E402
 
@@ -353,6 +354,58 @@ def test_fit_keeps_the_head_and_the_relevant_paragraph(tmp_path):
     assert "42 tokens per second" in out
 
 
+
+def test_the_degraded_word_path_never_recalls_the_comment_s_example(tmp_path):
+    """The index header comment carries the format hint, and the hint contains an
+    EXAMPLE link — `- [Title](its-slug.md)`. Word overlap read the RAW index, so a
+    question about titles and triggers "recalled" `its-slug`: a memory that does not
+    exist, ranked first, pushing a real one out of `top`. Nothing downstream caught it
+    (the walk silently drops an unresolvable slug), so the caller was told a phantom
+    was remembered."""
+    s = a_store(tmp_path)
+    assert "its-slug.md" in s.index_text()          # the bait is still in the header
+    q = "what is the recognition trigger for a title"
+
+    picked = pick_by_words(s, q, 3)
+    assert "its-slug" not in picked
+    assert set(picked) <= s.slug_set()              # every pick is a real memory
+
+    d = recall(s, StubThinker(None), q, hops=0, fastpath_cfg={"enabled": False})
+    assert d["how"].startswith("words")             # still the degraded path
+    assert set(d["picked"]) <= s.slug_set()
+
+    # …and the comment is all that was skipped: real index lines still score.
+    assert pick_by_words(s, "tell me about cooling", 3) == ["cooling"]
+
+
+def test_the_fastpath_cache_sees_a_body_only_edit(tmp_path):
+    """The recognizer's cache was stamped with (index mtime, memory count), and a body
+    rewrite can move neither. Real indexes group a family on one line
+    (`- topic — [A](a.md)/[B](b.md)`), which no rewrite matches, so the index is left
+    byte-identical: the recognizer kept scoring the OLD body and `doctor` reported
+    itself fresh while doing it. The store's revision counter moves on every committed
+    mutation, so it is in the stamp."""
+    s = a_store(tmp_path)
+    open(s.index_path, "w", encoding="utf-8").write(
+        "# s — index\n- the CPU run — [cooling](cooling.md) / [ssd](ssd-tier-mission.md)\n")
+    fastpath.lookup(s, "a question that names nothing")     # builds the cache
+    assert "zep" not in fastpath.index_for(s).heads["body"]
+    before = os.stat(s.index_path).st_mtime_ns
+    rev = s.revision()
+
+    r = s.remember("cooling", "the fans had to go in before the CPU run",
+                   "zeppelin marmalade")
+    # The premise, asserted rather than assumed: the two old stamp numbers did not move.
+    assert r["indexed"] is False
+    assert os.stat(s.index_path).st_mtime_ns == before
+    assert len(s.slug_set()) == 2
+    assert s.revision() > rev                                # only this one saw it
+
+    assert s.doctor()["fastpath"]["fresh"] is False          # the next recall rebuilds
+    fastpath.lookup(s, "a question that names nothing")
+    assert "zep" in fastpath.index_for(s).heads["body"]      # the new body is scorable
+
+
 # ── watermarks ──────────────────────────────────────────────────────────────
 
 def test_watermark_never_moves_backwards(tmp_path):
@@ -385,7 +438,13 @@ def test_claim_reserves_before_reading(tmp_path):
     """Claiming a stretch must move the mark immediately, so a second runner starting
     in the same instant gets different water."""
     j = tmp_path / "j.jsonl"
-    j.write_text("x" * 500_000, encoding="utf-8")
+    # A real journal, line by line. The fixture used to be 500 KB with no newline in
+    # it at all, and it fell into two stretches only because the reserve was a byte
+    # ESTIMATE that cut the file wherever the arithmetic landed. The reserve is now
+    # exactly where the read stops, and one unbroken line is one stretch — a journal
+    # has to have line boundaries to have more.
+    j.write_text(('{"type":"user","message":{"content":[{"type":"text","text":"'
+                  + "x" * 400 + '"}]}}\n') * 1200, encoding="utf-8")
     w = Watermarks(str(tmp_path / "_still" / "watermark.json"))
     first = w.claim([str(j)], budget_chars=100_000, min_chars=1000)
     second = w.claim([str(j)], budget_chars=100_000, min_chars=1000)

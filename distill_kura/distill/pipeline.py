@@ -57,6 +57,35 @@ _HEAD_KEYS = ("EXTENDS", "TITLE", "DESC", "TAGS", "BELONGS_BECAUSE", "KEEP", "MA
 _HEAD_LINE = re.compile(r"^(" + "|".join(_HEAD_KEYS) + r"):[ \t]*(.*)$")
 
 
+def _safe_slug(raw: str) -> str:
+    """A draft's file name, from the scribe's SLUG line.
+
+    The sanitiser keeps ASCII only, so a store written in Japanese hands back slugs
+    that reduce to nothing (or to a bare "1" out of "メモ-1") — and every such memory
+    was then the same file, each new one overwriting the last. A digest of the
+    original text gives the nameless one a name of its own: same slug, same name on
+    every run, and two different slugs cannot land on one file."""
+    s = re.sub(r"[^a-z0-9-]+", "-", raw.strip().lower()).strip("-")[:48].strip("-")
+    if len(s) >= 3:
+        return s
+    h = hashlib.sha256(raw.strip().encode("utf-8")).hexdigest()[:10]
+    return f"{s}-{h}" if s else f"memory-{h}"
+
+
+def _free_path(directory: str, base: str, suffix: str = ".md") -> str:
+    """`<base>.md` in `directory`, or `<base>.2.md`, `<base>.3.md`… if that exists.
+
+    Writing straight to a name that is already taken destroys the earlier file with
+    no trace — the loser of a name collision is simply gone. Numbering keeps both
+    where a person can still read them."""
+    p = os.path.join(directory, base + suffix)
+    n = 1
+    while os.path.exists(p):
+        n += 1
+        p = os.path.join(directory, f"{base}.{n}{suffix}")
+    return p
+
+
 def _split_draft(body: str) -> tuple[dict[str, str], str]:
     """(header lines as a dict, the rest). Only the block at the TOP counts: a memory
     whose body happens to contain a line starting `KEEP:` keeps it. The block ends at
@@ -386,7 +415,7 @@ class Distiller:
                      "(do not compute new ones); never credit the human without their "
                      "own quoted words.\n")
         _, plain = _split_draft(body.group(1))
-        return {"slug": re.sub(r"[^a-z0-9-]+", "-", slug.group(1).strip().lower()).strip("-")[:48],
+        return {"slug": _safe_slug(slug.group(1)),
                 "title": (title.group(1).strip()[:40] if title else ""),
                 "description": desc.group(1).strip()[:200],
                 "body": plain,
@@ -394,7 +423,6 @@ class Distiller:
                 "evidence": c["evidence"], "classes": c["classes"],
                 "unverified_numbers": c.get("unverified_numbers", False),
                 "judgement": c.get("judgement", False),
-                "attributed_to_human": attributes_to_human(text, c["classes"]),
                 # routing cues ride to the manifest untouched; they never enter the
                 # body or the index — a callsign is a way BACK, not content
                 "routing_cues": c.get("routing_cues") or [],
@@ -475,7 +503,6 @@ class Distiller:
                 "evidence": c["evidence"], "classes": c["classes"],
                 "unverified_numbers": c.get("unverified_numbers", False),
                 "judgement": c.get("judgement", False),
-                "attributed_to_human": attributes_to_human(text, c["classes"]),
                 "routing_cues": c.get("routing_cues") or [],
                 "routing_cues_refused": c.get("routing_cues_refused") or {},
                 **self._curate(c, out or "")}
@@ -561,18 +588,25 @@ class Distiller:
             return ""
 
     def stage(self, d: dict, source: str) -> str:
-        p = os.path.join(self.drafts_dir, f"{d['slug']}.md")
+        # Two candidates can compose to one slug (two Japanese titles reach the same
+        # fallback name, or two English ones sanitise alike), and staging straight to
+        # `<slug>.md` overwrote the draft already standing there — gate-passed work
+        # gone with nothing logged. The second draft takes a numbered name instead.
+        p = _free_path(self.drafts_dir, d["slug"])
+        staged = os.path.basename(p)[:-3]
         ev = "\n".join(f"  [{e['class']}] {e['text'][:300]}" for e in d["evidence"])
         flags = ""
         if d.get("unverified_numbers"):
             flags += "   ⚠️unbacked number"
-        if d.get("attributed_to_human"):
-            flags += "   🚫credits the human with no [USER] quote"
         if d.get("judgement"):
             flags += "   🧠the agent's judgement (not an outside fact)"
         if d.get("extends"):
             flags += f"   ↑extends {d['extends']}"
-        manifest = self._write_manifest(d, source, getattr(self, "_current_key", ""))
+        # An EXTENDS draft is named after the memory it appends to, so a numbered file
+        # name says nothing about the destination: provenance still routes to the
+        # memory the pour will extend, not to the file the draft happens to sit in.
+        manifest = self._write_manifest({**d, "slug": d.get("extends") or staged},
+                                        source, getattr(self, "_current_key", ""))
         cur = ""
         if d.get("tags"):
             cur += f"TAGS: {json.dumps(list(d['tags']), ensure_ascii=False)}\n"
@@ -588,9 +622,13 @@ class Distiller:
             f.write(f"<!-- distilled {datetime.now(timezone.utc).isoformat()[:19]}Z\n"
                     f"     source: {os.path.basename(source)}\n"
                     f"     kind: {d['kind']}   evidence classes: {','.join(d['classes'])}{flags}\n"
-                    f"     gate: {self._mark(d['slug'], d['kind'], manifest, body)}\n"
+                    f"     gate: {self._mark(staged, d['kind'], manifest, body)}\n"
                     f"     evidence_manifest: sha256:{manifest}\n"
                     f"     evidence:\n{ev}\n-->\n" + body)
+        # The mark signs the NAME, so the caller must hear the name that exists: a
+        # draft reported under the slug it wanted would be looked up, and poured,
+        # under a file that is not this one.
+        d["slug"] = staged
         return p
 
     # ── ⑦ pour ───────────────────────────────────────────────────────────
@@ -651,6 +689,11 @@ class Distiller:
         if not os.path.exists(p):
             return {"ok": False, "why": "no such draft"}
         raw = open(p, encoding="utf-8").read()
+        # The distiller no longer writes this flag: the final-surface floor refuses a
+        # composed text that credits the human before a draft can ever be staged. It
+        # stays here for the drafts the floor never saw — one written by hand into the
+        # directory, or one carried over from an older distiller — because the answer
+        # to "should this be a memory?" must not depend on which version staged it.
         if "🚫" in raw.split("-->")[0]:
             return {"ok": False, "why": "credits the human with no [USER] evidence; not poured"}
         if not self._draft_mark_valid(slug, raw):
@@ -724,9 +767,6 @@ class Distiller:
         body = re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S).strip()
         slug = os.path.basename(path)[:-3]
         judged_sha = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        if "🚫" in head:
-            return {"slug": slug, "verdict": "TOSS", "judged_sha": judged_sha,
-                    "why": "credits the human with no [USER] evidence (gate refused)"}
         # ask() collapses every infrastructure failure to None (unreachable, timeout,
         # HTTP error). Judging on "" would read "the model was down" as "the scribe
         # did not keep the shape" — a TOSS that DELETES a gate-passed draft. No
@@ -785,11 +825,7 @@ class Distiller:
             # person can still look.
             qdir = os.path.join(self.still, "quarantine")
             os.makedirs(qdir, exist_ok=True)
-            qp = os.path.join(qdir, s0 + ".md")
-            n = 1
-            while os.path.exists(qp):
-                n += 1
-                qp = os.path.join(qdir, f"{s0}.{n}.md")
+            qp = _free_path(qdir, s0)
             os.replace(pth, qp)
             with open(os.path.join(self.still, "tossed.jsonl"), "a", encoding="utf-8") as f:
                 f.write(json.dumps({"slug": s0, "verdict": "QUARANTINE",

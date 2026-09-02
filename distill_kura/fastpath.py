@@ -19,9 +19,9 @@ questions, zero wrong answers, silent on every paraphrase — at ~0.5 ms.
 
 The index is built lazily from the store's own reading APIs (index line title
 and hook, frontmatter description, the first 500 chars of body, `[[link]]`
-names) and cached in-process, keyed on the canonical index's mtime and the
-memory count — so a poured memory is recognisable on the next recall without
-anyone restarting anything.
+names) and cached in-process, keyed on the store's revision counter as well as
+the canonical index's mtime and the memory count — so a poured memory is
+recognisable on the next recall without anyone restarting anything.
 """
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def _grams(s: str, n: int) -> set[str]:
 
 @dataclass
 class _Index:
-    stamp: tuple[int, int]              # (index mtime_ns, memory count) it was built at
+    stamp: tuple[int, int, int]         # (index mtime_ns, memory count, revision) built at
     built_at: float
     build_ms: float
     n: int
@@ -87,14 +87,21 @@ class _Index:
     stops: dict[str, frozenset[str]]
 
 
-def _stamp(store: Store) -> tuple[int, int]:
-    """What the cache is keyed on. Either number moves when a memory is poured,
-    rewritten or removed; neither moves on a mere read."""
+def _stamp(store: Store) -> tuple[int, int, int]:
+    """What the cache is keyed on. Every number moves when a memory is poured,
+    rewritten or removed; none of them moves on a mere read.
+
+    The revision is here because the first two are blind to a change that touches
+    only a memory FILE. A body rewrite of a memory whose index line is a grouped
+    family line (`- topic — [A](a.md)/[B](b.md)`) leaves the index byte-identical
+    and the count the same, so the recognizer kept serving the old body and
+    `doctor` called itself fresh while saying it. The store counts every committed
+    mutation; asking it is the only stamp that cannot miss one."""
     try:
         m = os.stat(store.index_path).st_mtime_ns
     except OSError:
         m = 0
-    return (m, len(store.slug_set()))
+    return (m, len(store.slug_set()), store.revision())
 
 
 def _index_lines(store: Store) -> tuple[dict[str, str], dict[str, str]]:

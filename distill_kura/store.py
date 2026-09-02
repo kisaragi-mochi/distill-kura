@@ -37,6 +37,20 @@ INDEX = "MEMORY.md"
 # `doctor` as unindexed and would have been walked by recall.
 RESERVED = {INDEX, "charter.md", "README.md", "persona.json", "profile.md"}
 
+# What a memory's file may be called, asked in ONE place. `_write` refused reserved
+# slugs and the WAL judged its targets by a second, looser pattern of its own, so a
+# name `_write` could never have produced — `MEMORY.md`, `charter.md` — was a legal
+# WAL target: replay would have overwritten a store-kept file on the strength of an
+# intent nobody could have written honestly. Both doors ask this now, so the two
+# answers cannot drift apart again.
+_MEMORY_FILE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.md$")
+
+
+def is_memory_file(name: str) -> bool:
+    """True when `name` is a file name a memory of a store may carry."""
+    return (isinstance(name, str) and bool(_MEMORY_FILE.match(name))
+            and name not in RESERVED and name[:-3].upper() != "MEMORY")
+
 
 class InvalidSlug(ValueError):
     """A name that does not designate a memory in this store."""
@@ -176,7 +190,7 @@ class Store:
             self.charter = os.path.join(self.path, "charter.md")
         elif self.charter:
             self.charter = os.path.realpath(os.path.expanduser(self.charter))
-        self._titles: dict[str, str] | None = None
+        self._titles: tuple[tuple[int, int, int], dict[str, str]] | None = None
         self._slugs_cache: tuple[tuple[int, int], frozenset[str]] | None = None
 
     @property
@@ -259,6 +273,20 @@ class Store:
         (`- topic — [A](a.md)/[B](b.md)`), and a prefix rule drops them all."""
         return re.sub(r"<!--.*?-->", "", text, flags=re.S)
 
+    @staticmethod
+    def _commented_lines(text: str) -> set[int]:
+        """Indices of the lines an HTML comment touches.
+
+        For the writer, which cannot work on `_uncommented()` text: it rebuilds the
+        index line by line and must keep the comments byte for byte. A line the
+        comment touches is left alone rather than edited or matched, so the format
+        hint's example link cannot be mistaken for a memory's entry."""
+        hidden: set[int] = set()
+        for m in re.finditer(r"<!--.*?-->", text, flags=re.S):
+            hidden.update(range(text.count("\n", 0, m.start()),
+                                text.count("\n", 0, m.end()) + 1))
+        return hidden
+
     def slug_set(self) -> frozenset[str]:
         """The names this store will answer to — nothing else, ever.
 
@@ -292,15 +320,28 @@ class Store:
 
     def titles(self) -> dict[str, str]:
         """index display title (lowercased) → slug. Models sometimes answer with the
-        title rather than the slug; we accept both."""
-        if self._titles is None:
-            self._titles = {}
+        title rather than the slug; we accept both.
+
+        Stamped against the index file the way `slug_set()` is stamped against the
+        directory. The map used to be built once and dropped only by whichever writer
+        remembered to drop it, so an index rewritten by anyone else — a tidy in the
+        distiller's process, a hand edit — left `resolve()` snapping answers onto
+        titles the index no longer carries. Rebuilding is a regex over one small file;
+        the inode is in the stamp because every index replace lands a new one."""
+        try:
+            st = os.stat(self.index_path)
+            stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            stamp = (0, 0, 0)
+        if self._titles is None or self._titles[0] != stamp:
+            built: dict[str, str] = {}
             # Every link on the line, not just the first: one line often carries a
             # small family of related memories.
             for t, slug in re.findall(r"\[([^\]]+)\]\(([^)]+)\.md\)",
                                       self._uncommented(self.index_text())):
-                self._titles.setdefault(t.strip().lower(), slug.strip())
-        return self._titles
+                built.setdefault(t.strip().lower(), slug.strip())
+            self._titles = (stamp, built)
+        return self._titles[1]
 
     @staticmethod
     def _clean(name: str) -> str:
@@ -365,12 +406,27 @@ class Store:
         return self._open(s) if s else ""
 
     def frontmatter(self, slug: str) -> dict:
-        """The leading `---` block, flattened. `type` is lifted out of `metadata:` when
-        it is nested there, because that is where the writer puts it and every caller
-        wants it at the top level. Not a YAML parser — a memory's frontmatter is four
-        or five plain `key: value` lines by construction, and pulling in a parser for
-        that would add a dependency to a project that has none."""
-        text = self.read(slug)
+        """The leading `---` block, flattened. Read through the fuzzy resolver, like
+        `read()`."""
+        return self._frontmatter_of(self.read(slug))
+
+    def frontmatter_exact(self, slug: str) -> dict:
+        """The frontmatter of exactly the file named, with no fuzzy snapping.
+
+        For the writer, which carries an existing memory's metadata into a rewrite. Read
+        fuzzily, a name that is NOT a memory of this store — an escaping symlink, which
+        `slug_set()` excludes and `_open()` refuses — landed on the nearest neighbour by
+        word overlap, and the new memory was born wearing that neighbour's session id,
+        tags and curation."""
+        return self._frontmatter_of(self._open(slug))
+
+    @staticmethod
+    def _frontmatter_of(text: str) -> dict:
+        """`type` is lifted out of `metadata:` when it is nested there, because that is
+        where the writer puts it and every caller wants it at the top level. Not a YAML
+        parser — a memory's frontmatter is four or five plain `key: value` lines by
+        construction, and pulling in a parser for that would add a dependency to a
+        project that has none."""
         if not text.startswith("---"):
             return {}
         end = text.find("\n---", 3)
@@ -400,7 +456,11 @@ class Store:
         and that is an ordinary answer, not an error. A `tags:` line that cannot be read
         is ALSO an empty answer here — and a line in `doctor()`, so the rot is visible
         rather than quietly treated as 'untagged'."""
-        raw = self.frontmatter(slug).get("tags")
+        return self._tags_of(self.frontmatter(slug))
+
+    @staticmethod
+    def _tags_of(fm: dict) -> tuple[str, ...]:
+        raw = fm.get("tags")
         if not raw:
             return ()
         try:
@@ -421,7 +481,10 @@ class Store:
 
     def annotations(self, slug: str) -> dict[str, str]:
         """`belongs_because` / `keep` / `may_fade` — only the ones present."""
-        fm = self.frontmatter(slug)
+        return self._annotations_of(self.frontmatter(slug))
+
+    @staticmethod
+    def _annotations_of(fm: dict) -> dict[str, str]:
         return {k: fm[k] for k in ANNOTATION_KEYS if fm.get(k)}
 
     def mtime(self, slug: str) -> float:
@@ -706,8 +769,10 @@ class Store:
         self._bump_revision()
         self._replace_file(self.index_path, text.encode("utf-8"))
         self._fsync_dir(self.path)
-        # A rewritten index re-titles memories; the title map must not outlive it
-        # or resolve() answers with names the index no longer carries.
+        # A rewritten index re-titles memories; the title map must not outlive it or
+        # resolve() answers with names the index no longer carries. Dropped here for
+        # this object; what actually guarantees it is the stamp in `titles()`, since
+        # the writer is often some other process entirely.
         self._titles = None
         self._slugs_cache = None
 
@@ -796,8 +861,6 @@ class Store:
     # `_still/wal-quarantine/` and named by `doctor()` as `broken_wal`. Never
     # rolled back, never guessed at.
 
-    _WAL_TARGET = re.compile(r"^[a-z0-9][a-z0-9-]*\.md$")
-
     @property
     def _wal_dir(self) -> str:
         return os.path.join(self.still, "wal")
@@ -872,7 +935,9 @@ class Store:
             target, payload, sha = e.get("target"), e.get("payload"), e.get("sha256")
             if not (isinstance(target, str) and isinstance(payload, str) and isinstance(sha, str)):
                 return None
-            if target != INDEX and (not self._WAL_TARGET.match(target) or target in RESERVED):
+            # The index or a memory, judged by the same predicate `_write` refuses
+            # slugs with: anything else is a name no honest commit could have written.
+            if target != INDEX and not is_memory_file(target):
                 return None
             if not contained(self.path, os.path.join(self.path, target)):
                 return None
@@ -931,7 +996,7 @@ class Store:
         slug = re.sub(r"[^a-z0-9-]+", "-", slug.lower()).strip("-")
         if not slug:
             return {"ok": False, "error": "slug required"}
-        if f"{slug}.md" in RESERVED or slug.upper() == "MEMORY":
+        if not is_memory_file(f"{slug}.md"):
             return {"ok": False, "error": f"'{slug}' is a reserved file name in a store"}
         # Tags are validated BEFORE anything is touched. A bad tag refused after the body
         # was written would leave a memory without the tags its writer believes it has.
@@ -964,13 +1029,16 @@ class Store:
             kept_tags: tuple[str, ...] = ()
             kept_ann: dict[str, str] = {}
             if existed:
-                kept = {k: v for k, v in self.frontmatter(slug).items()
+                # Exactly this file, never the fuzzy resolver: what is inherited here is
+                # decided by the name on disk, not by the nearest neighbour.
+                fm = self.frontmatter_exact(slug)
+                kept = {k: v for k, v in fm.items()
                         if k not in ("name", "description", "type", "tags", "curation_mark")
                         and k not in ANNOTATION_KEYS}
                 # Tags and annotations survive a body rewrite the same way: a caller
                 # that does not mention them has not asked to remove them.
-                kept_tags = self.tags(slug)
-                kept_ann = self.annotations(slug)
+                kept_tags = self._tags_of(fm)
+                kept_ann = self._annotations_of(fm)
             merged = {**kept, **(meta or {})}
             # The first evidence manifest is the memory's origin. Later pours (an
             # EXTENDS) bring their own manifest and must not erase where the memory
@@ -994,11 +1062,19 @@ class Store:
                 return {"ok": False, "error": "a memory needs a description "
                                               "(the index trigger line)"}
             cur = self.index_text()
+            # The index is judged with its HTML comments stripped, everywhere. The raw
+            # text carries the format hint, and the hint carries an EXAMPLE link: a
+            # store whose comment happens to name this slug looked "already indexed",
+            # so the real entry line was never written and the memory was invisible to
+            # recall — present on disk, unreachable by name.
+            entries = self._uncommented(cur)
+            commented = self._commented_lines(cur)
             new_index: str | None = None
             if existed and d1:
                 out, hit = [], False
-                for l in cur.splitlines():
-                    m = re.match(rf"- \[([^\]]+)\]\({re.escape(slug)}\.md\) — (.+)", l)
+                for i, l in enumerate(cur.splitlines()):
+                    m = (None if i in commented else
+                         re.match(rf"- \[([^\]]+)\]\({re.escape(slug)}\.md\) — (.+)", l))
                     if m and not hit:
                         out.append(f"- [{t1 if 0 < len(t1) <= 40 else m.group(1)}]"
                                    f"({slug}.md) — {d1}")
@@ -1009,7 +1085,7 @@ class Store:
                     new_index = "\n".join(out) + "\n"
                     result = {"ok": True, "slug": slug, "created": False, "indexed": "updated"}
             if new_index is None:
-                if f"({slug}.md)" not in cur:
+                if f"({slug}.md)" not in entries:
                     # Title must be a name one can say aloud — never a truncated description.
                     t1 = t1 if 0 < len(t1) <= 40 else (d1 if len(d1) <= 34 else slug)
                     sep = "" if (not cur or cur.endswith("\n")) else "\n"
