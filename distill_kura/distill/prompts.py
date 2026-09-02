@@ -51,6 +51,13 @@ Trigger (one line)
 
 Do not say the same thing twice in title and trigger. The title names it; the
 trigger points at what is inside.
+
+Retired things wear it. When a memory's plan, method or ruling has been retired,
+withdrawn or superseded — and only when that transition is VERIFIED (the human's
+own words passed the gate; never a guess from prose) — the OLD memory's own trigger
+says so, first: "退役: …／現在は [[new-way]]" or "superseded: … now [[new-way]]".
+The old memory is never hidden and never dressed as current. That is a fact about
+the world's state, not an importance score and not forgetting.
 """
 
 SPOT_SYS = """You read a raw journal between a human and an AI agent, and pick out what

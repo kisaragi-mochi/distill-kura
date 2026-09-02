@@ -297,3 +297,14 @@ def test_the_manifests_gate_version_and_the_signed_format_string_agree():
     src = open(pipeline.__file__, encoding="utf-8").read()
     # No second literal may creep back in: the string is built, never typed.
     assert '"gate-format-v6' not in src and "'gate-format-v6" not in src
+
+
+def test_the_index_craft_tells_writers_that_retired_things_wear_it():
+    """A retired memory must not be dressed as current (Rina, 2026-09-02): the rule
+    every writer reads names the retirement face and ties it to a VERIFIED
+    transition, never to prose alone."""
+    from distill_kura.distill.prompts import INDEX_CRAFT, SCRIBE_SYS, TIDY_SYS
+    assert "Retired things wear it" in INDEX_CRAFT and "VERIFIED" in INDEX_CRAFT
+    assert "never hidden" in INDEX_CRAFT
+    for sysmsg in (SCRIBE_SYS, TIDY_SYS):
+        assert "Retired things wear it" in sysmsg
