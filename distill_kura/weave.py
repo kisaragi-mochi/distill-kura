@@ -168,7 +168,7 @@ class WeaveError(RuntimeError):
     """The cloth failed its postcondition. Never returned to a caller — raised."""
 
 
-def _links_per_line(text: str, verbatim_after: str | None = None) -> list[str]:
+def _links_per_line(text: str) -> list[str]:
     """Every `](slug.md)` link, in order. Scoped to a single line on purpose: a regex
     allowed to span newlines silently joins a truncated line to the next one's link."""
     out: list[str] = []
@@ -663,7 +663,8 @@ class Loom:
         # description; it may never lose, reorder or invent a link. A memory missing
         # from the map does not exist as far as the agent is concerned, and the loss
         # would be invisible — the cloth would look perfectly healthy.
-        before, after = _links_per_line(raw, self.verbatim_after), _links_per_line(text, self.verbatim_after)
+        before = _links_per_line(raw)
+        after = _links_per_line(text)
         if before != after:
             lost, gained = sorted(set(before) - set(after)), sorted(set(after) - set(before))
             raise WeaveError(

@@ -571,10 +571,16 @@ class Store:
                                               f"one of {list(ANNOTATION_KEYS)}"}
         return None
 
-    def _direct_refused(self) -> dict | None:
+    def _frozen_refused(self) -> dict | None:
+        """The one refusal every write door gives first, spelled once."""
         if self.write_policy == FROZEN:
-            # Do not point the caller at a door that is also shut.
             return {"ok": False, "error": f"store '{self.name}' is frozen: nothing may write"}
+        return None
+
+    def _direct_refused(self) -> dict | None:
+        # Frozen first: do not point the caller at a door that is also shut.
+        if (r := self._frozen_refused()):
+            return r
         if self.write_policy != DIRECT_ALLOWED:
             return {"ok": False, "error": f"store '{self.name}' is {self.write_policy}: "
                                           f"direct writes are refused; memories enter "
@@ -601,8 +607,8 @@ class Store:
         A separate method rather than a `verified=True` argument on purpose: the
         capability then shows up in the shape of the code, and no caller can acquire it
         by flipping a flag it happens to have in scope."""
-        if self.write_policy == FROZEN:
-            return {"ok": False, "error": f"store '{self.name}' is frozen: nothing may write"}
+        if (r := self._frozen_refused()):
+            return r
         return self._write(slug, description, body, type_, hook, title, meta,
                            tags=tags, annotations=annotations, signed=True)
 
@@ -694,8 +700,8 @@ class Store:
 
     def annotate_verified(self, slug: str, tags=None, annotations: dict | None = None,
                           meta: dict | None = None) -> dict:
-        if self.write_policy == FROZEN:
-            return {"ok": False, "error": f"store '{self.name}' is frozen: nothing may write"}
+        if (r := self._frozen_refused()):
+            return r
         return self._annotate(slug, tags, annotations, meta, signed=True)
 
     def _annotate(self, slug: str, tags, annotations: dict | None, meta: dict | None,

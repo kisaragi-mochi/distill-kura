@@ -739,8 +739,7 @@ def test_the_postcondition_holds_when_the_scribe_invents_a_link(tmp_path):
     loom = Loom(s, scribe=HookScribe({"old-2": "says 12.5 GB somewhere [[g]]"}))
     raw = s.index_text()
     cloth = loom.weave()                        # raises WeaveError if the map lies
-    assert _links_per_line(raw, loom.verbatim_after) == \
-        _links_per_line(cloth.text, loom.verbatim_after)
+    assert _links_per_line(raw) == _links_per_line(cloth.text)
     assert "[[g]]" not in cloth.text
 
 
