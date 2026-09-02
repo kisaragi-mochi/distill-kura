@@ -183,6 +183,15 @@ and recovery 22→17 with the trail appended, back to 22 with the sentence remov
 with the same words folded into the marker. The note now rides inside `TRAIL_BEGIN`;
 the block is index lines and markers only. Trail state version 3 (a trail on disk rebuilds).
 
+*Full A/B measured (M8, 2026-09-02):* seven resident shapes (canonical, woven, adaptive,
+each with and without the trail, constellation) in front of the same 42 private cases,
+two readers, two runs each. The three maps that can name memories sit within ±2
+recoveries of each other for the format-compliant reader; the second reader's rows are
+dominated by reasoning cut at the output cap and do not rank them. The constellation
+alone recovers only the unknowns — as designed, it is the exit for stores over the
+ceiling, not a map. Defaults are unchanged; the one change the run bought is the trail
+header above.
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the
