@@ -80,9 +80,13 @@ push the model to disguise it as a fact. Ideas go to a seed file, never the stor
 Observed in the wild: factual reports relabelled `kind: idea` to skip verification
 ("the user approved X", no quotes). Anything of that grammatical shape is now dropped.
 
-**The last check before writing.** Prompt instructions get broken, so the composed text
-is scanned mechanically: if it credits the human with a decision and no `USER` quote
-survived, the draft is flagged and can never be poured.
+**The last check before writing.** Prompt instructions get broken, so everything a
+model wrote that would be stored or indexed — slug, title, trigger, body, section
+heading, curation sentences — is scanned mechanically before anything is staged: every
+numeric token must equal a numeric token the evidence itself contains, and crediting
+the human with a decision needs a surviving `USER` quote. The scribe gets one retry
+with the violations named; if the text still fails, the draft is dropped and never
+staged. A judge's FIX stands on the same floor: one that cannot pass is not re-signed.
 
 ---
 

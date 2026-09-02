@@ -5,7 +5,7 @@ really exists in the raw material of the class it claims. A fabricated quote can
 pass a substring check, no matter how confident the model is. Everything downstream
 (the writer, the pourer) is a model again; this is the deterministic floor under them.
 
-Four things happen here:
+`gate()` — the candidate gate — does four things:
 
 1. **Quote verification.** No surviving quote → the candidate is dropped.
 2. **Echo suppression.** A quote that already exists verbatim in the store is not new
@@ -17,6 +17,13 @@ Four things happen here:
 4. **The idea escape hatch, closed against smuggling.** Ideas need no quotes (a new
    thought is by definition not in the material) — but "the human approved X" is a
    factual report wearing an idea's coat, and is dropped.
+
+The rest of the module is the same floor applied further downstream, and each part
+carries its own banner: the final-surface floor (`composed_number_violations`,
+`final_surface_violations`, `attributes_to_human`) re-checks every model-written
+surface token by token, for numbers and for crediting the human; `verify_tags` and
+`verify_callsigns` decide which tags and which routing words the evidence can carry;
+`salvage` recovers whole objects from a truncated JSON answer.
 """
 from __future__ import annotations
 
