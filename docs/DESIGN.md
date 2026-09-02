@@ -385,13 +385,32 @@ naming the evidence manifest. That is the whole change.
 
 `Store.retire(old, new, manifest_hex)` is the only door to it, and it is narrow because
 what it rewrites is the map's most-read line: the manifest must verify against its own
-hash and carry at least one **USER-class** quote naming the old memory — its slug or its
-exact index title. A TOOL/SELF/ACT-only manifest is refused, and the derived edge map
-(M7, §7) never calls it: a reading of the store may not rewrite what it read. The
-distiller calls it at the end of a pour, when the gate refused a `superseded` tag (a
-reader saw the transition and was not allowed to act on it) and the surviving [USER]
-evidence names a memory the store holds; `kura retire OLD NEW --manifest HEX` is the
-same door for a person. Idempotent, refused on a frozen store, and counted by `doctor`
+hash, carry at least one **USER-class** quote naming the old memory — its slug or its
+exact index title — and that same manifest must PROVE the transition.
+
+**Proposed ≠ proven.** A model proposing a `superseded` tag is not evidence, and the
+gate's correct refusal of that proposal is not evidence either; reading the refusal as a
+signal is how a wrong successor got written into canonical. `distill/transition.py`
+`find_transition(evidence, old, new)` is the whole relation, pure and model-free: ONE
+[USER] quote must (i) name the old memory (exact slug or exact index title), (ii) carry
+an explicit replacement/retirement construction (`やめて…で行く`, `に代えて`, `代わりに`,
+`今後は`, `に変更`, `に置き換え`, `→`, `から…へ`; `instead of`, `replace … with`,
+`switch to`, `now use`, `superseded by`, `→`) and (iii) name the NEW memory in that same
+quote — exact slug, exact title, or ≥2 whole words of its title/topic after NFKC. A
+transition is never stitched across two quotes, and a topic-shift clause (`ところで…`,
+`by the way …`) is cut off before (ii) and (iii) are looked for. Only the human's
+explicit old → new sentence writes `現在は [[new]]`. A quote that only retires
+(`やめる`, `stop`) proves `retired-only`: retirement without a successor, which no
+caller acts on — a successor-less face is not implemented, so the distiller stays
+silent. Many false negatives at first are acceptable; a wrong successor in canonical is
+not.
+
+A TOOL/SELF/ACT-only manifest is refused, and the derived edge map (M7, §7) never calls
+it: a reading of the store may not rewrite what it read. The distiller calls it at the
+end of a pour when — and only when — `find_transition` proves the transition over that
+pour's manifest, with the old memory resolved by exact slug or title; the door runs the
+same relation again on the same manifest, because it must not trust its caller.
+`kura retire OLD NEW --manifest HEX` is the same door for a person. Idempotent, refused on a frozen store, and counted by `doctor`
 (`retired`, `retired_names`) and `kura metrics richness`. The weave compresses inside
 the face and never the face itself.
 
