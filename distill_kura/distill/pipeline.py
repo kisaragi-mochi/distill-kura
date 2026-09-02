@@ -360,12 +360,17 @@ class Distiller:
             _log(f"      🌾 a seed came true: {open_seeds[i]['text'][:60]}")
 
     # ── ⑤ compose ────────────────────────────────────────────────────────
-    def compose(self, c: dict) -> dict | None:
+    def compose(self, c: dict, near: dict | None = None) -> dict | None:
+        """`near` is the recall the caller already paid for. run() asks the thinker
+        once per candidate, for novelty; composing asked again with the same question
+        and got the same answer — two model calls for one fact. A caller that has it
+        hands it over; one that does not (a test, the CLI) still gets its own."""
         if c.get("extends"):
             return self._compose_extension(c)
         ev = "\n".join(f"[{e['class']}] {e['text']}" for e in c["evidence"])
-        near = kura_recall(self.store, self.models.thinker, c.get("why") or c.get("topic", ""),
-                           hops=0, top=3, chars=1200)
+        if near is None:
+            near = kura_recall(self.store, self.models.thinker,
+                               c.get("why") or c.get("topic", ""), hops=0, top=3, chars=1200)
         hints = "\n".join(f"- {n}" for n in (near.get("walked") or [])[:6])
         warn = ""
         if c.get("unverified_numbers"):
@@ -1178,13 +1183,13 @@ class Distiller:
                 if verdict == "EXTENDS":
                     c = {**c, "extends": target, "extends_why": why}
                 self.sprout(c)
-                to_write.append(c)
+                to_write.append((c, near))
 
             drafted, draft_chars, draft_text = [], 0, []
             if to_write:
                 t1 = time.time()
                 with ThreadPoolExecutor(max_workers=self.slots) as pool:
-                    for d in pool.map(self.compose, to_write):
+                    for d in pool.map(lambda cn: self.compose(*cn), to_write):
                         if not d:
                             _log("      the scribe did not keep the shape")
                             continue
