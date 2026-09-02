@@ -100,6 +100,23 @@ def _store_arg(args: dict) -> str:
     return (args.get("store") or _session_store or "").strip()
 
 
+def _int_arg(args: dict, key: str, default: int) -> int:
+    """An optional integer argument, or a readable refusal.
+
+    `int(args.get("hops", 1))` raised TypeError on `hops: null` and on a list, and
+    TypeError is not caught as a refusal — so a malformed argument came back as
+    "[cannot reach the kura]" and sent the model hunting for a dead server it had
+    never contacted. A null optional means "not given", as `store: null` already does.
+    """
+    v = args.get(key)
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be an integer, got {v!r}") from None
+
+
 def _q(store: str) -> str:
     return f"?store={urllib.parse.quote(store)}" if store else ""
 
@@ -291,7 +308,7 @@ def call_tool(name: str, args: dict) -> str:
     if name == "kura_recall":
         t0 = time.time()
         d = http("POST", "/recall" + _q(store),
-                 {"question": args.get("question", ""), "hops": int(args.get("hops", 1))})
+                 {"question": args.get("question", ""), "hops": _int_arg(args, "hops", 1)})
         head = (f"{_header(d.get('store') or store)} "
                 f"[{d.get('elapsed_s', round(time.time() - t0, 1))}s / {d.get('how', '?')}] "
                 f"picked: {d.get('picked', '?')}\nwalked: {d.get('walked', [])}\n\n")

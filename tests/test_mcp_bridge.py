@@ -307,6 +307,25 @@ def test_initialize_carries_instructions_that_fit_a_2kb_cap():
         srv.shutdown()
 
 
+def test_a_malformed_hops_is_a_refusal_not_a_fake_outage():
+    """`hops: null` and `hops: [1]` raised TypeError before any HTTP call was made,
+    and TypeError is not caught as a refusal — so the model was told the kura was
+    unreachable when the kura had never been asked. Null means "not given"."""
+    srv, url = start()
+    try:
+        for bad in ("two", [1]):
+            out = speak(url, [INIT, call("kura_recall", {"question": "q", "hops": bad})])
+            text = out[1]["result"]["content"][0]["text"]
+            assert out[1]["result"]["isError"] is True
+            assert text.startswith("[refused]") and "hops" in text
+            assert "cannot reach" not in text
+        out = speak(url, [INIT, call("kura_recall", {"question": "q", "hops": None})])
+        assert out[1]["result"]["isError"] is False
+        assert "recalled text" in out[1]["result"]["content"][0]["text"]
+    finally:
+        srv.shutdown()
+
+
 def test_initialize_reports_the_running_build_not_a_frozen_0_1_0():
     """The bridge used to hardcode serverInfo.version, so an MCP host's server list
     said 0.1.0 while /health said the real version — the two mouths of one process
