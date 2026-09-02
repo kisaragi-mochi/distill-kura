@@ -17,6 +17,7 @@ byte offset for append-only files, sequence number for rewritten archives.
 from __future__ import annotations
 
 import glob
+import inspect
 import json
 import os
 import re
@@ -27,6 +28,7 @@ from datetime import datetime
 MAX_TOOL = 1500      # tools are verbose; the head is enough to ground a number
 MAX_SEG = 4000
 MAX_LINE = 32 * 1024  # raw JSONL line, including the newline; bound before json.loads
+SCAN_LIMIT = MAX_LINE * 10  # unterminated tail: bounded per read, never scan to EOF
 MAX_ID = 256          # event_id / session_id / turn_id; oversized is skipped, never sliced
 MAX_TIMESTAMP = 40    # RFC3339 date-time with timezone; ordinary values fit with room
 MAX_CLASS = 32
@@ -136,6 +138,22 @@ class Source:
         raise NotImplementedError
 
 
+def call_sip(src: Source, path: str, start: int, limit_chars: int, *,
+             report: IntakeReport | None = None,
+             bound_end: int | None = None) -> tuple[list[Segment], int]:
+    """Invoke sip with only kwargs the adapter accepts.
+
+    Pre-existing custom sources may implement only ``sip(path, start, limit_chars)``.
+    """
+    params = inspect.signature(src.sip).parameters
+    kwargs: dict = {}
+    if "report" in params:
+        kwargs["report"] = report
+    if "bound_end" in params:
+        kwargs["bound_end"] = bound_end
+    return src.sip(path, start, limit_chars, **kwargs)
+
+
 # ── Claude Code / plain JSONL transcripts (append-only → byte watermark) ─────
 
 class ClaudeCodeSource(Source):
@@ -168,7 +186,8 @@ class ClaudeCodeSource(Source):
                     return " ".join(x.get("text", "") for x in c if isinstance(x, dict))
         return ""
 
-    def _walk(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int, int]:
+    def _walk(self, path: str, start: int, limit_chars: int,
+              bound_end: int | None = None) -> tuple[list[Segment], int, int]:
         """The one line-walk: sip() and claim_bound() both come through here.
 
         A reserve computed by a second, cheaper rule drifts from the read. This bound
@@ -186,6 +205,9 @@ class ClaudeCodeSource(Source):
         with open(path, "rb") as h:
             h.seek(start)
             while True:
+                pos = h.tell()
+                if bound_end is not None and pos >= bound_end:
+                    return segs, pos, total
                 line = h.readline()
                 if not line:
                     break
@@ -233,8 +255,9 @@ class ClaudeCodeSource(Source):
             return segs, h.tell(), total
 
     def sip(self, path: str, start: int, limit_chars: int,
-            report: IntakeReport | None = None) -> tuple[list[Segment], int]:
-        segs, end, _ = self._walk(path, start, limit_chars)
+            report: IntakeReport | None = None,
+            bound_end: int | None = None) -> tuple[list[Segment], int]:
+        segs, end, _ = self._walk(path, start, limit_chars, bound_end=bound_end)
         return segs, end
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
@@ -332,7 +355,8 @@ class DshSource(Source):
             return Segment("TOOL", txt) if txt else None
         return None
 
-    def _walk(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int, int]:
+    def _walk(self, path: str, start: int, limit_chars: int,
+              bound_end: int | None = None) -> tuple[list[Segment], int, int]:
         """The one event-walk, breaking only after a segment is counted — so the
         reserved end is exactly where the read with this budget stops. Written twice,
         these two loops drifted: breaking on unclassified events too let the marks run
@@ -347,6 +371,8 @@ class DshSource(Source):
             seq = d.get("seq")
             if seq is None or seq <= start:
                 continue
+            if bound_end is not None and seq > bound_end:
+                break
             last = max(last, seq)
             s = self._classify(d)
             if not s:
@@ -359,8 +385,9 @@ class DshSource(Source):
         return segs, last, total
 
     def sip(self, path: str, start: int, limit_chars: int,
-            report: IntakeReport | None = None) -> tuple[list[Segment], int]:
-        segs, last, _ = self._walk(path, start, limit_chars)
+            report: IntakeReport | None = None,
+            bound_end: int | None = None) -> tuple[list[Segment], int]:
+        segs, last, _ = self._walk(path, start, limit_chars, bound_end=bound_end)
         return segs, last
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
@@ -415,13 +442,21 @@ class EvidenceJsonlSource(Source):
             report.note(reason, at, size)
 
     @staticmethod
-    def _read_record(h) -> tuple[bytes | None, str]:
+    def _read_record(h, bound_end: int | None = None) -> tuple[bytes | None, str]:
         """Bounded read of one JSONL record. Never readline()s the rest of the file.
 
         Status: 'eof' | 'ok' | 'partial' | 'oversized'.
         'ok' payload includes the newline and is at most MAX_LINE bytes.
         """
-        chunk = h.readline(MAX_LINE + 1)
+        line_start = h.tell()
+        if bound_end is not None and line_start >= bound_end:
+            return None, "eof"
+        first_limit = MAX_LINE + 1
+        if bound_end is not None:
+            first_limit = min(first_limit, max(0, bound_end - line_start))
+            if first_limit <= 0:
+                return None, "eof"
+        chunk = h.readline(first_limit)
         if not chunk:
             return None, "eof"
         if chunk.endswith(b"\n"):
@@ -430,12 +465,23 @@ class EvidenceJsonlSource(Source):
             return chunk, "ok"
         if len(chunk) <= MAX_LINE:
             return chunk, "partial"
-        while True:
-            more = h.readline(MAX_LINE)
+        total = len(chunk)
+        while total < SCAN_LIMIT:
+            pos = h.tell()
+            if bound_end is not None and pos >= bound_end:
+                return None, "partial"
+            limit = MAX_LINE
+            if bound_end is not None:
+                limit = min(limit, max(0, bound_end - pos))
+                if limit <= 0:
+                    return None, "partial"
+            more = h.readline(limit)
             if not more:
                 return None, "partial"
+            total += len(more)
             if more.endswith(b"\n"):
                 return None, "oversized"
+        return None, "partial"
 
     @staticmethod
     def _parse(raw: bytes) -> tuple[str | None, Segment | None]:
@@ -494,14 +540,17 @@ class EvidenceJsonlSource(Source):
         return None, Segment(cls, text.strip())
 
     def _drink(self, path: str, start: int, limit_chars: int,
-               report: IntakeReport | None = None) -> tuple[list[Segment], int]:
+               report: IntakeReport | None = None,
+               bound_end: int | None = None) -> tuple[list[Segment], int]:
         segs: list[Segment] = []
         total = 0
         with open(path, "rb") as h:
             h.seek(start)
             while True:
                 line_start = h.tell()
-                raw, status = self._read_record(h)
+                if bound_end is not None and line_start >= bound_end:
+                    return segs, line_start
+                raw, status = self._read_record(h, bound_end=bound_end)
                 if status == "eof":
                     return segs, line_start
                 if status == "partial":
@@ -522,8 +571,10 @@ class EvidenceJsonlSource(Source):
             return segs, h.tell()
 
     def sip(self, path: str, start: int, limit_chars: int,
-            report: IntakeReport | None = None) -> tuple[list[Segment], int]:
-        segs, end = self._drink(path, start, limit_chars, report=report)
+            report: IntakeReport | None = None,
+            bound_end: int | None = None) -> tuple[list[Segment], int]:
+        segs, end = self._drink(path, start, limit_chars, report=report,
+                                bound_end=bound_end)
         return segs, end
 
     def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
@@ -584,8 +635,11 @@ class TextSource(Source):
         return end if have >= need else max(start + 1, end - have)
 
     def sip(self, path: str, start: int, limit_chars: int,
-            report: IntakeReport | None = None) -> tuple[list[Segment], int]:
+            report: IntakeReport | None = None,
+            bound_end: int | None = None) -> tuple[list[Segment], int]:
         stop = self._stop(path, start, limit_chars)
+        if bound_end is not None:
+            stop = min(stop, bound_end)
         with open(path, "rb") as h:
             h.seek(start)
             raw = h.read(max(0, stop - start)).decode("utf-8", errors="ignore")

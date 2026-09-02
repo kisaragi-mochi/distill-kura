@@ -55,8 +55,12 @@ class Watermarks:
                 fcntl.flock(lk, fcntl.LOCK_UN)
 
     def claim(self, files: list[str], budget_chars: int,
-              min_chars: int) -> tuple[str, int, Source] | None:
-        """Reserve the next stretch worth drinking. Returns (path, start, source)."""
+              min_chars: int) -> tuple[str, int, int, Source] | None:
+        """Reserve the next stretch worth drinking.
+
+        Returns (path, start, end, source). `end` is the reserved watermark unit
+        sip must not read past — a second runner may already own bytes/events after it.
+        """
         with open(self.path + ".lock", "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             try:
@@ -82,7 +86,7 @@ class Watermarks:
                         continue
                     cur[k] = end
                     self._write(cur)
-                    return path, start, src
+                    return path, start, end, src
                 return None
             finally:
                 fcntl.flock(lk, fcntl.LOCK_UN)

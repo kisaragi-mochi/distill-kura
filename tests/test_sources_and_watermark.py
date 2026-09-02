@@ -229,7 +229,7 @@ def _drain(src, path, marks_path, budget, rounds=4000):
         c = wm.claim([path], budget, 1)
         if not c:
             return got, stretches
-        _, start, s = c
+        _, start, _, s = c
         segs, stop = s.sip(path, start, budget)
         wm.advance(s.key(path), stop)
         got += segs
@@ -284,7 +284,7 @@ def test_two_interleaved_claimers_never_overlap(tmp_path, kind):
         c = wm.claim([path], 2_000, 1)
         if not c:
             break
-        _, start, s = c
+        _, start, _, s = c
         segs, stop = s.sip(path, start, 2_000)
         wm.advance(s.key(path), stop)
         taken.append((start, stop))
@@ -305,7 +305,7 @@ def test_two_interleaved_dsh_claimers_never_overlap(dsh, tmp_path):
         c = wm.claim([path], 400, 1)
         if not c:
             break
-        _, start, s = c
+        _, start, _, s = c
         segs, stop = s.sip(path, start, 400)
         wm.advance(s.key(path), stop)
         taken.append((start, stop))
@@ -329,7 +329,7 @@ def test_claim_reserves_before_the_read(tmp_path):
     runner starting in the same breath gets the same water."""
     src, path = ClaudeCodeSource(), ascii_journal(tmp_path, lines=500)
     wm = Watermarks(str(tmp_path / "m7" / "marks.json"))
-    _, start, s = wm.claim([path], 4_000, 1)
+    _, start, _, s = wm.claim([path], 4_000, 1)
     assert wm.read()[s.key(path)] > start                   # written before any sip()
     end, _ = s.claim_bound(path, start, 4_000)
     assert wm.read()[s.key(path)] == end

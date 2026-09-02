@@ -18,6 +18,8 @@ from distill_kura.distill.sources import (                  # noqa: E402
     EvidenceJsonlSource,
     IntakeReport,
     Segment,
+    Source,
+    call_sip,
     discover_all,
     source_for,
 )
@@ -435,20 +437,20 @@ def test_parallel_claims_reserve_disjoint_complete_records(tmp_path):
     d, st = _distiller(tmp_path, jr, chunk_chars=4000)
     first = d.marks.claim([str(p)], 4000, MIN_DRINK)
     assert first is not None
-    path_a, start_a, src_a = first
+    path_a, start_a, end_a, src_a = first
     key = src_a.key(str(p))
     reserved_a = d.marks.read()[key]
     second = d.marks.claim([str(p)], 4000, MIN_DRINK)
     assert second is not None
-    path_b, start_b, src_b = second
+    path_b, start_b, end_b, src_b = second
     reserved_b = d.marks.read()[key]
     assert start_a < start_b
     assert reserved_a <= start_b
     assert reserved_b > start_b
     # sip of each reservation drinks only that stretch
     src = EvidenceJsonlSource()
-    a, a_end = src.sip(path_a, start_a, 4000)
-    b, b_end = src.sip(path_b, start_b, 4000)
+    a, a_end = call_sip(src, path_a, start_a, 4000, bound_end=reserved_a)
+    b, b_end = call_sip(src, path_b, start_b, 4000, bound_end=reserved_b)
     assert a_end == reserved_a and b_end == reserved_b
     assert {s.text[:2] for s in a}.isdisjoint({s.text[:2] for s in b})
     d.marks.advance(src.key(str(p)), a_end)
@@ -527,3 +529,144 @@ def test_intake_write_failure_does_not_break_sip_one(tmp_path):
     assert got is not None
     assert [s.text[:1] for s in got[0]] == ["a", "b"]
 
+
+# ── Luna rework: reserved end, legacy sip, bounded tail ─────────────────────
+
+class _LegacySource(Source):
+    """Pre-existing custom adapter: sip(path, start, limit_chars) only."""
+    name = "legacy"
+
+    def matches(self, path: str) -> bool:
+        return path.endswith(".legacy.txt")
+
+    def key(self, path: str) -> str:
+        return "legacy:" + os.path.abspath(path)
+
+    def discover(self, root: str) -> list[str]:
+        return []
+
+    def sip(self, path: str, start: int, limit_chars: int) -> tuple[list[Segment], int]:
+        with open(path, "rb") as f:
+            f.seek(start)
+            data = f.read(limit_chars)
+        return [Segment("USER", data.decode(errors="replace"))], start + len(data)
+
+    def claim_bound(self, path: str, start: int, budget_chars: int) -> tuple[int, int]:
+        end = min(os.path.getsize(path), start + budget_chars)
+        return end, max(0, end - start)
+
+
+def test_call_sip_legacy_three_arg_source_ignores_report(tmp_path):
+    p = tmp_path / "x.legacy.txt"
+    p.write_bytes(b"hello world")
+    src = _LegacySource()
+    segs, stop = call_sip(src, str(p), 0, 5, report=IntakeReport())
+    assert len(segs) == 1 and segs[0].text == "hello"
+    assert stop == 5
+
+
+def test_sip_one_with_legacy_three_arg_source(tmp_path, monkeypatch):
+    legacy = _LegacySource()
+    jr = tmp_path / "jr"
+    jr.mkdir()
+    p = jr / "note.legacy.txt"
+    p.write_bytes(b"abcdefghij")
+    d, st = _distiller(tmp_path, jr, chunk_chars=4)
+    monkeypatch.setattr("distill_kura.distill.pipeline.MIN_DRINK", 1)
+    monkeypatch.setattr(d, "files", lambda session=None: [str(p)])
+    real_source_for = source_for
+
+    def fake_source_for(path):
+        return legacy if legacy.matches(path) else real_source_for(path)
+
+    monkeypatch.setattr("distill_kura.distill.sources.source_for", fake_source_for)
+    monkeypatch.setattr("distill_kura.distill.watermark.source_for", fake_source_for)
+    got = d.sip_one()
+    assert got is not None
+    segs, _, key = got
+    assert segs[0].text == "abcd"
+    assert d.marks.read()[key] == 4
+
+
+def test_first_sip_respects_reserved_end_after_second_claim(tmp_path):
+    """Adversarial: claim, append, second claim, first sip — no overlap or skip."""
+    jr = tmp_path / "jr"
+    jr.mkdir()
+    p = jr / "j.evidence.jsonl"
+    events = [_event("USER", _blob(f"c{i}"), event_id=f"e{i}") for i in range(4)]
+    _write(p, *events)
+    d, _ = _distiller(tmp_path, jr, chunk_chars=4000)
+    first = d.marks.claim([str(p)], 4000, MIN_DRINK)
+    assert first is not None
+    path_a, start_a, end_a, src_a = first
+    key = src_a.key(str(p))
+    with open(p, "ab") as f:
+        for i in range(4):
+            f.write((json.dumps(_event("USER", _blob(f"late{i}"), event_id=f"late{i}"))
+                     + "\n").encode())
+    second = d.marks.claim([str(p)], 4000, MIN_DRINK)
+    assert second is not None
+    path_b, start_b, end_b, src_b = second
+    assert start_b == end_a
+    src = EvidenceJsonlSource()
+    a, a_end = call_sip(src, path_a, start_a, 4000, bound_end=end_a)
+    b, b_end = call_sip(src, path_b, start_b, 4000, bound_end=end_b)
+    assert a_end == end_a <= start_b
+    assert b_end == end_b
+    assert {s.text[:4] for s in a}.isdisjoint({s.text[:4] for s in b})
+    d.marks.advance(key, a_end)
+    d.marks.advance(key, b_end)
+    assert d.marks.read()[key] == max(a_end, b_end)
+
+
+def test_unterminated_oversized_tail_stays_bounded_per_attempt(tmp_path, monkeypatch):
+    p = tmp_path / "tail.evidence.jsonl"
+    p.write_bytes(b"x" * (MAX_LINE * 10))
+    consumed: list[int] = []
+    real_open = open
+
+    def open_wrapper(path, mode="r", *args, **kwargs):
+        fh = real_open(path, mode, *args, **kwargs)
+        if os.path.abspath(str(path)) == os.path.abspath(str(p)) and "b" in mode:
+            total = 0
+            base_readline = fh.readline
+
+            def readline(size=-1):
+                nonlocal total
+                chunk = base_readline(size)
+                if chunk:
+                    total += len(chunk)
+                return chunk
+
+            fh.readline = readline
+            base_close = fh.close
+
+            def close():
+                consumed.append(total)
+                return base_close()
+
+            fh.close = close
+        return fh
+
+    monkeypatch.setattr("builtins.open", open_wrapper)
+    src = EvidenceJsonlSource()
+    segs, pos = src.sip(str(p), 0, 10_000)
+    assert segs == [] and pos == 0
+    assert consumed and consumed[0] <= MAX_LINE * 10 + MAX_LINE
+    segs2, pos2 = src.sip(str(p), 0, 10_000)
+    assert segs2 == [] and pos2 == 0
+    assert len(consumed) == 2 and consumed[1] <= MAX_LINE * 10 + MAX_LINE
+
+
+def test_completed_oversized_line_then_valid_event(tmp_path):
+    p = tmp_path / "mix.evidence.jsonl"
+    huge = (b'{"schema_version": 1, "event_id": "e", "session_id": "s", "turn_id": "t", '
+            b'"class": "USER", "text": "' + (b"A" * (MAX_LINE + 50))
+            + b'", "timestamp": "2026-08-27T00:00:00Z"}\n')
+    good = (json.dumps(_event("USER", "after", event_id="ok")) + "\n").encode()
+    with open(p, "wb") as f:
+        f.write(huge)
+        f.write(good)
+    segs, end = EvidenceJsonlSource().sip(str(p), 0, 10_000)
+    assert len(segs) == 1 and segs[0].text == "after"
+    assert end == p.stat().st_size

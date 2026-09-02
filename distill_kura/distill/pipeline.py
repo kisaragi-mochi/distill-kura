@@ -36,7 +36,7 @@ from . import prompts
 from .gate import (attributes_to_human, composed_number_violations,
                    final_surface_violations, gate, norm, salvage, verify_tags)
 from .seeds import Seeds
-from .sources import Segment, as_evidence, discover_all, source_for, IntakeReport
+from .sources import Segment, as_evidence, call_sip, discover_all, source_for, IntakeReport
 from .watermark import Watermarks
 
 CHUNK_CHARS = 200_000        # one batch ≈ what a long-context reader swallows at once
@@ -1051,9 +1051,10 @@ class Distiller:
         c = self.marks.claim(self.files(session), self.chunk_chars, MIN_DRINK)
         if not c:
             return None
-        path, start, src = c
+        path, start, bound_end, src = c
         report = IntakeReport()
-        segs, nxt = src.sip(path, start, self.chunk_chars, report=report)
+        segs, nxt = call_sip(src, path, start, self.chunk_chars,
+                             report=report, bound_end=bound_end)
         self.marks.advance(src.key(path), nxt)
         self._emit_intake(path, report)
         return segs, path, src.key(path)
