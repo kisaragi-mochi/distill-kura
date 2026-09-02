@@ -280,3 +280,20 @@ def test_attribution_knows_the_houses_own_shorthand():
         assert attributes_to_human(line, []), line
     for line in ("ケンにとってのユキ", "SSD層はアーカイブ用途", "a decision was reached"):
         assert not attributes_to_human(line, []), line
+
+
+def test_the_manifests_gate_version_and_the_signed_format_string_agree():
+    """The gate's format version used to be written twice — `"gate_version": 6` in the
+    manifest and the literal `"gate-format-v6"` inside the signed blob — with nothing
+    tying them together. A bump that moved one and not the other would ship manifests
+    announcing a version whose marks are still signed under the old string, and every
+    existing test would still pass. One constant now, the other derived; this pins it."""
+    from distill_kura.distill import pipeline
+
+    assert pipeline.GATE_FORMAT == f"gate-format-v{pipeline.GATE_VERSION}"
+    # The version number itself does not move without a deliberate edit here.
+    assert pipeline.GATE_VERSION == 6
+    assert pipeline.GATE_FORMAT == "gate-format-v6"
+    src = open(pipeline.__file__, encoding="utf-8").read()
+    # No second literal may creep back in: the string is built, never typed.
+    assert '"gate-format-v6' not in src and "'gate-format-v6" not in src

@@ -46,6 +46,30 @@ from .watermark import Watermarks
 CHUNK_CHARS = 200_000        # one batch ≈ what a long-context reader swallows at once
 MIN_DRINK = 6_000            # less raw material than this is not worth a pass
 
+# ── the evidence gate's format version ───────────────────────────────────────
+#
+# ONE number. It was written twice — `"gate_version": 6` in the manifest and the
+# literal `gate-format-v6` inside the signed blob — with nothing tying them together,
+# so a bump could move one and leave the other: manifests announcing a version whose
+# marks are still signed under the old string, and no test to say so.
+#
+# What each version added (additive — a v1 manifest is still read by everything that
+# reads manifests):
+#   2  tags, the evidence each claiming tag rests on, the ones refused and why,
+#      and the three curation sentences.
+#   3  the composed text's numbers are re-verified against the evidence before staging.
+#   4  the floor covers the whole model-written surface (title, trigger, section,
+#      curation sentences, and a judge's FIX before it is re-signed), with
+#      Unicode-normalised tokens and single digits verified.
+#   5  the slug is part of the gated surface.
+#   6  the mark signs the whole ENVELOPE — slug, kind, evidence-manifest digest and
+#      body — the judge never judges an unsigned draft, and pour verifies the
+#      manifest's bytes.
+#
+# Routing cues carry their OWN schema version and are never folded into this one.
+GATE_VERSION = 6
+GATE_FORMAT = f"gate-format-v{GATE_VERSION}"     # derived: the two can no longer drift
+
 
 def _drafts_dir(still: str) -> str:
     """Where staged drafts live. One spelling: a second one would be a directory
@@ -556,18 +580,9 @@ class Distiller:
 
     def _write_manifest(self, d: dict, source: str, key: str) -> str:
         manifest = {
-            # 2: tags, the evidence each claiming tag rests on, the ones refused and
-            # why, and the three curation sentences. 3: the composed text's numbers
-            # are re-verified against the evidence before staging. 4: the floor
-            # covers the whole model-written surface (title, trigger, section,
-            # curation sentences, and a judge's FIX before it is re-signed), with
-            # Unicode-normalised tokens and single digits verified. 5: the slug is
-            # part of the gated surface. 6: the mark signs the whole envelope —
-            # slug, kind, evidence-manifest digest and body — the judge never
-            # judges an unsigned draft, and pour verifies the manifest's bytes.
-            # Additive — a v1 manifest is still read by everything that reads
-            # manifests.
-            "gate_version": 6,
+            # The one number, and what each version added: GATE_VERSION, at the top
+            # of this module. `_mark` signs the string derived from it.
+            "gate_version": GATE_VERSION,
             "source_key": key,
             "source_file": os.path.basename(source),
             "source_sha256": self._source_digest(source),
@@ -692,13 +707,9 @@ class Distiller:
         return re.sub(r"<!--.*?-->\s*", "", raw, flags=re.S).strip()
 
     def _mark(self, slug: str, kind: str, manifest: str, body: str) -> str:
-        # v6: the mark signs the ENVELOPE, not just the text. v5 bound the name
-        # (a renamed draft used to pour under a stolen identity); v6 also binds
-        # what KIND of memory this is (kind decides pinned status in the resident
-        # map — a header edit used to promote a memory without touching a signed
-        # byte) and WHICH evidence it claims to come from (a pointer swapped to a
-        # different, validly-hashed manifest used to forge provenance forever).
-        blob = f"gate-format-v6\n{slug}\n{kind}\n{manifest}\n{body.strip()}"
+        # The signed surface is the whole ENVELOPE, not just the text — see
+        # GATE_VERSION's changelog for what each version bound and why.
+        blob = f"{GATE_FORMAT}\n{slug}\n{kind}\n{manifest}\n{body.strip()}"
         return hmac.new(self._gate_key(), blob.encode("utf-8"),
                         hashlib.sha256).hexdigest()[:32]
 
