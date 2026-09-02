@@ -112,8 +112,13 @@ def _make_handler(reg: Registry):
                                                  f"{type(e).__name__}: {e}"})
 
         def _do_GET(self):
+            # Routes match EXACTLY (the query string is already split off). A prefix
+            # test made `/healthz`, `/indexes` and `/storesX` answer as real routes,
+            # so a client's typo — or a probe for a route this build does not have —
+            # got a 200 for a different endpoint instead of an honest 404. Only
+            # `/memory/` and `/glance/` are prefixes, because a slug follows.
             path, sel, q = self._split(self.path)
-            if path.startswith("/health"):
+            if path == "/health":
                 d = reg.stores[reg.default]
                 return self._send(200, {
                     "ok": True, "default": reg.default,
@@ -133,9 +138,9 @@ def _make_handler(reg: Registry):
                     "started_at": STARTED_AT,
                     "module_path": MODULE_PATH,
                     "config_path": reg.config_path})
-            if path.startswith("/stores"):
+            if path == "/stores":
                 return self._send(200, reg.describe())
-            if path.startswith("/doctor"):
+            if path == "/doctor":
                 # Bare /doctor answers for the DEFAULT store, like every other route.
                 # Returning a per-store mapping here instead would silently change the
                 # shape of the reply for any existing single-store client.
@@ -146,7 +151,7 @@ def _make_handler(reg: Registry):
             st, err = self._store(sel)
             if err:
                 return self._send(404, err)
-            if path.startswith("/prefill"):
+            if path == "/prefill":
                 cfg = reg.prefill_cfg_for(st)
                 loom = prefill_mod.loom_for(st, cfg)
                 pf = prefill_mod.build_from_cfg(
@@ -164,11 +169,11 @@ def _make_handler(reg: Registry):
                     return self._send(200, pf.text, ctype="text/plain; charset=utf-8",
                                       headers=et)
                 return self._send(200, pf.as_dict(), headers=et)
-            if path.startswith("/index"):
+            if path == "/index":
                 t = st.index_text()
                 return self._send(200, {"store": st.name, "index": t,
                                         "tokens_est": estimate(t)})
-            if path.startswith("/profile"):
+            if path == "/profile":
                 # Persona lives on the HOST side (in DSH: the `persona` plugin and the
                 # agent preset). We only record WHICH persona belongs with this kura and
                 # hand the pointer over — we never render or inject it.
@@ -230,7 +235,7 @@ def _make_handler(reg: Registry):
             st, err = self._store(sel)
             if err:
                 return self._send(404, err)
-            if path.startswith("/recall"):
+            if path == "/recall":
                 tot = p.get("total_chars")
                 return self._send(200, recall(st, reg.models_for(st).thinker,
                                               p.get("question", ""),
@@ -238,7 +243,7 @@ def _make_handler(reg: Registry):
                                               int(p.get("chars", 6000)),
                                               int(tot) if tot else None,
                                               fastpath_cfg=reg.fastpath_cfg_for(st)))
-            if path.startswith("/remember"):
+            if path == "/remember":
                 # A tool call or a script: a DIRECT write, refused unless the store's
                 # policy allows one. The distiller's verified pour is a different door.
                 r = st.remember_direct(p.get("slug", ""), p.get("description", ""),
@@ -246,7 +251,7 @@ def _make_handler(reg: Registry):
                                        p.get("hook"), p.get("title"),
                                        tags=p.get("tags"), annotations=_annotations(p))
                 return self._send(200 if r.get("ok") else 403, r)
-            if path.startswith("/annotate"):
+            if path == "/annotate":
                 # Tags and the three sentences on an existing memory, through the DIRECT
                 # door: a distiller-only store refuses this too. The distiller's own
                 # annotations go through `annotate_verified`, which has no route.

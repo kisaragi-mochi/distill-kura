@@ -117,3 +117,37 @@ def test_profile_survives_a_charter_configured_at_a_path_that_is_not_there(tmp_p
         assert code == 200 and json.loads(body)["charter"] == ""
     finally:
         srv.shutdown()
+
+
+def test_a_path_that_merely_starts_like_a_route_is_a_404_not_that_route(tmp_path):
+    """Routes were matched with `path.startswith`, so `/healthz` answered as /health,
+    `/indexes` as /index and `/storesX` as /stores. A client's typo — or a probe for a
+    route this build does not have — got a 200 for a DIFFERENT endpoint, which is the
+    one wrong answer a caller cannot detect."""
+    srv, base = serve(tmp_path)
+    try:
+        for phantom in ("/healthz", "/indexes", "/storesX"):
+            code, _, body = get(base + phantom)
+            assert code == 404, f"{phantom} answered {code}"
+            assert json.loads(body) == {"error": "not found", "path": phantom}
+        for real in ("/health", "/index", "/stores", "/doctor", "/prefill", "/profile"):
+            assert get(base + real)[0] == 200, real
+        assert get(f"{base}/memory/cooling")[0] == 200
+        assert get(f"{base}/glance/cooling")[0] == 200
+    finally:
+        srv.shutdown()
+
+
+def test_a_post_path_that_merely_starts_like_a_route_is_a_404(tmp_path):
+    srv, base = serve(tmp_path)
+    try:
+        req = urllib.request.Request(f"{base}/rememberX", data=b"{}",
+                                     headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req)
+            raise AssertionError("expected 404")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+            assert json.loads(e.read())["path"] == "/rememberX"
+    finally:
+        srv.shutdown()
