@@ -451,3 +451,24 @@ CLI flag arrives with the M4 benchmark step) and hand it to
 --resident-file adaptive=/path/to/map.md`. Promote (`adaptive_apply = true`) only when
 that table shows no new wrong or obsolete branch and no rise in
 `remembered_but_unreachable` — the memory that exists but cannot be reached.
+
+
+## Typed worldline edges (M7)
+
+`kura edges` prints the typed edges the store implies — `continues`, `next`,
+`supersedes`, `rejected`, `blocked-by` — derived from each memory's own `[[links]]`
+and the cue words on the same line, never written into a memory. `--slug S` narrows to
+one memory; `--json` gives the whole payload with `counts`, `unevidenced` and
+`dropped`.
+
+Read `unevidenced` first: it counts `supersedes`/`rejected`/`blocked-by` claims that
+were dropped because the source memory has no verified evidence manifest (or none with
+the class the type demands — USER for the first two, USER/TOOL/ACT for `blocked-by`).
+A store that distills through the gate accrues edges; a hand-written store accrues
+only `continues`/`next`, and that difference is the report working, not a fault.
+
+The edges live in one derived cache, `_still/edges.json`, and are rebuilt whenever the
+store moves; delete it freely. `kura glance` shows up to three as `RELATIONS:` under
+its token target, the Hot Trail gains `↳ source continues → target` lines for fresh
+breadcrumbs only, and `kura bench worldline` reports `edge_says_obsolete` per trace.
+`kura doctor` carries the edge counts on its health line.

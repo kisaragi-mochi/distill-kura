@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 
+from . import edges
 from .store import Store
 from .tokens import estimate
 
@@ -57,7 +58,7 @@ def glance(store: Store, slug: str) -> dict:
     """A ~150-token confirmation of one memory, built mechanically.
 
     → {"ok": True, "slug", "title", "trigger", "keep", "keep_state",
-       "links": [...], "relations": [], "text": rendered}
+       "links": [...], "relations": [...], "text": rendered}
     or {"ok": False, "error": ...} — never a guess at a neighbour.
     """
     s = store.resolve_exact(slug)
@@ -102,10 +103,28 @@ def glance(store: Store, slug: str) -> dict:
     if omitted:
         # A silent cut reads as "that is all there is" — say the rest exist.
         out.append(f"+{omitted} more links (open the memory for them)")
+
+    # Typed worldline edges (M7): derived routing state, never canonical. Same
+    # token contract as LINKS — the block is what fits, and a cut is said out loud.
+    relations = edges.edges_of(store, s)
+    shown_rel = 0
+    if relations:
+        out += ["", "RELATIONS:"]
+        for r in relations:
+            arrow = "→" if r["direction"] == "out" else "←"
+            line = f"{arrow} {r['type']} {r['other']}"
+            if estimate("\n".join(out + [line])) > GLANCE_TOKENS:
+                break
+            out.append(line)
+            shown_rel += 1
+    omitted_rel = len(relations) - shown_rel
+    if omitted_rel:
+        out.append(f"+{omitted_rel} more relations (open the memory for them)")
+
     rendered = "\n".join(out)
     return {"ok": True, "slug": s, "title": title, "trigger": trigger,
             "keep": keep, "keep_state": keep_state, "links": links,
-            "relations": [],                      # typed worldline edges land in M7
+            "relations": relations,
             "text": rendered,
             # The contract is a TARGET (~150), not a hard ceiling: a giant grouped
             # line or a long KEEP can carry the glance past it, honestly. The

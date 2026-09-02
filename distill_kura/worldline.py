@@ -34,6 +34,7 @@ import json
 import re
 import time
 
+from . import edges
 from . import fastpath
 from .recall import recall
 from .store import Store
@@ -181,6 +182,7 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
           "first_tool": "", "opened": [], "related_reached": [],
           "thinker_calls": 0, "fastpath_used": False, "recall_context_tokens": 0,
           "target_reached": False, "wrong_branch": False, "obsolete_branch": False,
+          "edge_says_obsolete": False,
           "remembered_but_unreachable": False, "unnecessary_opens": [],
           "skipped": None,
           "proposed_slugs": [], "invalid_slugs": [], "format_error": False,
@@ -270,6 +272,13 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
         # read tags to decide what counts would move with the store under test.
         obsolete = [s for s in (case.get("obsolete_slugs") or []) if s]
         tr["obsolete_branch"] = any(s in tr["opened"] for s in obsolete)
+        # Does the derived edge map (M7) independently mark what the fixture calls
+        # obsolete — a `supersedes` edge pointing at each obsolete slug? A raw
+        # metric beside obsolete_branch, never a scoring input.
+        supersedes_targets = {e["target"] for e in edges.current(store).get("edges", [])
+                              if e["type"] == "supersedes"}
+        tr["edge_says_obsolete"] = bool(obsolete) and all(
+            s in supersedes_targets for s in obsolete)
         tr["wrong_branch"] = any(s in tr["opened"] and s not in obsolete
                                  for s in (case.get("must_not_anchor") or []))
         # "The memory exists, the door was too narrow": the target is IN the store

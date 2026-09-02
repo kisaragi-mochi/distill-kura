@@ -146,6 +146,36 @@ anything outside the three names fails config loading. `kura constellation [--js
 prints the sector table and the invariant; `kura doctor` carries the sector and
 UNSECTIONED counts — a large unsectioned count is the cue to add headings.
 
+### Typed worldline edges (M7)
+
+Typed edges between memories — exactly five: `continues`, `next`, `supersedes`,
+`rejected`, `blocked-by` — exist as DERIVED routing state and nothing else. They are
+never written into frontmatter or bodies; `distill_kura/edges.py` recomputes them from
+the canonical files on demand and keeps them in one marked cache, `_still/edges.json`
+(the cue ledger's `{"payload", "mark"}` shape, signed with the store's gate key). A
+mis-marked file reads as empty and is rebuilt; on a frozen store the derivation still
+answers, in memory, writing nothing.
+
+The floors are structural: both ends must be existing exact slugs of THIS store, source
+≠ target, and the target must be among the source's own `[[links]]` — prose alone
+invents nothing. The cue words that fire are lexical and recorded on the edge (`cue`),
+with a specificity order (supersedes → rejected → blocked-by → next → continues) for a
+line that says several things. Evidence floors where it matters: `supersedes` and
+`rejected` need USER evidence in the source's verified manifest, `blocked-by` needs
+USER, TOOL or ACT, and a memory whose manifest is missing or unverifiable yields none
+of the three — counted in the report as `unevidenced`, never dropped in silence.
+Deterministic and byte-stable at a revision; no model calls.
+
+Consumers: `kura glance` fills its `relations` field and renders up to three as a
+`RELATIONS:` block under the same token contract as LINKS; the Hot Trail grows one
+optional `↳ source continues → target` tail (max 3 lines, only when a fresh breadcrumb
+has an onward `continues`/`next` edge, and the edges payload hash rides in the trail's
+spec so a changed edge set re-prices the trail); `kura bench worldline` reports
+`edge_says_obsolete` — whether a `supersedes` edge independently marks what a case
+calls obsolete — as a raw metric with no scoring change. `kura edges [--json] [--slug
+S]` prints the derived table; `kura doctor` carries the edge counts. Recall's BFS is
+untouched: edges are routing hints for trail/glance/bench, not a new way into recall.
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the

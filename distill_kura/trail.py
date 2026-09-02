@@ -24,6 +24,7 @@ import os
 import time
 from dataclasses import dataclass
 
+from . import edges
 from .store import Store, contained
 from .tokens import estimate
 from .weave import Loom
@@ -83,11 +84,15 @@ class Trail:
         self.state_path = self.out_path + ".state.json"
 
     def _spec(self) -> dict:
-        """Everything besides the canonical state that shapes the trail's bytes."""
+        """Everything besides the canonical state that shapes the trail's bytes.
+        The edges hash rides here (M7): a `continues` line is part of the trail's
+        bytes, so a changed edge set must re-price the trail's freshness even
+        though no canonical byte moved — the cue ledger's cue_stamp, same shape."""
         return {"fresh_days": self.loom.fresh_days,
                 "pinned_types": list(self.loom.pinned_types),
                 "trail_tokens": self.trail_tokens,
-                "bulk_touch_share": self.loom.bulk_touch_share}
+                "bulk_touch_share": self.loom.bulk_touch_share,
+                "edges_sha256": edges.stamp_sha(self.store)}
 
     def spec_sha256(self) -> str:
         return _sha256(json.dumps(self._spec(), sort_keys=True))
@@ -110,9 +115,10 @@ class Trail:
         fresh.sort(key=lambda s: (ages[s], s))
 
         lines: list[str] = []
+        included: list[str] = []                # the fresh slugs whose lines made it
         seen_line: set[str] = set()
         used = 0
-        included: list[float] = []              # ages of the breadcrumbs included
+        included_ages: list[float] = []         # ages of the breadcrumbs included
         for slug in fresh:
             line = self._index_line(slug)
             if line is None or line in seen_line:      # a grouped line names several
@@ -122,19 +128,40 @@ class Trail:
                 break
             seen_line.add(line)
             lines.append(line)
+            included.append(slug)
             used += cost
-            included.append(ages[slug])
+            included_ages.append(ages[slug])
         if not lines:
             return None, stamp
         # How long this trail can call itself current: until the FIRST included
         # breadcrumb ages out of the fresh window. Past that moment the text is a
         # lie about the present even though the store never moved — the pure-time
         # hazard the revision and the index hash cannot see.
-        horizon_days = min(self.loom.fresh_days - a for a in included)
+        horizon_days = min(self.loom.fresh_days - a for a in included_ages)
         stamp.valid_until = now + max(0.0, horizon_days) * 86400.0
-        text = (f"{TRAIL_BEGIN}\n{HEADER}\n" + "\n".join(lines)
-                + f"\n{TRAIL_END}\n")
+        body = "\n".join(lines)
+        onward = self._onward_lines(included)
+        if onward:
+            body += "\n" + "\n".join(onward)
+        text = f"{TRAIL_BEGIN}\n{HEADER}\n{body}\n{TRAIL_END}\n"
         return text, stamp
+
+    def _onward_lines(self, slugs: list[str]) -> list[str]:
+        """The `↳ source continues → target` lines (M7): one optional tail, only
+        when a fresh breadcrumb itself has an onward `continues`/`next` edge.
+        Max 3, in the edge map's own order — deterministic, and a trail that
+        grew relations without bound would be a second map."""
+        by_source: dict[str, list[dict]] = {}
+        for e in edges.current(self.store).get("edges", []):
+            if e["type"] in ("continues", "next"):
+                by_source.setdefault(e["source"], []).append(e)
+        out: list[str] = []
+        for slug in slugs:
+            for e in by_source.get(slug, ()):
+                out.append(f"↳ {slug} {e['type']} → {e['target']}")
+                if len(out) >= 3:
+                    return out
+        return out
 
     def _index_line(self, slug: str) -> str | None:
         """The canonical recognition line, verbatim — a fresh-layer line is kept

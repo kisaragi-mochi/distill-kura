@@ -13,6 +13,7 @@
     kura prefill [-s eq]            print the standing block a host should inject
     kura trail [-s eq]              rebuild the Hot Trail appended after the map
     kura constellation [-s eq]      the sector map: which `## ` heading holds what
+    kura edges [-s eq] [--slug S]   typed worldline edges — derived routing state
     kura pay-forward [-s eq]          bake the map into each mouth's KV slot, save it to disk
     kura bench compress [-s eq]       what the store cost against the journal it came from
     kura bench payforward --mouth N   what the pay-forward spine buys, priced by the mouth
@@ -181,6 +182,11 @@ def main(argv: list[str] | None = None) -> int:
                        help="the sector map: which `## ` heading holds what, and the invariant")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("edges",
+                       help="typed worldline edges — derived routing state, read-only")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--slug", help="only this memory's outgoing and incoming edges")
+
     p = sub.add_parser("pay-forward", help="pay the map's cold prefill forward: bake it "
                                            "into each mouth's KV slot and save the slot to disk")
     p.add_argument("--mouth", help="only this mouth (by [[payforward.mouths]] name)")
@@ -295,6 +301,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"invariant: sum(sector counts) = {r['covered']} memories, "
               f"store holds {r['memories']} — "
               f"{'ok' if r['invariant_ok'] else 'BROKEN'}")
+        return 0
+
+    if a.cmd == "edges":
+        from . import edges as edges_mod
+        st = _store(reg, a.store)
+        if a.slug:
+            rows = edges_mod.edges_of(st, a.slug)
+            if a.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=1))
+                return 0
+            for r in rows:
+                arrow = "→" if r["direction"] == "out" else "←"
+                print(f"{arrow} {r['type']} {r['other']}")
+            return 0
+        payload = edges_mod.current(st)        # read-only: the CLI never writes the cache
+        if a.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=1))
+            return 0
+        for e in payload.get("edges", []):
+            ev = f"   evidence: {e['evidence']}" if e.get("evidence") else ""
+            print(f"{e['source']} -[{e['type']}]-> {e['target']}   cue: {e['cue']}{ev}")
+        print(f"counts: {json.dumps(payload.get('counts', {}), ensure_ascii=False)}   "
+              f"unevidenced: {payload.get('unevidenced', 0)}")
+        if payload.get("dropped"):
+            print(f"dropped: {json.dumps(payload['dropped'], ensure_ascii=False)}")
         return 0
 
     if a.cmd == "pay-forward":

@@ -1227,6 +1227,7 @@ class Store:
     def doctor(self) -> dict:
         from . import fastpath          # local: fastpath is a layer ON TOP of this API
         from . import constellation     # local: reads the index; nothing it needs moves
+        from . import edges as _edges   # local: derived state; reads the store, writes nothing
         # Crash debris first: an intact WAL transaction is a promise the store must
         # keep before its files are judged, and doctor is often the first thing run
         # after a bad night — waiting for "the first mutation" to replay would have
@@ -1284,6 +1285,7 @@ class Store:
         cur = {n: self.curation_state(n) for n in files}
         unsigned = sorted(n for n, c in cur.items() if c == "unsigned")
         con = constellation.check(self)
+        edge_map = _edges.current(self)
         return {
             "store": self.name,
             "path": self.path,
@@ -1309,6 +1311,10 @@ class Store:
             # the resident ceiling leans on — its sector map is worn instead of the
             # full index, and a large UNSECTIONED count is the cue to add headings.
             "constellation": {"sectors": con["sectors"], "unsectioned": con["unsectioned"]},
+            # Typed worldline edges (M7): derived, marked, rebuilt from the store —
+            # counted here so a derivation that went quiet is visible in health.
+            "edges": {"counts": edge_map.get("counts", {}),
+                      "unevidenced": edge_map.get("unevidenced", 0)},
             # The store's mutation counter, and the crash accounting: what this very
             # call finished (`wal_replayed`) and what no one may finish (`broken_wal`
             # — quarantined promises whose payloads failed their hashes; a person
