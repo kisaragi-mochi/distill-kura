@@ -305,7 +305,10 @@ class Loom:
         blob = json.dumps({"payload": hooks, "mark": self._hooks_mark(hooks)},
                           ensure_ascii=False, indent=1, sort_keys=True)
         os.makedirs(self.store.still, exist_ok=True)
-        tmp = self.hooks_path + ".tmp"
+        # Per-process, like the two writers below: two weaves running side by side
+        # shared one fixed tmp name, and the loser's os.replace raised
+        # FileNotFoundError out of the middle of a weave.
+        tmp = self.hooks_path + f".tmp.{os.getpid()}"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(blob)
         os.replace(tmp, self.hooks_path)

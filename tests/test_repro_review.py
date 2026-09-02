@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from distill_kura.distill.seeds import Seeds    # noqa: E402
 from distill_kura.recall import recall           # noqa: E402
 from distill_kura.store import Store             # noqa: E402
 from distill_kura.thinker import Endpoint        # noqa: E402
@@ -333,3 +334,30 @@ def test_the_global_distill_table_is_type_checked_too(tmp_path):
         assert "inherit_global_journals must be bool" in str(e)
     else:
         raise AssertionError("a truthy string must not pass for a boolean, globally either")
+
+
+# ── the seed ledger is one writer at a time ─────────────────────────────────
+
+def test_concurrent_seed_confirms_do_not_lose_seeds(tmp_path):
+    """confirm() read the whole ledger, rewrote it through a FIXED `.tmp` name and
+    replaced it, with no lock and with sow() appending unlocked beside it. Two
+    runners — a hand `kura distill run` next to the tended one — shared that tmp
+    file: the second open("w") truncated the first's inode, both wrote into it, and
+    one os.replace hit FileNotFoundError while whole seeds vanished from the ledger."""
+    path = str(tmp_path / "still" / "seeds.jsonl")
+    worker = tmp_path / "sw.py"
+    worker.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {ROOT!r})\n"
+        "from distill_kura.distill.seeds import Seeds\n"
+        "w, path = sys.argv[1], sys.argv[2]\n"
+        "s = Seeds(path)\n"
+        "[s.sow(f'idea {w}-{i}', 'test') for i in range(8)]\n"
+        "[s.confirm(f'idea {w}-{i}', 'how') for i in range(8)]\n",
+        encoding="utf-8")
+    procs = [subprocess.Popen([sys.executable, str(worker), str(w), path]) for w in range(8)]
+    for p in procs:
+        assert p.wait() == 0
+    rows = Seeds(path)._all()
+    assert len(rows) == 64
+    assert all(r.get("confirmed") for r in rows)
