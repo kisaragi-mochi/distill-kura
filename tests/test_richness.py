@@ -247,7 +247,7 @@ model = "none"
     rc = main(["-c", str(cfg), "-s", "m", "metrics", "richness", "--json"])
     assert rc == 0                       # a gauge, not a gate: even the WARN exits 0
     r = json.loads(capsys.readouterr().out)
-    assert set(r) == {"store", "range", "files", "metrics", "windows", "warnings"}
+    assert set(r) == {"store", "retired", "range", "files", "metrics", "windows", "warnings"}
     assert r["store"] == "m"
     assert r["files"]["metrics.jsonl"] == {"lines": 1, "bad_lines": 0}
     assert set(r["metrics"]) == {"candidate_rate", "rejections",

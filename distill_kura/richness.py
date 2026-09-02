@@ -306,6 +306,10 @@ def gauge(store: Store, since_days: float | None = None,
 
     return {
         "store": store.name,
+        # Read from the store, not from a log: a retirement is a state the index
+        # carries, and a gauge that could only see it in a jsonl would miss every
+        # transition a person made with `kura retire`.
+        "retired": len(store.faced()),
         "range": {"window_days": window_days, "since_days": since_days,
                   "first_seen": first_seen.isoformat(timespec="seconds")
                   if first_seen else None,
@@ -340,6 +344,7 @@ def table(r: dict) -> str:
            f"window={_cell(rg['window_days'])}d  "
            f"since={_cell(rg['since_days']) + 'd' if rg['since_days'] is not None else 'all'}"]
 
+    out.append(f"retired: {_cell(r.get('retired'))} memories wear a retirement face")
     bad = {n: f["bad_lines"] for n, f in r["files"].items()}
     total_lines = sum(f["lines"] for f in r["files"].values())
     out.append(f"files: {total_lines} lines, bad lines: "

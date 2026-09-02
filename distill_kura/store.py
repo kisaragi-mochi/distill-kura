@@ -719,6 +719,25 @@ class Store:
     _FACED = re.compile(r"^\s*(?:退役\s*[:：]|superseded\s*:)", re.I)
     _CJK = re.compile(r"[぀-ヿ㐀-鿿ｦ-ﾟ]")
 
+    def index_hooks(self) -> dict[str, str]:
+        """slug → the trigger its own single-entry index line carries. Grouped lines
+        are not in it: they have no one trigger to speak of."""
+        out: dict[str, str] = {}
+        commented = self._commented_lines(self.index_text())
+        for i, l in enumerate(self.index_text().splitlines()):
+            if i in commented:
+                continue
+            m = re.match(r"- \[([^\]]+)\]\(([^)]+)\.md\) — (.+)", l)
+            if m:
+                out.setdefault(m.group(2), m.group(3))
+        return out
+
+    def faced(self) -> list[str]:
+        """The memories whose line says they have been superseded. Counted by doctor
+        and by `kura metrics richness`: a store that never retires anything, and one
+        that retires everything, are both worth seeing."""
+        return sorted(sl for sl, hook in self.index_hooks().items() if self.is_faced(hook))
+
     @classmethod
     def is_faced(cls, hook: str) -> bool:
         """Does this index trigger already wear a retirement face?"""
@@ -1495,6 +1514,7 @@ class Store:
         body_tokens = sum(estimate(self._split(t)[1]) for t in files.values())
         cur = {n: self._curation_state_of(n, fms[n]) for n in files}
         unsigned = sorted(n for n, c in cur.items() if c == "unsigned")
+        faced_now = self.faced()
         con = constellation.check(self)
         edge_map = _edges.current(self)
         return {
@@ -1538,6 +1558,11 @@ class Store:
             "invalid_manifest_pointer": invalid_manifest_pointer,
             "missing_manifest": sorted(missing_manifest),
             "tagged": sum(1 for fm in fms.values() if self._tags_of(fm)),
+            # Retired memories: still here, still indexed, and wearing the face that
+            # says so. Named, not just counted, because "which ones" is the question
+            # a person asks next.
+            "retired": len(faced_now),
+            "retired_names": faced_now,
             # Who wrote the curation. `tampered` is always named. `unsigned` is named
             # only where nobody but the gate should be writing — on a direct-allowed
             # store a hand-written tag is the normal case and listing it would be noise.

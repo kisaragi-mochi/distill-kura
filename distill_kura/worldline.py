@@ -319,6 +319,12 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
                               if e["type"] == "supersedes"}
         tr["edge_says_obsolete"] = bool(obsolete) and all(
             s in supersedes_targets for s in obsolete)
+        # Does CANONICAL say so — the retirement face on the obsolete memory's own
+        # index line (store.retire)? Raw, beside edge_says_obsolete and never a
+        # scoring input: what a benchmark may report about the map it read, not a
+        # reason to move a number.
+        faced = {sl for sl, hook in store.index_hooks().items() if store.is_faced(hook)}
+        tr["obsolete_faced"] = bool(obsolete) and all(s in faced for s in obsolete)
         tr["wrong_branch"] = any(s in tr["opened"] and s not in obsolete
                                  for s in (case.get("must_not_anchor") or []))
         # "The memory exists, the door was too narrow": the target is IN the store

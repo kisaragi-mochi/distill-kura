@@ -373,3 +373,50 @@ def test_the_drain_counts_the_transition_in_its_metrics_row(tmp_path):
             open(os.path.join(s.still, "metrics.jsonl"), encoding="utf-8")]
     assert rows[-1]["op"] == "drain" and rows[-1]["retired"] == 1
     assert rows[-1]["retired_slugs"] == ["old-way"]
+
+
+# ── the human-driven transition, and the counters ───────────────────────────
+
+def a_config(tmp_path, store):
+    cfg = tmp_path / "kura.toml"
+    cfg.write_text(f'default = "m"\n[stores.m]\npath = "{store.path}"\n'
+                   '[models.thinker]\nurl = "http://127.0.0.1:9/v1"\nmodel = "none"\n',
+                   encoding="utf-8")
+    return str(cfg)
+
+
+def test_doctor_and_richness_count_the_faced_memories(tmp_path):
+    from distill_kura import richness
+
+    s = a_store(tmp_path)
+    assert s.doctor()["retired"] == 0
+    assert richness.gauge(s)["retired"] == 0
+    assert s.retire("old-way", "new-way", user_manifest(s))["ok"]
+    d = s.doctor()
+    assert d["retired"] == 1 and d["retired_names"] == ["old-way"]
+    assert d["memories"] == 2, "a retired memory is still a memory"
+    r = richness.gauge(s)
+    assert r["retired"] == 1
+    assert "retired: 1" in richness.table(r)
+
+
+def test_a_worldline_case_reports_whether_canonical_says_obsolete(tmp_path):
+    """`edge_says_obsolete` is what the DERIVED map thinks; `obsolete_faced` is what
+    canonical says. Raw metrics, side by side — neither moves a score."""
+    from distill_kura import worldline as wl
+
+    class StubModel:
+        def ask_full(self, system, user, **kw):
+            return {"content": '["new-way"]', "finish_reason": "stop"}
+
+    s = a_store(tmp_path)
+    case = {"id": "c1", "utterance": "the old way — is that still the idea?",
+            "target_slugs": ["new-way"], "acceptable_related": [],
+            "must_not_anchor": [], "obsolete_slugs": ["old-way"],
+            "category": "superseded-plan"}
+    tr = wl.run_case(s, case, "agent-only", thinker=StubModel())
+    assert tr["obsolete_faced"] is False and tr["target_reached"] is True
+    assert s.retire("old-way", "new-way", user_manifest(s))["ok"]
+    tr = wl.run_case(s, case, "agent-only", thinker=StubModel())
+    assert tr["obsolete_faced"] is True
+    assert tr["target_reached"] is True, "the face changes no score"
