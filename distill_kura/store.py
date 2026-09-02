@@ -102,6 +102,11 @@ RESERVED_TAGS = frozenset({
     "superseded", "absorbed", "fulfilled", "expired", "corrected", "released", "incidental",
 })
 ANNOTATION_KEYS = ("belongs_because", "keep", "may_fade")
+# Every frontmatter key `_render` fills in itself; anything else a memory carries is
+# copied through a rewrite verbatim. Named once because both write doors filter on it:
+# a template key missing from this set would be emitted twice on the next rewrite.
+_TEMPLATE_KEYS = frozenset(("name", "description", "type", "tags", "curation_mark",
+                            *ANNOTATION_KEYS))
 _TAG = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
 
@@ -524,6 +529,29 @@ class Store:
         return order
 
     # ── writing ──────────────────────────────────────────────────────────
+    def _substitution_refusal(self) -> dict | None:
+        """Both write doors ask this first: the directory this Store was opened on may
+        have been swapped for a symlink since. Same shape as `_direct_refused`."""
+        if not self._still_ourselves():
+            return {"ok": False, "error": f"store '{self.name}' no longer resolves to the "
+                                          f"directory it was opened on ({self.path}); "
+                                          f"refusing to write through the substitution"}
+        return None
+
+    @staticmethod
+    def _carried_meta(fm: dict) -> dict:
+        """The frontmatter a rewrite carries through untouched (see _TEMPLATE_KEYS)."""
+        return {k: v for k, v in fm.items() if k not in _TEMPLATE_KEYS}
+
+    @staticmethod
+    def _bad_annotation_key(annotations: dict | None) -> dict | None:
+        """The refusal for the first key that is not an annotation, or None."""
+        for k in (annotations or {}):
+            if k not in ANNOTATION_KEYS:
+                return {"ok": False, "error": f"{k!r} is not an annotation; "
+                                              f"one of {list(ANNOTATION_KEYS)}"}
+        return None
+
     def _direct_refused(self) -> dict | None:
         if self.write_policy == FROZEN:
             # Do not point the caller at a door that is also shut.
@@ -653,10 +681,8 @@ class Store:
         not even its mtime — so `recurred` proposed a second time is a no-op, and there
         is no counter anywhere that could turn 'proposed twice' into 'twice as important'.
         The slug is EXACT: a fuzzy match here would decorate a neighbour."""
-        if not self._still_ourselves():
-            return {"ok": False, "error": f"store '{self.name}' no longer resolves to the "
-                                          f"directory it was opened on ({self.path}); "
-                                          f"refusing to write through the substitution"}
+        if (r := self._substitution_refusal()):
+            return r
         s = self.resolve_exact(slug)
         if not s:
             return {"ok": False, "error": f"no memory named {slug!r} in store '{self.name}'"}
@@ -664,10 +690,8 @@ class Store:
             add = normalize_tags(tags)
         except InvalidTag as e:
             return {"ok": False, "error": str(e)}
-        for k in (annotations or {}):
-            if k not in ANNOTATION_KEYS:
-                return {"ok": False, "error": f"{k!r} is not an annotation; "
-                                              f"one of {list(ANNOTATION_KEYS)}"}
+        if (r := self._bad_annotation_key(annotations)):
+            return r
         with self._locked():
             text = self._open(s)
             fm_raw, body = self._split(text)
@@ -695,9 +719,7 @@ class Store:
                        **{k: str(v).replace("\n", " ").strip()
                           for k, v in (annotations or {}).items()
                           if str(v).replace("\n", " ").strip()}}
-            new_meta = {**{k: v for k, v in fm.items()
-                           if k not in ("name", "description", "type", "tags", "curation_mark")
-                           and k not in ANNOTATION_KEYS},
+            new_meta = {**self._carried_meta(fm),
                         **(meta or {})}
             # The verified door signs the curation it leaves behind; the direct door
             # leaves it unsigned (and drops a mark that no longer describes the file).
@@ -989,10 +1011,8 @@ class Store:
         index line refreshed (a stale index line keeps speaking the old fact).
 
         Policy is checked by the callers above; this is the mechanism only."""
-        if not self._still_ourselves():
-            return {"ok": False, "error": f"store '{self.name}' no longer resolves to the "
-                                          f"directory it was opened on ({self.path}); "
-                                          f"refusing to write through the substitution"}
+        if (r := self._substitution_refusal()):
+            return r
         slug = re.sub(r"[^a-z0-9-]+", "-", slug.lower()).strip("-")
         if not slug:
             return {"ok": False, "error": "slug required"}
@@ -1004,10 +1024,8 @@ class Store:
             new_tags = normalize_tags(tags)
         except InvalidTag as e:
             return {"ok": False, "error": str(e)}
-        for k in (annotations or {}):
-            if k not in ANNOTATION_KEYS:
-                return {"ok": False, "error": f"{k!r} is not an annotation; "
-                                              f"one of {list(ANNOTATION_KEYS)}"}
+        if (r := self._bad_annotation_key(annotations)):
+            return r
         # Stored VERBATIM. It is tempting to escape `{` here because `{{...}}` is a
         # variable in most prompt templates — but a memory store holds code, JSON and
         # shell, and silently rewriting a body corrupts exactly the memories that carry
@@ -1032,9 +1050,7 @@ class Store:
                 # Exactly this file, never the fuzzy resolver: what is inherited here is
                 # decided by the name on disk, not by the nearest neighbour.
                 fm = self.frontmatter_exact(slug)
-                kept = {k: v for k, v in fm.items()
-                        if k not in ("name", "description", "type", "tags", "curation_mark")
-                        and k not in ANNOTATION_KEYS}
+                kept = self._carried_meta(fm)
                 # Tags and annotations survive a body rewrite the same way: a caller
                 # that does not mention them has not asked to remove them.
                 kept_tags = self._tags_of(fm)
