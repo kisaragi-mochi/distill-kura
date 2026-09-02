@@ -21,7 +21,7 @@
     kura init <name> --path DIR       create a store and print the TOML to paste
     kura distill catchup [-s eq]      start from today: mark every journal drunk up to now
     kura distill run [-s eq]          one pass: drink → spot → gate → write drafts
-    kura distill drafts|drain|tidy    inspect / pour / repair the index
+    kura distill drafts|pour|drain|tidy|sip   inspect / pour / repair the index, or sip one draft
     kura distill night                stay resident, distil in the quiet
 
 Exit code 2 means "there was nothing to do". A scheduler needs that distinct from 0,
@@ -699,7 +699,9 @@ def main(argv: list[str] | None = None) -> int:
         if a.dcmd == "night":
             dis.night(a.idle_min)
             return 0
-        sys.exit("kura distill {run|sip|drafts|pour|drain|tidy|night}")
+        sys.exit("kura distill {" + "|".join(dsub.choices) + "}")   # derived: a hand-kept
+        # list drifted (it never mentioned `catchup`). Not `required=True` on the
+        # subparser: argparse would exit 2, which this CLI reserves for "nothing to do".
 
     ap.print_help()
     return 0

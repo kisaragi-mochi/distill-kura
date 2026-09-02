@@ -5,6 +5,7 @@ as you configure and a client can switch modes per request:
 
     POST /recall            {"question": ..., "hops": 1, "store"|"mode": "eq"}
     POST /remember          {"slug","description","body","type","hook","title","store"}
+    POST /annotate          {"slug","tags","belongs_because","keep","may_fade","store"}
     GET  /index             ?store=maker
     GET  /doctor            ?store=maker          (?all=1 → every store at once)
     GET  /memory/<slug>     ?store=maker
