@@ -279,3 +279,14 @@ def test_every_trace_names_the_map_it_wore_by_hash(tmp_path):
     assert len(shas["canonical"]) == 12 and shas["canonical"] != shas["woven"]
     for name, v in out["variants"].items():
         assert v["resident_sha"] == shas[name]
+
+
+def test_a_format_error_keeps_the_head_of_the_reply_as_its_witness(tmp_path):
+    """FAILURES FOUND (house run 2026-09-02): 32/42 rows were format_error with no way
+    to tell prose from a fenced array from a reply cut by the output cap."""
+    s = build(tmp_path)
+    stub = StubModel({}, default="Looking at the map, the most relevant entry is freetoken-hybrid ...")
+    out = wl.run(s, [case("wf-direct-1")], "agent-only", thinker=stub)
+    t = out["traces"][0]
+    assert t["format_error"] and t["reply_head"].startswith("Looking at the map") \
+        and t["reply_chars"] == len(stub.default)

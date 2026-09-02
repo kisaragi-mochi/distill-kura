@@ -184,6 +184,7 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
           "remembered_but_unreachable": False, "unnecessary_opens": [],
           "skipped": None,
           "proposed_slugs": [], "invalid_slugs": [], "format_error": False,
+          "reply_head": None, "reply_chars": 0,
           "cue_hit": None, "cue_ambiguous": False,
           "agent": agent if routing == "agent-only" else None}
 
@@ -208,6 +209,12 @@ def run_case(store: Store, case: dict, routing: str, thinker: Endpoint | None = 
                 tr["skipped"] = "model unreachable"
             else:
                 a = _agent_answer(raw, store)
+                # What the model actually said, in part: a format_error is
+                # otherwise a verdict with no witness (prose? a fenced array?
+                # reasoning cut by the output cap?). The head is kept, not the
+                # whole reply — a trace row is a measurement, not a transcript.
+                tr["reply_head"] = raw[:240]
+                tr["reply_chars"] = len(raw)
                 tr["opened"] = a["opened"]
                 tr["proposed_slugs"] = a["proposed_slugs"]
                 tr["invalid_slugs"] = a["invalid_slugs"]
