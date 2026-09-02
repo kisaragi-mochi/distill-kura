@@ -287,7 +287,11 @@ class Distiller:
         return str(man.get("source_key") or "") if man is not None else None
 
     def recur(self, c: dict, target: str, key: str, source: str) -> str:
-        """→ 'tagged' | 'already' | a reason it was not. Never raises, never counts."""
+        """→ 'tagged' | 'already' | a reason it was not.
+
+        Every judgement comes back as a string, never as an exception, and nothing is
+        counted. A disk failure in the manifest write or the annotate propagates, like
+        every other write in a pass — night() is the designated catch."""
         if "USER" not in c["classes"]:
             return "no [USER] quote: the agent repeating itself is not a recurrence"
         if "recurred" in self.store.tags(target):
@@ -819,7 +823,8 @@ class Distiller:
                     "why": "the scribe was unreachable or answered nothing — not a verdict"}
         first = (out.splitlines() or [""])[0].upper()
         v = next((x for x in ("POUR", "FIX", "TOSS") if x in first), None)
-        why = (re.search(r"^reason[:：]\s*(.+)$", out, re.M | re.I) or [None, ""])[1] if v else ""
+        rm = re.search(r"^reason[:：]\s*(.+)$", out, re.M | re.I) if v else None
+        why = rm.group(1) if rm else ""
         m = re.search(r"^BODY:\s*\n(.*)$", out, re.S | re.M)
         bb = re.search(r"^BELONGS_BECAUSE:\s*(.+)$", out.split("BODY:", 1)[0], re.M)
         return {"slug": slug, "verdict": v or "TOSS", "judged_sha": judged_sha,
