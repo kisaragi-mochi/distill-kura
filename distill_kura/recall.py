@@ -21,7 +21,7 @@ import re
 import time
 
 from . import fastpath
-from .store import Store
+from .store import LINK_TARGET, Store
 from .thinker import Endpoint
 from .tokens import estimate
 
@@ -73,11 +73,18 @@ def pick_by_words(store: Store, question: str, top: int) -> list[str]:
     Read through `_uncommented`, never the raw index. The header comment carries the
     format hint, and its EXAMPLE link (`- [Title](its-slug.md)`) matched a question
     about titles or triggers — so the degraded path handed back `its-slug`, a memory
-    that does not exist, and crowded a real one out of `top`."""
+    that does not exist, and crowded a real one out of `top`.
+
+    Link TARGETS only (`LINK_TARGET`, with its `](` anchor), never a bare
+    `(x.md)`: a prose parenthetical like `read the rules(AGENTS.md) first` is
+    not a link, and matching it made the line score for a memory that does not
+    exist while the real memory the same line names was never scored at all.
+    `known_slugs()` and `doctor` were fixed for exactly this; the degraded tier
+    had been left behind."""
     terms = _TERMS.findall(question)
     scored = []
     for line in store._uncommented(store.index_text()).splitlines():
-        m = re.search(r"\(([^)]+)\.md\)", line)
+        m = LINK_TARGET.search(line)          # the FIRST real link on the line
         if not m:
             continue
         s = sum(line.lower().count(t.lower()) for t in terms)

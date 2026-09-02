@@ -137,6 +137,24 @@ def test_known_slugs_only_counts_link_targets(tmp_path):
     assert s.doctor()["index_orphans"] == []
 
 
+def test_a_prose_parenthetical_does_not_steal_the_lines_score(tmp_path):
+    """The same `\\(([^)]+)\\.md\\)` bug, one tier down. `pick_by_words` — the path
+    taken when the thinker is unreachable — took the FIRST `(...md)` on a line, so
+    `read the rules(AGENTS.md) first` won over the line's real link: recall answered
+    with `AGENTS`, a memory that does not exist, and `real` was never scored at all."""
+    from distill_kura.recall import pick_by_words, recall
+    s = Store(name="m", path=str(tmp_path / "m")); s.init_files()
+    s.remember_direct("real", "d", "b", title="Real")
+    with open(s.index_path, "a", encoding="utf-8") as f:
+        f.write("- read the rules(AGENTS.md) first — [Forge](real.md) — the craft\n")
+    assert pick_by_words(s, "rules AGENTS craft", 3) == ["real"]
+    d = recall(s, None, "rules AGENTS craft", hops=0, fastpath_cfg={"enabled": False})
+    assert d["how"].startswith("words")
+    assert d["picked"] == ["real"] and d["walked"] == ["real"]
+    # nothing the degraded tier names may be a phantom
+    assert set(d["picked"]) <= set(s.known_slugs())
+
+
 # ── 6. commitment is a claim about the human and needs their words ───────
 
 def test_commitment_needs_the_humans_words():
