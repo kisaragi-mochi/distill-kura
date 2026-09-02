@@ -133,10 +133,9 @@ def measure(reg: Registry, mouth: dict, skip_cold: bool = False) -> dict:
     cfg = reg.prefill_cfg_for(store)
     loom = prefill_mod.loom_for(store, cfg)
     trail = prefill_mod.trail_for(store, cfg, loom=loom)
+    w, f, h = prefill_mod.budget_of(cfg)
     full = prefill_mod.build(store, loom, header=cfg.get("header"),
-                             window_tokens=int(cfg.get("window_tokens", 131072)),
-                             fraction=float(cfg.get("budget_fraction", 0.05)),
-                             hard_fraction=float(cfg.get("hard_fraction", 0.20)),
+                             window_tokens=w, fraction=f, hard_fraction=h,
                              trail=trail)
 
     raw = full.stats.get("trail", "")

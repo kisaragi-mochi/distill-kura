@@ -78,6 +78,15 @@ UNREACHABLE = ("=== {label} — long-term memory ===\n"
 # still fits. Shared with the registry's config check, so there is one list.
 RESIDENT_MODES = ("full", "auto", "constellation")
 
+# The window a resident block is sized against, and the two fractions of it: the
+# soft budget the map aims to stay under, and the hard ceiling past which the map
+# is replaced by an honest stub. One home for all three — every caller that reads
+# a `[prefill]` table used to spell them out again, so a changed default would
+# have moved some callers and not others.
+DEFAULT_WINDOW_TOKENS = 131072
+DEFAULT_BUDGET_FRACTION = 0.05
+DEFAULT_HARD_FRACTION = 0.20
+
 
 @dataclass
 class Prefill:
@@ -106,8 +115,9 @@ def _escape_braces(text: str) -> tuple[str, int]:
 
 
 def build(store: Store, loom: Loom | None = None, header: str | None = None,
-          window_tokens: int = 131072, fraction: float = 0.05,
-          hard_fraction: float = 0.20, weave: bool = True,
+          window_tokens: int = DEFAULT_WINDOW_TOKENS,
+          fraction: float = DEFAULT_BUDGET_FRACTION,
+          hard_fraction: float = DEFAULT_HARD_FRACTION, weave: bool = True,
           trail: "Trail | None" = None,
           resident_mode: str = "full") -> Prefill:
     """Assemble the resident block for one store.
@@ -256,6 +266,31 @@ def build(store: Store, loom: Loom | None = None, header: str | None = None,
 def unreachable(label: str = "the kura") -> str:
     """What a client shows when the store cannot be read. Never an empty string."""
     return UNREACHABLE.format(label=label)
+
+
+def budget_of(cfg: dict | None = None, *, window_tokens=None,
+              fraction=None) -> tuple[int, float, float]:
+    """(window_tokens, budget_fraction, hard_fraction) from a `[prefill]` table.
+
+    Overrides are raw values from a caller (a query string, a flag): None or an empty
+    string falls through to the config, which is the server's `or` semantics kept on
+    purpose — `"0"` is a real override, and garbage still raises."""
+    cfg = cfg or {}
+    return (int(window_tokens or cfg.get("window_tokens", DEFAULT_WINDOW_TOKENS)),
+            float(fraction or cfg.get("budget_fraction", DEFAULT_BUDGET_FRACTION)),
+            float(cfg.get("hard_fraction", DEFAULT_HARD_FRACTION)))
+
+
+def build_from_cfg(store: Store, loom: "Loom | None", cfg: dict | None = None, *,
+                   window_tokens=None, fraction=None, trail: "Trail | None" = None) -> Prefill:
+    """`build` driven by a `[prefill]` table. The one place the header, the three
+    budget numbers and the resident mode are read out of config, so the server, the
+    CLI and pay-forward cannot drift apart in what they build from the same store."""
+    cfg = cfg or {}
+    w, f, h = budget_of(cfg, window_tokens=window_tokens, fraction=fraction)
+    return build(store, loom, header=cfg.get("header"),
+                 window_tokens=w, fraction=f, hard_fraction=h, trail=trail,
+                 resident_mode=cfg.get("resident_mode", "full"))
 
 
 def loom_for(store: Store, cfg: dict | None = None, scribe=None) -> Loom:

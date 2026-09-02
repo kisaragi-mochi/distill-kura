@@ -742,3 +742,32 @@ def test_the_postcondition_holds_when_the_scribe_invents_a_link(tmp_path):
     assert _links_per_line(raw, loom.verbatim_after) == \
         _links_per_line(cloth.text, loom.verbatim_after)
     assert "[[g]]" not in cloth.text
+
+
+# ── the one place a `[prefill]` table becomes a block ─────────────────────────
+
+def test_budget_of_reads_the_defaults_and_lets_a_caller_override_them():
+    """The three numbers used to be spelled out at every call site, so a changed
+    default would have moved some callers and not others."""
+    from distill_kura import prefill as pf
+    assert pf.budget_of({}) == (pf.DEFAULT_WINDOW_TOKENS, pf.DEFAULT_BUDGET_FRACTION,
+                                pf.DEFAULT_HARD_FRACTION)
+    assert pf.budget_of(None) == pf.budget_of({})
+    # An empty override (an absent query string) falls through to the config; a real
+    # one wins, string or number.
+    assert pf.budget_of({"window_tokens": 4096, "budget_fraction": 0.1},
+                        window_tokens="", fraction=None) == (4096, 0.1, 0.20)
+    assert pf.budget_of({}, window_tokens="2048", fraction="0.5")[:2] == (2048, 0.5)
+
+
+def test_build_from_cfg_with_no_config_is_the_bare_build(tmp_path):
+    from distill_kura import prefill as pf
+    s = a_store(tmp_path, n_old=4)
+    assert pf.build_from_cfg(s, None, {}).etag == build(s, None).etag
+    assert pf.build_from_cfg(s, None, None).etag == build(s, None).etag
+
+
+def test_build_from_cfg_honours_the_window_in_the_config(tmp_path):
+    from distill_kura import prefill as pf
+    s = a_store(tmp_path, n_old=40)
+    assert pf.build_from_cfg(s, None, {"window_tokens": 1200}).stats["over_ceiling"] is True

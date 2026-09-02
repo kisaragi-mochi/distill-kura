@@ -145,11 +145,7 @@ def _build_prefill(reg: Registry, store: Store):
     them — in-process, never over HTTP to ourselves."""
     cfg = reg.prefill_cfg_for(store)
     loom = prefill_mod.loom_for(store, cfg)
-    return prefill_mod.build(store, loom, header=cfg.get("header"),
-                             window_tokens=int(cfg.get("window_tokens", 131072)),
-                             fraction=float(cfg.get("budget_fraction", 0.05)),
-                             hard_fraction=float(cfg.get("hard_fraction", 0.20)),
-                             resident_mode=cfg.get("resident_mode", "full"))
+    return prefill_mod.build_from_cfg(store, loom, cfg)
 
 
 def _probe(base: str, mouth: dict, map_text: str,

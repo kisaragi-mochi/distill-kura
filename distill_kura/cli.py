@@ -476,12 +476,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if r.get("written") else 2
 
         if a.cmd == "prefill":
-            pf = prefill_mod.build(store, loom, header=cfg.get("header"),
-                                   window_tokens=int(cfg.get("window_tokens", 131072)),
-                                   fraction=float(cfg.get("budget_fraction", 0.05)),
-                                   hard_fraction=float(cfg.get("hard_fraction", 0.20)),
-                                   trail=prefill_mod.trail_for(store, cfg, loom=loom),
-                                   resident_mode=cfg.get("resident_mode", "full"))
+            pf = prefill_mod.build_from_cfg(
+                store, loom, cfg, trail=prefill_mod.trail_for(store, cfg, loom=loom))
             if a.json:
                 print(json.dumps(pf.as_dict(), ensure_ascii=False))
             else:
@@ -527,8 +523,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         from .weave import WeaveError
         try:
-            cloth = loom.fit(window_tokens=int(cfg.get("window_tokens", 131072)),
-                             fraction=float(cfg.get("budget_fraction", 0.05)))
+            w, f, _ = prefill_mod.budget_of(cfg)
+            cloth = loom.fit(window_tokens=w, fraction=f)
         except WeaveError as e:
             sys.exit(f"weave refused to write: {e}")
         # `fit` already wove with the model; persist exactly that text.

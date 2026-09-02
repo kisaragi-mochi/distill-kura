@@ -137,14 +137,10 @@ def _make_handler(reg: Registry):
             if path.startswith("/prefill"):
                 cfg = reg.prefill_cfg_for(st)
                 loom = prefill_mod.loom_for(st, cfg)
-                pf = prefill_mod.build(
-                    st, loom,
-                    header=cfg.get("header"),
-                    window_tokens=int(q.get("window") or cfg.get("window_tokens", 131072)),
-                    fraction=float(q.get("fraction") or cfg.get("budget_fraction", 0.05)),
-                    hard_fraction=float(cfg.get("hard_fraction", 0.20)),
-                    trail=prefill_mod.trail_for(st, cfg, loom=loom),
-                    resident_mode=cfg.get("resident_mode", "full"))
+                pf = prefill_mod.build_from_cfg(
+                    st, loom, cfg,
+                    window_tokens=q.get("window"), fraction=q.get("fraction"),
+                    trail=prefill_mod.trail_for(st, cfg, loom=loom))
                 # The map is the largest thing this server hands out and it changes a
                 # few times a day, while clients re-read it every couple of minutes.
                 inm = (self.headers.get("If-None-Match") or "").strip('"')
