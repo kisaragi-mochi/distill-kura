@@ -57,7 +57,7 @@ withdrawn or superseded — and only when that transition is VERIFIED (the human
 own words passed the gate; never a guess from prose) — the OLD memory's own trigger
 says so, first: "退役: …／現在は [[new-way]]" or "superseded: … now [[new-way]]".
 The old memory is never hidden and never dressed as current. That is a fact about
-the world's state, not an importance score and not forgetting.
+the world's state — not a weight of importance, and not forgetting.
 """
 
 SPOT_SYS = """You read a raw journal between a human and an AI agent, and pick out what
