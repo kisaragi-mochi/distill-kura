@@ -176,7 +176,11 @@ def _make_handler(reg: Registry):
                     "store": st.name, "label": st.label,
                     "persona_path": st.persona,
                     "persona_exists": bool(st.persona and os.path.exists(st.persona)),
-                    "charter": (open(st.charter, encoding="utf-8").read() if st.charter else ""),
+                    # Guarded like the distiller reads it (pipeline.py): a `charter`
+                    # configured to a path that is not there is a config mistake, and
+                    # answering "" for it beats dropping the whole /profile request.
+                    "charter": (open(st.charter, encoding="utf-8").read()
+                                if st.charter and os.path.exists(st.charter) else ""),
                     # The learned profile, with its state: a host that wants to show
                     # or inject it can; "absent" and "broken" are distinguishable.
                     "learned_profile": {**st.profile_state(), "text": st.profile_text()},

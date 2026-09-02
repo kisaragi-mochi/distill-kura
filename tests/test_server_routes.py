@@ -101,3 +101,19 @@ def test_a_post_body_that_is_not_json_is_a_400_that_says_so(tmp_path):
             assert json.loads(e.read()) == {"error": "bad json"}
     finally:
         srv.shutdown()
+
+
+def test_profile_survives_a_charter_configured_at_a_path_that_is_not_there(tmp_path):
+    """A `charter` pointing at a missing file is a config mistake; it used to take the
+    whole request down with an OSError, which reads to a client as the server dying."""
+    s = Store(name="s", path=str(tmp_path / "s"), label="the kura",
+              charter=str(tmp_path / "nowhere" / "charter.md"))
+    s.init_files()
+    reg = Registry(stores={"s": s}, modes={}, models=Models.from_config({}), default="s")
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(reg))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, _, body = get(f"http://127.0.0.1:{srv.server_address[1]}/profile")
+        assert code == 200 and json.loads(body)["charter"] == ""
+    finally:
+        srv.shutdown()
