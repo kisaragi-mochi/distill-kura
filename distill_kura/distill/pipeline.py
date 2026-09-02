@@ -1,12 +1,16 @@
 """The distiller: raw journal in, one drop of memory out.
 
-    sip    read past the watermark, tagging every segment with its evidence class
-    spot   the BRAIN reads the batch and names what deserves to be remembered
-    gate   deterministic Python verifies every quote (see gate.py) — no model here
-    check  is the store already saying this? COVERED / EXTENDS / NEW
-    write  the SCRIBE composes the memory in the store's language
-    stage  it lands in _still/drafts/ — a draft is NOT yet a memory
-    drain  the scribe re-reads each draft cold and decides POUR / FIX / TOSS
+    sip      read past the watermark, tagging every segment with its evidence class
+    spot     the BRAIN reads the batch and names what deserves to be remembered
+    gate     deterministic Python verifies every quote (see gate.py) — no model here
+    novelty  is the store already saying this? COVERED / EXTENDS / NEW
+    compose  the SCRIBE writes the memory in the store's language
+    stage    it lands in _still/drafts/ — a draft is NOT yet a memory
+    pour     the scribe re-reads each draft cold and decides POUR / FIX / TOSS
+    tidy     index hygiene: mechanically detectable rot in the index is re-written
+
+Section banners ②…⑧ below follow this order. ① sip is `sip_one`, under "the pass";
+③ gate is gate.py, where no model runs.
 
 Why the last step exists at all: if a human has to read the drafts, the system has
 quietly made the human its bottleneck, and drafts pile up forever. Nothing in the
@@ -537,7 +541,6 @@ class Distiller:
         return self._draft_record(c, out or "", slug=target, title="", description="",
                                   body=text.strip(), extends=target)
 
-    # ── ⑥ stage ──────────────────────────────────────────────────────────
     # ── provenance that outlives the draft ───────────────────────────────
     #
     # The draft carries its evidence in a comment, and the draft is renamed `.poured`
@@ -617,6 +620,7 @@ class Distiller:
         except OSError:
             return ""
 
+    # ── ⑥ stage ──────────────────────────────────────────────────────────
     def stage(self, d: dict, source: str) -> str:
         # Two candidates can compose to one slug (two Japanese titles reach the same
         # fallback name, or two English ones sanitise alike), and staging straight to
@@ -661,7 +665,6 @@ class Distiller:
         d["slug"] = staged
         return p
 
-    # ── ⑦ pour ───────────────────────────────────────────────────────────
     # ── the gate's mark ──────────────────────────────────────────────────
     #
     # `distiller-only` has to mean "this text passed the evidence gate", and file
@@ -718,6 +721,7 @@ class Distiller:
         kind, man, mark = env
         return hmac.compare_digest(mark, self._mark(slug, kind, man, self._draft_body(raw)))
 
+    # ── ⑦ pour / drain ────────────────────────────────────────────────────
     def pour(self, slug: str) -> dict:
         # A draft is named by a bare slug. Joined as a path, `../../../out/o` read a file
         # from anywhere on the filesystem into the store and renamed the original.
