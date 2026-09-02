@@ -1236,13 +1236,19 @@ class Store:
         except (OSError, ValueError, AttributeError, TypeError):
             return {"alive": False, "why": "heartbeat unreadable"}
         alive = age < stale_after_s
+        gone = False
         if alive and pid:
             try:
                 os.kill(pid, 0)
             except OSError:
-                alive = False
+                alive, gone = False, True
+        # Say WHICH of the two deaths this is. A watcher killed a second ago has a
+        # perfectly fresh heartbeat, and "last heartbeat 0 s ago" sent the reader
+        # looking at the clock instead of at the process table.
+        why = "" if alive else (f"heartbeat is {int(age)} s old but pid {pid} is gone"
+                                if gone else f"last heartbeat {int(age)} s ago")
         return {"alive": alive, "age_s": int(age), "pid": pid, "running": d.get("running") or "",
-                "done": d.get("done") or {}, "why": "" if alive else f"last heartbeat {int(age)} s ago"}
+                "done": d.get("done") or {}, "why": why}
 
     # ── read log (append-only; NEVER used for ranking) ───────────────────
     def note_read(self, names: list[str], why: str = "recall") -> None:

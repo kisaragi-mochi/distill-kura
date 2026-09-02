@@ -166,3 +166,32 @@ def test_every_wal_payload_and_the_intent_are_fsynced_before_the_rename(tmp_path
     assert sum(1 for p in files if "payload-" in p) == 2
     assert sum(1 for p in files if p.endswith("intent.json")) == 1
     assert sum(1 for p in files if ".tmp." in p) >= 2
+
+
+def test_quarantining_the_same_txid_twice_keeps_both(tmp_path, monkeypatch):
+    """The collision suffix exists so the second broken transaction under a name does
+    not silently erase the first — the debris IS the evidence. Nothing exercised it."""
+    s = make(tmp_path)
+    crash_during_write(s, monkeypatch, "never-lands", after_memory=False)
+    wal = os.path.join(s.still, "wal")
+    (txid,) = os.listdir(wal)
+    with open(os.path.join(wal, txid, "payload-0"), "ab") as f:
+        f.write(b"bitrot")
+    quarantine = os.path.join(s.still, "wal-quarantine")
+    s2 = Store(name="t", path=s.path)
+    assert s2.doctor()["broken_wal"] == [txid]
+    # the same txid turns up broken a second time
+    shutil.copytree(os.path.join(quarantine, txid), os.path.join(wal, txid))
+    d = Store(name="t", path=s.path).doctor()
+    kept = sorted(os.listdir(quarantine))
+    assert len(kept) == 2 and kept[0] == txid
+    assert kept[1].startswith(txid + ".") and kept[1][len(txid) + 1:].isdigit()
+    assert d["broken_wal"] == kept
+
+
+def test_fsync_dir_is_best_effort_and_never_takes_a_write_down(tmp_path, monkeypatch):
+    """Some filesystems (CIFS) cannot fsync a directory. Refusing the write over that
+    would trade a crash window for an outage — the atomic replace still holds."""
+    assert Store._fsync_dir(str(tmp_path / "does-not-exist")) is None
+    monkeypatch.setattr(os, "fsync", lambda fd: (_ for _ in ()).throw(OSError("no")))
+    assert Store._fsync_dir(str(tmp_path)) is None

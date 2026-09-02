@@ -386,3 +386,20 @@ def test_child_tracks_carry_the_config_the_registry_resolved_not_the_bare_flag(t
     assert seen["config_path"] == cfg                       # not None: a.config was unset
     t = Tender(reg, reg.store("m"), seen["config_path"])
     assert t._cmd("tidy")[3:5] == ["-c", cfg]
+
+
+def test_a_fresh_heartbeat_from_a_dead_pid_is_not_alive_and_says_which_death(tmp_path):
+    """The other way a watcher dies: the heartbeat is seconds old and the process is
+    gone. Only the ageing-out death was tested, and `why` used to report the clock —
+    "last heartbeat 0 s ago" — which sends the reader looking in the wrong place."""
+    reg, st, cfg, j = build(tmp_path)
+    Tender(reg, st, cfg, idle_min=10).tick(0.0)
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    dead = proc.pid                      # reaped: the pid is gone, not a zombie
+    p = os.path.join(st.still, "tend.json")
+    d = json.load(open(p)); d["at"] = time.time(); d["pid"] = dead
+    json.dump(d, open(p, "w"))
+    state = st.tend_state()
+    assert state["alive"] is False and state["age_s"] == 0
+    assert f"pid {dead} is gone" in state["why"]

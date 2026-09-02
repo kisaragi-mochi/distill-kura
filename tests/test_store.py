@@ -266,13 +266,28 @@ def test_a_wal_intent_naming_a_store_kept_file_is_quarantined(tmp_path):
 
     assert s._wal_intact(forge("00000000000000000001-1", "charter.md")) is None
     assert s._wal_intact(forge("00000000000000000002-1", "memory.md")) is None
+    # path-shaped targets are the other half of the same rule: a name with a
+    # directory in it is one `_write` could never have produced either
+    for i, target in enumerate(("../x.md", "sub/x.md", "README.md"), start=3):
+        assert s._wal_intact(forge(f"0000000000000000000{i}-1", target)) is None
+    # and the payload is read from the txdir by basename, never by a path
+    txdir = forge("00000000000000000009-1", "ok.md")
+    with open(os.path.join(txdir, "intent.json"), encoding="utf-8") as f:
+        forged = json.load(f)
+    forged["files"][0]["payload"] = "../payload-0"
+    with open(os.path.join(txdir, "intent.json"), "w", encoding="utf-8") as f:
+        json.dump(forged, f)
+    assert s._wal_intact(txdir) is None
     rep = s._wal_replay()
     assert rep["replayed"] == []
-    assert rep["quarantined"] == ["00000000000000000001-1", "00000000000000000002-1"]
+    assert rep["quarantined"] == [f"0000000000000000000{i}-1" for i in (1, 2, 3, 4, 5, 9)]
     assert open(charter, encoding="utf-8").read() == "the real charter\n"
     assert not os.path.exists(os.path.join(s.path, "memory.md"))
     assert s.revision() != 99                       # the counter did not honour the promise
     assert s.doctor()["broken_wal"] == rep["quarantined"]     # loud, not swept up
+    assert not os.path.exists(os.path.join(tmp_path, "x.md"))     # nothing escaped
+    assert not os.path.exists(os.path.join(s.path, "sub"))
+
     # One predicate, both doors: every name the writer refuses is a name replay refuses.
     for slug in ("charter", "memory", "MEMORY", "profile"):
         assert not s.remember(slug, "d", "b")["ok"], slug
@@ -334,3 +349,55 @@ def test_a_grouped_index_line_is_not_rewritten_and_says_so(tmp_path):
     assert r["ok"] and r["indexed"] is False
     assert s.index_text() == before          # the siblings are not swallowed
     assert "new body" in s.read("fact")
+
+
+def test_a_lost_first_boot_race_reads_the_winners_key(tmp_path, monkeypatch):
+    """Two workers boot a store at once. The loser of the O_EXCL race must read the
+    winner's key, not mint a second one — a second key orphans every mark the first
+    one signed. The FileExistsError branch had no test."""
+    s = make(tmp_path)
+    key_path = os.path.join(s.still, "gate.key")
+    os.remove(key_path) if os.path.exists(key_path) else None
+    winner = b"W" * 32
+    real_open = os.open
+    raced = []
+
+    def racing_open(path, flags, *a, **kw):
+        if flags & os.O_EXCL:
+            raced.append(path)
+            with open(path, "wb") as f:      # the winner got there first
+                f.write(winner)
+            raise FileExistsError(path)
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(os, "open", racing_open)
+    assert s.gate_key() == winner
+    assert len(raced) == 1
+
+
+def test_a_racer_that_leaves_a_short_key_is_refused_not_papered_over(tmp_path, monkeypatch):
+    """The post-loop raise: two lost races, the second leaving a truncated file. It
+    must say so rather than hand back a key nothing will verify against."""
+    s = make(tmp_path)
+    key_path = os.path.join(s.still, "gate.key")
+    os.remove(key_path) if os.path.exists(key_path) else None
+    real_open = os.open
+    attempts = []
+
+    def racing_open(path, flags, *a, **kw):
+        if flags & os.O_EXCL:
+            attempts.append(path)
+            if len(attempts) == 2:
+                with open(path, "wb") as f:
+                    f.write(b"short")
+            raise FileExistsError(path)
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(os, "open", racing_open)
+    try:
+        s.gate_key()
+    except RuntimeError as e:
+        assert "unreadable after creation" in str(e)
+    else:
+        raise AssertionError("a truncated key must not be handed back")
+    assert len(attempts) == 2
