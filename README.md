@@ -392,8 +392,10 @@ physical duplicate can still require deduplication; see the install checks in
 bound to it — no `kura_use`, no drifting mid-conversation — and only an explicit
 `allowSwitch: true` reopens that door. Name no store and the session is free: every
 tool takes a `store` argument and `kura_use` switches for the session. Tools: `kura_recall`,
-`kura_read`, `kura_doctor`, `kura_list`, `kura_use`, and `kura_remember` (only when the
-store is writable). Full wiring, including the MCP bridge and the `isolate` realm rule
+`kura_read`, `kura_doctor`, and `kura_map` (while `prefill` is on — the default);
+`kura_list` unless the preset is bound; `kura_use` only when the session is switchable;
+and `kura_remember` only when the plugin's `readonly` is `false` — and even then the
+store's `write_policy` has the last word. Full wiring, including the MCP bridge and the `isolate` realm rule
 for service rows, is in [`examples/dsh-presets/`](examples/dsh-presets/).
 
 **Persona is the host's business, not ours.** This project never renders or injects a
