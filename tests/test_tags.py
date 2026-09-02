@@ -213,6 +213,16 @@ def test_doctor_reports_a_manifest_the_memory_points_at_but_which_is_gone(tmp_pa
     assert s.doctor()["missing_manifest"] == []
 
 
+def test_doctor_reports_a_manifest_pointer_that_is_not_even_a_digest(tmp_path):
+    """A pointer that is not `sha256:<64 hex>` can never be looked up, so it is neither
+    missing nor tampered — it has its own doctor key, and nothing exercised it."""
+    s = make(tmp_path)
+    s.pour_verified("m", "d", "b", meta={"evidence_manifest": "not-a-digest"})
+    d = s.doctor()
+    assert d["invalid_manifest_pointer"] == ["m"]
+    assert d["missing_manifest"] == [] and d["tampered_manifest"] == []
+
+
 def test_doctor_observes_capacity_in_four_units_and_decides_nothing(tmp_path):
     """The unit a shelf is measured in has not been chosen. Reporting all four keeps
     that choice open; `limit` and `pressure` stay None until a person sets them."""

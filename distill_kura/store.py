@@ -478,7 +478,11 @@ class Store:
 
     def tag_problems(self, slug: str) -> str | None:
         """Why `tags(slug)` would be empty when the file says otherwise, or None."""
-        raw = self.frontmatter(slug).get("tags")
+        return self._tag_problem_of(self.frontmatter(slug))
+
+    @staticmethod
+    def _tag_problem_of(fm: dict) -> str | None:
+        raw = fm.get("tags")
         if not raw:
             return None
         try:
@@ -660,13 +664,20 @@ class Store:
         s = self.resolve_exact(slug)
         if not s:
             return "none"
-        tags, ann = self.tags(s), self.annotations(s)
-        if not tags and not ann and not self.tag_problems(s):
+        return self._curation_state_of(s, self.frontmatter(s))
+
+    def _curation_state_of(self, slug: str, fm: dict) -> str:
+        """`curation_state` over frontmatter already parsed. The slug is exact — the
+        mark is an HMAC over it — and every value comes from ONE snapshot of the file,
+        so a write landing mid-read cannot make the tags and the mark disagree."""
+        tags, ann = self._tags_of(fm), self._annotations_of(fm)
+        if not tags and not ann and not self._tag_problem_of(fm):
             return "none"
-        mark = self.frontmatter(s).get("curation_mark", "")
+        mark = fm.get("curation_mark", "")
         if not mark:
             return "unsigned"
-        return "verified" if hmac.compare_digest(mark, self._curation_mark(s, tags, ann)) else "tampered"
+        return ("verified" if hmac.compare_digest(mark, self._curation_mark(slug, tags, ann))
+                else "tampered")
 
     # ── annotating: tags and the three sentences, without touching the body ──
     #
@@ -1280,6 +1291,10 @@ class Store:
         broken_wal = (sorted(os.listdir(self._wal_quarantine))
                       if os.path.isdir(self._wal_quarantine) else [])
         files = {s: self.read(s) for s in self.slugs()}
+        # Parsed ONCE per memory. Every field below used to re-read and re-resolve the
+        # same file (seven opens each), and two fields read at different moments could
+        # describe two different versions of it.
+        fms = {n: self._frontmatter_of(t) for n, t in files.items()}
         out: dict[str, set[str]] = {}
         back: dict[str, set[str]] = {}
         dead: list[str] = []
@@ -1296,12 +1311,12 @@ class Store:
         # Tag and annotation rot, named per memory. `tags()` answers "none" for a line it
         # cannot read, which is the right answer for a reader and the wrong one for an
         # operator — so the reason is surfaced here, where someone is looking for it.
-        invalid_tags = {n: why for n in files if (why := self.tag_problems(n))}
+        invalid_tags = {n: why for n, fm in fms.items() if (why := self._tag_problem_of(fm))}
         missing_manifest = []
         tampered_manifest = []
         invalid_manifest_pointer = []
         for n in files:
-            fm = self.frontmatter(n)
+            fm = fms[n]
             # Every provenance pointer is audited, not just the newest one:
             # evidence_manifest moves with each EXTENDS, origin_manifest is pinned,
             # recurred_manifest marks another occasion — any of them broken is a
@@ -1321,7 +1336,7 @@ class Store:
                     if n not in tampered_manifest:
                         tampered_manifest.append(n)
         body_tokens = sum(estimate(self._split(t)[1]) for t in files.values())
-        cur = {n: self.curation_state(n) for n in files}
+        cur = {n: self._curation_state_of(n, fms[n]) for n in files}
         unsigned = sorted(n for n, c in cur.items() if c == "unsigned")
         con = constellation.check(self)
         edge_map = _edges.current(self)
@@ -1365,7 +1380,7 @@ class Store:
             "tampered_manifest": tampered_manifest,
             "invalid_manifest_pointer": invalid_manifest_pointer,
             "missing_manifest": sorted(missing_manifest),
-            "tagged": sum(1 for n in files if self.tags(n)),
+            "tagged": sum(1 for fm in fms.values() if self._tags_of(fm)),
             # Who wrote the curation. `tampered` is always named. `unsigned` is named
             # only where nobody but the gate should be writing — on a direct-allowed
             # store a hand-written tag is the normal case and listing it would be noise.
