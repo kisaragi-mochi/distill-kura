@@ -221,12 +221,12 @@ class Store:
         p = self.index_path
         return open(p, encoding="utf-8", errors="ignore").read() if os.path.exists(p) else ""
 
-    def slugs(self) -> list[str]:
-        """Every memory this store holds.
-
-        A file whose real path leaves the store — a symlink pointing elsewhere — is not
-        a memory of this store and is left out, so no lookup can reach it. `doctor()`
-        reports what was excluded: dropping it silently would be its own failure."""
+    def _candidates(self) -> list[tuple[str, str]]:
+        """(slug, path) for every file that looks like a memory, BEFORE the containment
+        check. `slugs()` keeps the ones that resolve inside the store, `escaping()`
+        reports the rest — they are the two halves of one question, and the glob /
+        RESERVED / `_`-prefix rules live here so an edit to one half cannot leave the
+        other half describing a different store."""
         found = [(os.path.basename(p)[:-3], p)
                  for p in glob.glob(os.path.join(self.path, "*.md"))
                  if os.path.basename(p) not in RESERVED and not os.path.basename(p).startswith("_")]
@@ -234,7 +234,15 @@ class Store:
                   for p in glob.glob(os.path.join(self.path, "_study", "*.md"))
                   if not os.path.basename(p).startswith("_")
                   and os.path.basename(p) not in RESERVED]
-        return sorted(name for name, p in found if contained(self.path, p))
+        return found
+
+    def slugs(self) -> list[str]:
+        """Every memory this store holds.
+
+        A file whose real path leaves the store — a symlink pointing elsewhere — is not
+        a memory of this store and is left out, so no lookup can reach it. `doctor()`
+        reports what was excluded: dropping it silently would be its own failure."""
+        return sorted(n for n, p in self._candidates() if contained(self.path, p))
 
     def hardlinked(self) -> list[str]:
         """Memories whose file has another name somewhere else on the filesystem.
@@ -265,14 +273,7 @@ class Store:
 
     def escaping(self) -> list[str]:
         """Files that look like memories but resolve outside the store."""
-        found = [(os.path.basename(p)[:-3], p)
-                 for p in glob.glob(os.path.join(self.path, "*.md"))
-                 if os.path.basename(p) not in RESERVED and not os.path.basename(p).startswith("_")]
-        found += [("_study/" + os.path.basename(p)[:-3], p)
-                  for p in glob.glob(os.path.join(self.path, "_study", "*.md"))
-                  if not os.path.basename(p).startswith("_")
-                  and os.path.basename(p) not in RESERVED]
-        return sorted(name for name, p in found if not contained(self.path, p))
+        return sorted(n for n, p in self._candidates() if not contained(self.path, p))
 
     @staticmethod
     def _uncommented(text: str) -> str:
