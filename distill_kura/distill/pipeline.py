@@ -823,9 +823,61 @@ class Distiller:
                         _log(f"  ⚠ cue receipt refused for {slug_out} — {res['why']}")
             if cue_receipt != "none":
                 r["cue_receipt"] = cue_receipt
+            # The memory that replaces one exists only now, so this is the earliest
+            # moment a retirement can point anywhere. An EXTENDS pours INTO the old
+            # memory — there is no successor to point at — so it never retires.
+            if man and not head.get("EXTENDS"):
+                ret = self._retire_if_superseded(slug_out, man.group(1).split("sha256:", 1)[-1])
+                if ret is not None:
+                    r["retired"] = ret.get("old") if ret.get("ok") else False
         # `created` already means "the file did not exist"; naming the slug here too
         # overwrote that answer with a string.
         return {**r, "poured_into": slug_out, "extended": bool(head.get("EXTENDS"))}
+
+    # ── the retirement face: a poured memory can retire the one it replaces ──
+    #
+    # The gate refuses `superseded` as a TAG — it is reserved for a forgetting pass
+    # nobody has designed, and a model may not assign it. That refusal is recorded,
+    # and the record is the signal: the reader saw a supersede and was not allowed to
+    # act on it. What may act on it is evidence — a surviving [USER] quote that names
+    # a memory the store actually holds. Both halves must be there, and `Store.retire`
+    # re-verifies the second one from the manifest itself; nothing here is trusted.
+    @staticmethod
+    def _claims_supersede(man: dict) -> bool:
+        return "superseded" in (list(man.get("tags") or [])
+                                + list((man.get("tags_refused") or {}).keys()))
+
+    def _retirement_target(self, man: dict, new_slug: str) -> str | None:
+        """The memory a [USER] quote in this manifest names as the retired one.
+
+        The longest match wins, so `k3-plan` is never retired because a quote happened
+        to mention `k3`. No match, or the new memory itself, is no retirement — the
+        distiller stays silent rather than guessing which memory the human meant."""
+        quotes = " ".join(str(q.get("text") or "") for q in (man.get("quotes") or [])
+                          if isinstance(q, dict) and q.get("class") == "USER")
+        if not quotes:
+            return None
+        low = quotes.lower()
+        names = [(sl, sl) for sl in self.store.slugs()]
+        names += [(sl, t) for t, sl in self.store.titles().items()]
+        hits = [(len(name), sl) for sl, name in names
+                if sl != new_slug and name and name.lower() in low]
+        return max(hits)[1] if hits else None
+
+    def _retire_if_superseded(self, new_slug: str, hexd: str) -> dict | None:
+        """→ the retirement result, or None when nothing was claimed."""
+        man = self.store.load_manifest_verified(hexd)
+        if not man or not self._claims_supersede(man):
+            return None
+        old = self._retirement_target(man, new_slug)
+        if not old:
+            return None
+        r = self.store.retire(old, new_slug, hexd)
+        if r.get("ok") and r.get("changed"):
+            _log(f"  ⌛ retired {old} — superseded by {new_slug}")
+        elif not r.get("ok"):
+            _log(f"  ⚠ not retired {old} — {r.get('error')}")
+        return r
 
     def judge_draft(self, path: str) -> dict:
         raw = open(path, encoding="utf-8").read()
@@ -904,11 +956,11 @@ class Distiller:
             _log(f"  ⊘ quarantine {s0} — no valid mark for its current name; never judged")
         ds = signed
         if not ds:
-            return {"ok": True, "poured": 0, "fixed": 0, "tossed": 0,
+            return {"ok": True, "poured": 0, "fixed": 0, "tossed": 0, "retired": 0,
                     "quarantined": len(pre_quarantined),
                     "left": len(glob.glob(os.path.join(self.drafts_dir, "*.md")))}
         _log(f"drain: {len(ds)} drafts, {self.slots} at a time")
-        poured, fixed, tossed = [], [], []
+        poured, fixed, tossed, retired = [], [], [], []
         skipped, unparsed = [], []          # not verdicts: left staged, loudly
         quarantined = pre_quarantined
         with ThreadPoolExecutor(max_workers=self.slots) as pool:
@@ -979,15 +1031,22 @@ class Distiller:
                     fixed.append(j["slug"])
                     _log(f"  ✎ fix  {j['slug']} — {j['why'][:70]}")
                 r = self.pour(j["slug"])
+                if r.get("retired"):
+                    retired.append(r["retired"])
                 if r.get("ok"):
                     poured.append(j["slug"])
                     _log(f"  ○ pour {j['slug']}")
                 else:
                     _log(f"  ⚠ not poured {j['slug']} — {r.get('why') or r.get('error')}")
-        return {"ok": True, "poured": len(poured), "fixed": len(fixed), "tossed": len(tossed),
-                "quarantined": len(quarantined), "skipped": len(skipped),
-                "fix_unparsed": len(unparsed),
-                "left": len(glob.glob(os.path.join(self.drafts_dir, "*.md")))}
+        out = {"ok": True, "poured": len(poured), "fixed": len(fixed), "tossed": len(tossed),
+               "quarantined": len(quarantined), "skipped": len(skipped),
+               "fix_unparsed": len(unparsed), "retired": len(retired),
+               "left": len(glob.glob(os.path.join(self.drafts_dir, "*.md")))}
+        # A transition is a change to canonical the run's numbers must carry: a face
+        # appearing on the map with nothing in the metrics is a change nobody can add up.
+        self._metric({"op": "drain", **{k: v for k, v in out.items() if k != "ok"},
+                      "retired_slugs": retired})
+        return out
 
     # ── ⑧ index hygiene ──────────────────────────────────────────────────
     @staticmethod

@@ -265,3 +265,111 @@ def test_the_floors_accept_a_faced_trigger(tmp_path):
     # And the guard it exists for still bites: the same cut without the face.
     faceless = trigger.split("／")[0].removeprefix("退役: ")
     assert floors.first_violation(faceless, "k3-plan", desc, loom) == "retirement word dropped"
+
+
+# ── the distiller's own path ────────────────────────────────────────────────
+#
+# Built through the pipeline's own `_write_manifest` and `stage`, never a hand-made
+# hash: the point of these is that the REAL path fires, and a fixture that mints its
+# own provenance proves nothing about it.
+
+def a_distiller(tmp_path, store):
+    from distill_kura.distill.pipeline import Distiller
+    from distill_kura.registry import Registry
+    from distill_kura.thinker import Models
+
+    models = Models.from_config({"thinker": {"url": "http://127.0.0.1:9/v1", "model": "none"}})
+    reg = Registry(stores={store.name: store}, modes={}, models=models, default=store.name,
+                   raw={"distill": {"journals": {"claude": str(tmp_path)}}})
+    return Distiller(reg, store)
+
+
+def stage_and_pour(tmp_path, dis, evidence, classes, slug="newer-way"):
+    src = tmp_path / "journal.jsonl"
+    src.write_text("{}\n", encoding="utf-8")
+    dis._current_key = "test:retire"
+    d = {"slug": slug, "kind": "project", "title": "the newer way",
+         "description": "what we do instead now", "body": "BODY",
+         "evidence": evidence, "classes": classes,
+         "tags": [], "tag_basis": {},
+         # exactly what the gate leaves behind: `superseded` is proposed and REFUSED
+         "tags_refused": {"superseded": "reserved for the forgetting pass; "
+                                        "a model may not assign it"}}
+    dis.stage(d, str(src))
+    return dis.pour(d["slug"])
+
+
+def test_the_distiller_retires_on_the_humans_own_words(tmp_path):
+    s = a_store(tmp_path, policy="distiller-only")
+    dis = a_distiller(tmp_path, s)
+    r = stage_and_pour(tmp_path, dis,
+                       [{"class": "USER", "text": "stop using old-way — we do the newer way now"}],
+                       ["USER"])
+    assert r["ok"] and r["retired"] == "old-way"
+    assert Store.is_faced(hook_of(s, "old-way")) and "[[newer-way]]" in hook_of(s, "old-way")
+
+
+def test_the_agents_own_prose_retires_nothing(tmp_path):
+    """A [SELF] quote is the agent talking about the store. If that could retire a
+    memory, the store would be able to retire itself by narrating."""
+    s = a_store(tmp_path, policy="distiller-only")
+    dis = a_distiller(tmp_path, s)
+    r = stage_and_pour(tmp_path, dis,
+                       [{"class": "SELF", "text": "I read old-way as finished; this replaces it"},
+                        {"class": "TOOL", "text": "old-way.sh: No such file or directory"}],
+                       ["SELF", "TOOL"])
+    assert r["ok"] and not r.get("retired")
+    assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_a_pour_that_names_no_existing_memory_retires_nothing(tmp_path):
+    s = a_store(tmp_path, policy="distiller-only")
+    dis = a_distiller(tmp_path, s)
+    r = stage_and_pour(tmp_path, dis,
+                       [{"class": "USER", "text": "stop doing it the way we used to, this is better"}],
+                       ["USER"])
+    assert r["ok"] and not r.get("retired")
+    assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_a_pour_with_no_supersede_claim_retires_nothing(tmp_path):
+    """The [USER] quote names the old memory — people talk about their memories all
+    the time. Without the reader's supersede claim, nothing on the map moves."""
+    s = a_store(tmp_path, policy="distiller-only")
+    dis = a_distiller(tmp_path, s)
+    src = tmp_path / "journal.jsonl"
+    src.write_text("{}\n", encoding="utf-8")
+    dis._current_key = "test:retire"
+    d = {"slug": "newer-way", "kind": "project", "title": "the newer way",
+         "description": "what we do instead now", "body": "BODY",
+         "evidence": [{"class": "USER", "text": "old-way is what got us here, remember"}],
+         "classes": ["USER"], "tags": [], "tag_basis": {}, "tags_refused": {}}
+    dis.stage(d, str(src))
+    assert dis.pour(d["slug"])["ok"]
+    assert not Store.is_faced(hook_of(s, "old-way"))
+
+
+def test_the_drain_counts_the_transition_in_its_metrics_row(tmp_path):
+    """A face appearing on the map with nothing in the metrics is a change to
+    canonical that nobody can add up afterwards."""
+    s = a_store(tmp_path, policy="distiller-only")
+    dis = a_distiller(tmp_path, s)
+    src = tmp_path / "journal.jsonl"
+    src.write_text("{}\n", encoding="utf-8")
+    dis._current_key = "test:retire"
+    dis.stage({"slug": "newer-way", "kind": "project", "title": "the newer way",
+               "description": "what we do instead now", "body": "BODY",
+               "evidence": [{"class": "USER",
+                             "text": "stop using old-way — we do the newer way now"}],
+               "classes": ["USER"], "tags": [], "tag_basis": {},
+               "tags_refused": {"superseded": "reserved for the forgetting pass"}},
+              str(src))
+    dis.judge_draft = lambda p: {"slug": os.path.basename(p)[:-3], "verdict": "POUR",
+                                 "why": "scripted", "judged_sha": None}
+    out = dis.drain()
+    assert out["poured"] == 1 and out["retired"] == 1
+    assert Store.is_faced(hook_of(s, "old-way"))
+    rows = [json.loads(l) for l in
+            open(os.path.join(s.still, "metrics.jsonl"), encoding="utf-8")]
+    assert rows[-1]["op"] == "drain" and rows[-1]["retired"] == 1
+    assert rows[-1]["retired_slugs"] == ["old-way"]
