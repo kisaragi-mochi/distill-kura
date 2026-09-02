@@ -331,7 +331,7 @@ class Distiller:
             return {"ok": False, "why": "the model did not keep the shape (no heading first)"}
         # The same check the store applies on read: a draft that would be refused as
         # a profile is refused as a draft, and the reason is in the answer.
-        probe_state = _probe_profile(self.store, out)
+        probe_state = self.store.profile_check(out)
         if probe_state["state"] != "present":
             return {"ok": False, "why": f"draft refused: {probe_state['why']}"}
         tmp = os.path.join(self.still, "profile.draft.md")
@@ -1240,16 +1240,6 @@ class Distiller:
                 _log(f"  {self.drain()}")
             except Exception as e:       # a bad pass must not end the watch
                 _log(f"  pass failed: {type(e).__name__}: {e}")
-
-
-def _probe_profile(store: Store, text: str) -> dict:
-    """Apply the store's own profile check to a text that is not on disk yet."""
-    for rx, why in ((store._PROFILE_TABLE, "looks like a table of numbers, not sentences"),
-                    (store._PROFILE_SCORE, "carries a score or weight")):
-        m = rx.search(text)
-        if m:
-            return {"state": "broken", "why": f"{why}: {m.group(0).strip()[:60]!r}"}
-    return {"state": "present", "why": ""}
 
 
 def drafts_of(store: Store) -> list[tuple[str, str, str]]:

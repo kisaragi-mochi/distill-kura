@@ -112,6 +112,20 @@ def test_a_draft_that_would_be_a_broken_profile_is_refused(tmp_path):
     assert not Distiller.profile_draft(d)["ok"]
 
 
+def test_a_draft_is_refused_in_the_same_words_the_store_would_use(tmp_path):
+    """The draft check and the on-disk check are one check. When they drifted apart,
+    a draft was refused with half a sentence ("carries a score or weight") while the
+    store, told the same text, gave the reason the docs quote."""
+    reg, user, _ = two(tmp_path)
+    d = Distiller(reg, user)
+    text = "## Threads\nmemory design, interest score 7\n"
+    d.brain = lambda task, u, max_tokens=0: text   # type: ignore
+    r = d.profile_draft()
+    assert not r["ok"] and "a profile holds no numbers about how much things matter" in r["why"]
+    open(user.profile_path, "w", encoding="utf-8").write(text)
+    assert r["why"] == f"draft refused: {user.profile_state()['why']}"
+
+
 def test_an_empty_store_has_nothing_to_draft_from(tmp_path):
     s = Store(name="e", path=str(tmp_path / "e")); s.init_files()
     models = Models.from_config({"thinker": {"url": "http://127.0.0.1:9/v1", "model": "none"}})

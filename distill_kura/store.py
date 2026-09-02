@@ -1122,6 +1122,22 @@ class Store:
     _PROFILE_TABLE = re.compile(r"^\s*[-*|]?\s*[^:|\n]{1,60}[:|]\s*\d+(\.\d+)?\s*%?\s*\|?\s*$", re.M)
     _PROFILE_SCORE = re.compile(r"\b(score|weight|priority|importance|salience)\b\s*[:=]?\s*\d", re.I)
 
+    def profile_check(self, text: str) -> dict:
+        """Is this text a sound profile? {"state": present | broken, "why": ...}.
+
+        Content only — no filesystem. `profile_state()` applies it to profile.md on
+        disk and the distiller applies it to a draft that is not on disk yet, so one
+        wording answers "why is this not a profile?" wherever it is asked."""
+        if not text.strip():
+            return {"state": "broken", "why": "profile.md is empty"}
+        for rx, why in ((self._PROFILE_TABLE, "looks like a table of numbers, not sentences"),
+                        (self._PROFILE_SCORE, "carries a score or weight; a profile holds no "
+                                              "numbers about how much things matter")):
+            m = rx.search(text)
+            if m:
+                return {"state": "broken", "why": f"{why}: {m.group(0).strip()[:60]!r}"}
+        return {"state": "present", "why": ""}
+
     def profile_state(self) -> dict:
         """{"state": absent | present | broken, "why": ..., "chars": n}."""
         p = self.profile_path
@@ -1133,15 +1149,7 @@ class Store:
             text = open(p, encoding="utf-8").read()
         except (OSError, UnicodeDecodeError) as e:
             return {"state": "broken", "why": f"unreadable: {e}", "chars": 0}
-        if not text.strip():
-            return {"state": "broken", "why": "profile.md is empty", "chars": 0}
-        for rx, why in ((self._PROFILE_TABLE, "looks like a table of numbers, not sentences"),
-                        (self._PROFILE_SCORE, "carries a score or weight; a profile holds no numbers about how much things matter")):
-            m = rx.search(text)
-            if m:
-                return {"state": "broken", "why": f"{why}: {m.group(0).strip()[:60]!r}",
-                        "chars": len(text)}
-        return {"state": "present", "why": "", "chars": len(text)}
+        return {**self.profile_check(text), "chars": len(text) if text.strip() else 0}
 
     def profile_text(self) -> str:
         """The profile when it is present and sound; otherwise nothing. Callers that
