@@ -276,7 +276,14 @@ line naming the manifest. The distiller fires it at the end of a pour when the h
 gated words named what the new memory replaces; the loom compresses inside the face,
 never the face (the trimmer had been dropping the trailing `[[new]]`, measured and
 fixed); doctor, the richness gauge and worldline rows count and show faced memories;
-`kura retire OLD NEW --manifest HEX` is the human-driven door.
+`kura retire OLD NEW --manifest HEX` is the human-driven door. Proposed is not proven (a P1 found the same
+evening): the face is written only when ONE of the human's quotes names the old memory,
+carries an explicit replacement construction (やめて…で行く／代わりに／今後は／→ …,
+instead of／replaced with／switch to …) and names the new memory in that same sentence —
+never stitched across quotes, and nothing after a topic-shift clause (ところで, by the
+way) counts. `Store.retire` proves it again on the same manifest; the model's proposed
+tag is no signal at all. A quote that only retires writes no face: many false negatives
+are acceptable, a wrong successor in canonical is not.
 
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
