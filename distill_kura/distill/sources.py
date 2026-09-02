@@ -481,23 +481,28 @@ class EvidenceJsonlSource(Source):
             total += len(more)
             if more.endswith(b"\n"):
                 return None, "oversized"
-        # Bounded scan exhausted without a newline. A completed oversized JSONL
-        # record still starts with '{'; scan once to its newline so the invalid
-        # line is skipped instead of returning partial forever. Garbage tails and
-        # bound_end cuts stay capped at SCAN_LIMIT per attempt.
-        if not chunk.startswith(b"{"):
+        # Bounded scan exhausted without a newline. Peek only a fixed tail window
+        # at the visible end — never scan the whole suffix. No newline there means
+        # the line is still open; a newline means a completed oversized record.
+        pos_after_scan = h.tell()
+        h.seek(0, os.SEEK_END)
+        visible_end = bound_end if bound_end is not None else h.tell()
+        tail_start = max(line_start, visible_end - SCAN_LIMIT)
+        h.seek(tail_start)
+        tail = h.read(max(0, visible_end - tail_start))
+        if b"\n" not in tail:
+            h.seek(line_start)
             return None, "partial"
+        h.seek(pos_after_scan)
         while True:
             pos = h.tell()
-            if bound_end is not None and pos >= bound_end:
+            if pos >= visible_end:
                 h.seek(line_start)
                 return None, "partial"
-            limit = MAX_LINE
-            if bound_end is not None:
-                limit = min(limit, max(0, bound_end - pos))
-                if limit <= 0:
-                    h.seek(line_start)
-                    return None, "partial"
+            limit = min(MAX_LINE, visible_end - pos)
+            if limit <= 0:
+                h.seek(line_start)
+                return None, "partial"
             more = h.readline(limit)
             if not more:
                 h.seek(line_start)
