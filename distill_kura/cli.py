@@ -595,7 +595,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "tend":
         from .tend import Tender
-        t = Tender(reg, store, a.config, idle_min=a.idle_min, poll_s=a.poll,
+        # reg.config_path, not a.config: the resolved file the registry actually
+        # loaded (--config, then $KURA_CONFIG, then the candidates). Children are
+        # pinned to it instead of re-resolving under whatever exists at their launch.
+        t = Tender(reg, store, reg.config_path, idle_min=a.idle_min, poll_s=a.poll,
                    backoff_min=a.backoff_min, yield_on_return=(False if a.no_yield else None))
         if a.once:
             stamp = t.tick(0.0)

@@ -362,3 +362,27 @@ def test_a_track_is_declared_in_exactly_one_place(tmp_path):
         if tr.flag:
             assert getattr(t, tr.flag) is False                # the per-silence flag
     assert not hasattr(tendmod, "heartbeat"), "the dead wrapper: doctor reads tend_state"
+
+
+def test_child_tracks_carry_the_config_the_registry_resolved_not_the_bare_flag(tmp_path, monkeypatch):
+    """A watcher started without -c (systemd sets $KURA_CONFIG) used to spawn its
+    children with no -c at all, leaving each child to re-resolve the config under
+    whatever candidates exist at that moment. Pin them to what the parent loaded."""
+    reg0, st0, cfg, j = build(tmp_path)
+    monkeypatch.setenv("KURA_CONFIG", cfg)
+    monkeypatch.chdir(tmp_path)
+    reg = Registry.load(None)
+    assert reg.config_path == cfg
+    seen = {}
+
+    class Spy(Tender):
+        def __init__(self, reg, store, config_path, **kw):
+            seen["config_path"] = config_path
+            super().__init__(reg, store, config_path, **kw)
+
+    monkeypatch.setattr(tendmod, "Tender", Spy)
+    from distill_kura import cli
+    cli.main(["-s", "m", "tend", "--once", "--idle-min", "999999"])
+    assert seen["config_path"] == cfg                       # not None: a.config was unset
+    t = Tender(reg, reg.store("m"), seen["config_path"])
+    assert t._cmd("tidy")[3:5] == ["-c", cfg]
