@@ -70,6 +70,15 @@ be written — the read log, and a woven cloth if you point `cloth_path` outside
 woven *inside* it at all, so an archive that should keep a resident map needs
 `cloth_path` set somewhere else.
 
+One more canonical change has its own door, and it is not on that table because no
+policy widens it: `Store.retire(old, new, manifest_hex)` writes the retirement face onto
+a superseded memory's index line (docs/DESIGN.md §8). There is no direct variant of it.
+It requires an evidence manifest that verifies against its own hash and carries a
+USER-class quote naming the old memory, so a tool call cannot reach it under any
+`write_policy`, and `frozen` refuses it like everything else. Its limit is the gate
+mark's limit: the manifests sit beside the memories, so this stops a tool with a file
+handle, not a principal with the filesystem.
+
 The MCP bridge can additionally keep a client-side audit line per direct write
 (`KURA_WRITE_LOG`, one JSONL record per successful `kura_remember`). It is a record,
 not a permission: the write has already happened by the time it is logged.

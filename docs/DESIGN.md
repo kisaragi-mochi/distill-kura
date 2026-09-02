@@ -376,6 +376,25 @@ is a dry run that shows the store, the pressure, the candidates, their tags and
 sentences, the reason each could be released, what must be kept, and the proposed
 action — and modifies no memory, no index, no frontmatter.
 
+**What DOES exist, and is not forgetting: the retirement face.** When a plan, method
+or ruling has been superseded, the old memory keeps everything — its file, its slug, its
+body, its line in the index — and its own trigger says so, first:
+`退役: <old trigger>／現在は [[new-slug]]` (English: `superseded: … — now [[new-slug]]`,
+picked by the script the old trigger is written in). One line is appended to its body
+naming the evidence manifest. That is the whole change.
+
+`Store.retire(old, new, manifest_hex)` is the only door to it, and it is narrow because
+what it rewrites is the map's most-read line: the manifest must verify against its own
+hash and carry at least one **USER-class** quote naming the old memory — its slug or its
+exact index title. A TOOL/SELF/ACT-only manifest is refused, and the derived edge map
+(M7, §7) never calls it: a reading of the store may not rewrite what it read. The
+distiller calls it at the end of a pour, when the gate refused a `superseded` tag (a
+reader saw the transition and was not allowed to act on it) and the surviving [USER]
+evidence names a memory the store holds; `kura retire OLD NEW --manifest HEX` is the
+same door for a person. Idempotent, refused on a frozen store, and counted by `doctor`
+(`retired`, `retired_names`) and `kura metrics richness`. The weave compresses inside
+the face and never the face itself.
+
 **The seam it would plug into, and the ledger it would write** (a design sketch, so
 that when the pass is built it lands where the rest of the system expects it — none of
 this exists in code):
