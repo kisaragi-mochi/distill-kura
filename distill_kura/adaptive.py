@@ -258,6 +258,8 @@ class Adaptive:
         r = fastpath.lookup(self.store, cand, top=2, gate=self.gate, cues=False, body=False)
         hits = r.get("hits") or []
         if not hits:
+            if r.get("verdict") == "untestable":
+                return "untestable (only stop-grams; resident-only)"
             return "no confident hit (resident-only)"
         top = hits[0]
         if top["slug"] != slug:
@@ -333,6 +335,31 @@ class Adaptive:
         except (OSError, ValueError):
             return {}
 
+    def _reusable(self, cached, key: str, desc: str) -> dict[str, str] | None:
+        """The cache is a file on disk, not a witness. A cached entry is reused only
+        when its key still holds AND every cue is a string under a label we asked
+        for; each cue is re-cleaned exactly as a fresh model answer would be. The
+        floors and the recognizer then run on it again in `judge` — reuse saves the
+        model call and nothing else."""
+        if not (isinstance(cached, dict) and cached.get("key") == key
+                and isinstance(cached.get("cues"), dict)):
+            return None
+        out: dict[str, str] = {}
+        for label, text in cached["cues"].items():
+            if not (isinstance(label, str) and label.isdigit() and int(label) in self.steps
+                    and isinstance(text, str)):
+                return None
+            cand = re.sub(r"\s+", " ", text.strip()).strip()
+            if not cand:
+                return None
+            cand = self.loom._keep_markers(desc, self.loom._balance(cand))
+            step = int(label)
+            if estimate(cand) > step * 1.4:
+                cand = self.loom._keep_markers(
+                    desc, self.loom._balance(self.loom._soft_cut(cand, self._chars_for(desc, step))))
+            out[label] = cand
+        return out
+
     def shadow(self, generate: bool = True) -> dict:
         """Judge every trigger-layer memory. Candidates are reused from the cache when
         their memory-local key holds; the verdicts are recomputed every time, because
@@ -347,7 +374,7 @@ class Adaptive:
         reasons: dict[str, int] = {}
         by_shortest: dict[str, int] = {}
         by_script: dict[str, dict[str, int]] = {}
-        pending = grouped = 0
+        pending = grouped = reused = 0
         dirty = False
         for line in self.store._uncommented(self.store.index_text()).splitlines():
             m = ENTRY.match(line)
@@ -363,9 +390,10 @@ class Adaptive:
             current = (entry["hook"] if entry and entry.get("hook")
                        else self.loom._mechanical(desc, title))
             key = self._key(title, desc)
-            cached = cache.get(slug)
-            if isinstance(cached, dict) and cached.get("key") == key and isinstance(cached.get("cues"), dict):
-                cues = cached["cues"]
+            reused_cues = self._reusable(cache.get(slug), key, desc)
+            if reused_cues is not None:
+                cues = reused_cues
+                reused += 1
             elif not generate:
                 pending += 1
                 continue
@@ -390,7 +418,7 @@ class Adaptive:
                   "source_revision": revision, "steps": list(self.steps),
                   "trigger_tokens": self.loom.trigger_tokens, "memories": memories,
                   "summary": {"memories": len(memories), "pending": pending,
-                              "grouped_skipped": grouped,
+                              "grouped_skipped": grouped, "cues_reused": reused,
                               "current_tokens_total": cur, "shortest_safe_tokens_total": best,
                               "saved_tokens": cur - best, "by_shortest": by_shortest,
                               "by_script": by_script, "reasons": reasons,

@@ -57,10 +57,15 @@ alone now fails the run), `honest_unknown`. A 27-memory synthetic fixture store
 (`bench/worldline/memories.json`, superseded plans included) makes the shipped 26
 cases runnable anywhere; `explanation_burden` waits for M8 and a human definition.
 
-*Found on the way, not yet fixed:* `hooks.json` is unsigned and a reused hook is not
-re-floored, so a hand-edited ledger line can reach the cloth; the shadow deliberately
-lives in separate files and is never read by `weave()`, but the production ledger
-deserves the same mark the cue ledger has (follow-up).
+*Found on the way:* the shadow's candidate cache (`adaptive.hooks.json`) is a file,
+not a witness — a reused entry is now shape-checked and re-cleaned, and every reused
+cue still meets the floors and the recognizer in `judge` (reuse saves the model call,
+nothing else; `cues_reused` in the summary). The production `hooks.json` remains
+unsigned; it deserves the mark the cue ledger has (follow-up). Two more measurement
+fixes: the recognizer tells `untestable` (a cue made only of stop-grams — the store
+could not be asked) apart from `no-confident-hit` (the store said no), and every
+Worldline trace row and variant carries `resident_sha`, the identity of the map it
+actually wore, because "adaptive" names a label, not a trigger set.
 
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 

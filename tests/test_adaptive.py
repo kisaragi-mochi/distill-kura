@@ -343,3 +343,43 @@ def test_the_cli_renders_the_shadow_to_a_path_but_never_onto_the_cloth(tmp_path)
     with _pt.raises(SystemExit):
         main(["-c", str(cfg), "-s", "s", "weave", "--no-model",
               "--adaptive-out", os.path.join(s.still, "index.woven.md")])
+
+
+# ── the cache is a file, not a witness (FAILURES FOUND #1) ──────────────────
+
+def test_a_tampered_cache_entry_is_not_worn_as_is(tmp_path):
+    """A cue written into adaptive.hooks.json by hand goes through the same floors
+    as a fresh answer; a malformed entry (wrong label / non-string) is regenerated."""
+    s = old_store(tmp_path, [A, C])
+    sc = Scribe({A[1]: {24: "the run finished at 43.7 t/s only after the DIMM fans went in"}})
+    loom = Loom(s, scribe=None)
+    ad = Adaptive(s, loom, scribe=sc)
+    ad.shadow()
+    cache_path = os.path.join(s.still, "adaptive.hooks.json")
+    cache = json.load(open(cache_path, encoding="utf-8"))
+    # (a) a lie planted under a valid label is floored, never chosen
+    cache["fans-first"]["cues"]["8"] = "the run finished at 99.9 t/s"
+    json.dump(cache, open(cache_path, "w", encoding="utf-8"))
+    calls = sc.calls
+    r = Adaptive(s, loom, scribe=sc).shadow()
+    rec = r["memories"]["fans-first"]
+    assert sc.calls == calls                      # reused: no model call
+    assert rec["chosen"] != "8" and rec["why_not_shorter"]["8"].startswith("invented number")
+    assert r["summary"]["cues_reused"] >= 1
+    # (b) a malformed entry is not reused at all
+    cache["fans-first"]["cues"]["8"] = 12345
+    json.dump(cache, open(cache_path, "w", encoding="utf-8"))
+    calls = sc.calls
+    Adaptive(s, loom, scribe=sc).shadow()
+    assert sc.calls == calls + 1                  # regenerated for A
+
+
+def test_an_untestable_cue_is_told_apart_from_an_ambiguous_one(tmp_path):
+    """A cue made only of stop-grams (or of nothing the store knows) cannot be
+    tested; that is a different fact from 'hits the wrong memory'."""
+    s = old_store(tmp_path, [A, C])
+    ad = Adaptive(s, Loom(s, scribe=None), scribe=None)
+    why = ad.recognises("ZZQXV", "fans-first")
+    assert why.startswith(("untestable", "no confident hit"))
+    # and the two reasons never share a head word
+    assert not (why.startswith("untestable") and "ambiguous" in why)
