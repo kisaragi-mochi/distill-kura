@@ -69,6 +69,18 @@ apart from `no-confident-hit` (the store said no), and every
 Worldline trace row and variant carries `resident_sha`, the identity of the map it
 actually wore, because "adaptive" names a label, not a trigger set.
 
+**FAILURES FOUND: the production hook wore what the scribe answered, unchecked.**
+Measured on the house store (2026-09-02, 67 trigger-layer memories): the adaptive
+floors refuse the CURRENT production hook for 19 of the 67 — a git hash `6d62189`
+worn as `d62189`, ★/⚠️ on lines that never had them, among others. The production
+Loom checked only the older floors, so a scribe answer that passed the numeric floor
+went onto the resident map as-is. Now every hook — scribe answer and mechanical trim
+alike — faces `floors.first_violation` before it is worn; on a violation the
+mechanical trim gets its chance, and if that lies too, the canonical line is worn
+unchanged. The reason is stored on the hook entry as `floor` (None when clean), and
+`LEDGER_VERSION` is bumped to 10 so the old unchecked hooks are regenerated, not
+reused. A cut that lies is never worn.
+
 ### Worldline / Breadcrumb (M0–M2 of the plan, in progress)
 
 The next purpose, in the plan's words: from the smallest breadcrumb, restore the

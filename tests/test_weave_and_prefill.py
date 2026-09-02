@@ -139,6 +139,10 @@ def test_the_postcondition_actually_fires(tmp_path, monkeypatch):
     loom = Loom(s, scribe=None)
     monkeypatch.setattr(loom, "_mechanical",
                         lambda desc, title="": "](ghost.md) invented")
+    # The floors now refuse this cut before it is worn; silence them so the lie
+    # reaches the cloth and the postcondition — the backstop behind the floors —
+    # is the thing under test, as before W2b.
+    monkeypatch.setattr("distill_kura.floors.first_violation", lambda *a, **k: None)
     with pytest.raises(WeaveError):
         loom.weave()
 
@@ -666,3 +670,75 @@ def test_a_source_that_credits_the_human_may_keep_a_crediting_trigger(tmp_path):
     title = "storage doctrine"
     desc = "ケンの決裁: 資産と正典はDATA2、作業はDATA1"
     assert loom._acceptable("ケンの決裁: 資産と正典はDATA2", title, desc)
+
+
+# ── the hook faces the adaptive floors (W2b) ────────────────────────────────
+
+
+class HookScribe:
+    """A scripted scribe: answers the HOOK request for a title with fixed text."""
+    def __init__(self, cues: dict[str, str]):
+        self.cues = cues
+
+    def ask(self, system, user, **kw):
+        title = user.split("\n", 1)[0].removeprefix("title: ").strip()
+        return self.cues.get(title, "")
+
+
+def test_a_lying_hook_is_never_worn_the_mechanical_or_canonical_line_is(tmp_path):
+    """The defect W2b closes: the ledger wore the scribe's answer once it cleared the
+    numeric floor — the house store wore `d62189` for `6d62189` and ★ on lines that
+    never had them (19/67 memories, measured 2026-09-02). A hook that invents a
+    marker, cuts an identifier and re-binds a number is refused; the mechanical trim
+    (or, if that lies too, the canonical line) is worn instead, and the reason is
+    recorded on the entry."""
+    s = Store(name="f", path=str(tmp_path / "f"), label="test kura")
+    s.init_files()
+    s.remember("fresh-note", "touched today, so it is worn verbatim", "body")
+    s.remember("old-build",
+               "the old build ds4-tp8-engine-canonical ran from 12.5 GB of weights "
+               "for the whole week without a restart", "body from 2020-01-01")
+    p = s.file_of("old-build")
+    old = time.time() - 400 * 86400
+    os.utime(p, (old, old))
+    # Passes the OLD floors (grounded, no composed number) and would have been worn.
+    scribe = HookScribe({"old-build": "★the ds4-tp8 build ran from 12.5 GB"})
+    loom = Loom(s, scribe=scribe)
+    cloth = loom.weave()
+    line = next(l for l in cloth.text.splitlines() if "old-build" in l)
+    for lie in ("★", "ds4-tp8 build"):          # invented marker, cut identifier
+        assert lie not in line
+    title = "old-build"
+    desc = ("the old build ds4-tp8-engine-canonical ran from 12.5 GB of weights "
+            "for the whole week without a restart")
+    mech = loom._keep_markers(desc, loom._mechanical(desc, title))
+    entry = loom._hooks()["old-build"]
+    assert entry["hook"] in (mech, desc)        # mechanical or canonical, never the lie
+    assert entry["floor"]                       # the reason is recorded
+    assert isinstance(entry["floor"], str)
+
+
+def test_a_clean_scribe_hook_is_worn_unchanged(tmp_path):
+    """The floors are a gate, not a rewriter: an honest hook the floors accept is worn
+    exactly as the scribe wrote it, with `floor` recorded as None."""
+    s = a_store(tmp_path)
+    loom = Loom(s, scribe=HookScribe({"old-0": "an older note number 0"}))
+    cloth = loom.weave()
+    entry = loom._hooks()["old-0"]
+    assert entry["hook"] == "an older note number 0"
+    assert entry["by"] == "model"
+    assert entry["floor"] is None
+    assert "— an older note number 0" in cloth.text
+
+
+def test_the_postcondition_holds_when_the_scribe_invents_a_link(tmp_path):
+    """Without the floors, a scribe answer naming a [[link]] the line never had would
+    land in the cloth — the one layer the postcondition cannot see into, because the
+    link sits after the slug. The floors refuse it and the weave still holds."""
+    s = a_store(tmp_path)
+    loom = Loom(s, scribe=HookScribe({"old-2": "says 12.5 GB somewhere [[g]]"}))
+    raw = s.index_text()
+    cloth = loom.weave()                        # raises WeaveError if the map lies
+    assert _links_per_line(raw, loom.verbatim_after) == \
+        _links_per_line(cloth.text, loom.verbatim_after)
+    assert "[[g]]" not in cloth.text

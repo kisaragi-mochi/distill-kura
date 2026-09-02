@@ -83,7 +83,7 @@ DEFAULT_TRIGGER_TOKENS = 24
 # code that wrote it", so without a version the trimmer can be improved and nothing
 # happens. Observed exactly that: a fix for dropped ★ markers changed nothing until the
 # ledger was invalidated.
-LEDGER_VERSION = 9   # 9: the file is marked (8: the mechanical trim faces the numeric floor too)
+LEDGER_VERSION = 10   # 10: hooks face the adaptive floors (9: the file is marked)
 
 # The hooks file carries the cue ledger's mark (cues.py `_mark`): HMAC over the
 # canonical payload with the store's gate key. It used to be plain JSON, so a hook
@@ -327,7 +327,11 @@ class Loom:
         unit = r"(?:t/s|tok/s|GB|GiB|MB|KiB|TB|%|倍|秒|枚|層|件|ms|s|B)(?![A-Za-z])"
         for m in re.finditer(rf"\d+(?:\.\d+)?\s*{unit}"
                              rf"(?:\s*(?:→|->)\s*\d+(?:\.\d+)?\s*{unit})?", norm):
-            frag = re.sub(r"\s+", "", m.group(0))
+            # Collapse runs of whitespace, never remove them: gluing turned "12.5 GB"
+            # into "12.5GB", re-binding the number to a unit it never wore — the exact
+            # lie the adaptive floors refuse, which left the canonical line as the only
+            # honest fallback and the trigger never shortened at all.
+            frag = re.sub(r"\s+", " ", m.group(0))
             if len(frag) > 1:
                 out.append(frag)
         out += re.findall(r"[A-Za-z][A-Za-z0-9_+./-]{2,24}", text)
@@ -549,6 +553,7 @@ class Loom:
         # The revision is captured BEFORE the index is read: a mutation landing in
         # between then shows as revision-moved at persist time, which is the safe
         # direction (a refused persist costs one re-weave; a missed one costs a lie).
+        from . import floors  # lazy: floors.py imports DEAD_WORDS/MARKERS from here
         revision = self.store.revision()
         raw = self.store.index_text()
         hooks = self._hooks()
@@ -614,9 +619,24 @@ class Loom:
             stats["hooks_written"] += 1
             if not from_model:
                 stats["hooks_mechanical"] += 1
+            # The hook faces the adaptive floors before it is worn: the production
+            # ledger wore `d62189` for `6d62189` and ★ on lines that never had them
+            # (19/67 memories, measured 2026-09-02). On a violation the mechanical trim
+            # gets its chance; if that lies too, the canonical line is worn as-is.
+            # A cut that lies is never worn.
+            floor = floors.first_violation(trigger, title, desc, self)
+            canonical = False
+            if floor is not None:
+                mech = self._keep_markers(desc, self._mechanical(desc, title))
+                if floors.first_violation(mech, title, desc, self) is None:
+                    trigger, from_model = mech, False
+                else:
+                    trigger, from_model, canonical = desc, False, True
             hooks[slug] = {"hook": trigger, "title": title, "desc_sha1": _sha1(desc),
                            "tokens": self.trigger_tokens, "v": LEDGER_VERSION,
-                           "by": "model" if from_model else "mechanical"}
+                           "floor": floor,
+                           "by": ("canonical" if canonical else
+                                  "model" if from_model else "mechanical")}
             dirty = True
             out.append(f"{bullet}[{title}]({slug}.md) — {trigger}")
 
