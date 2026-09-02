@@ -8,7 +8,9 @@ Everything the distiller reads is turned into segments carrying an evidence clas
     [SELF]  the agent's own prose      — a judgement worth keeping, never a bare fact
 
 Reasoning / thinking blocks are dropped: an inner monologue is not evidence.
-Injected content (system reminders, runtime context) is not the human speaking.
+Injected content (system reminders, runtime context) is not the human speaking. How
+that is detected is adapter-specific, because the harnesses inject differently: see
+the two filters below.
 
 Three adapters ship here; add your own by subclassing `Source` and registering it
 in `SOURCES`. `watermark` semantics differ per adapter, so each one owns them:
@@ -24,8 +26,16 @@ from dataclasses import dataclass
 
 from ..store import contained
 
-MAX_TOOL = 1500      # tools are verbose; the head is enough to ground a number
+MAX_TOOL = 1500
 MAX_SEG = 4000
+
+
+def _cap(cls: str) -> int:
+    """Per-class ceiling on one segment's text. Tools are verbose; the head is enough
+    to ground a number. One rule, because the adapters wrote it out separately: the
+    Claude path cut to MAX_TOOL and then again to MAX_SEG and only agreed with the DSH
+    path because MAX_TOOL happens to be the smaller constant."""
+    return MAX_TOOL if cls == "TOOL" else MAX_SEG
 
 CLASSES = ("USER", "TOOL", "ACT", "SELF")
 
@@ -153,12 +163,17 @@ class ClaudeCodeSource(Source):
                     if not cls:
                         continue
                     txt = self._text_of(p).strip()
+                    # SUBSTRING, deliberately: Claude Code appends <system-reminder>
+                    # blocks INSIDE the human's own text part, and the transcript
+                    # carries no provenance label, so a prefix test would never fire.
+                    # The whole part is dropped rather than risk laundering injected
+                    # text into [USER]. DshSource can afford a prefix test because it
+                    # has `source.kind` to decide provenance first.
                     if not txt or "system-reminder" in txt or txt.startswith("<local-command"):
                         continue
-                    if cls == "TOOL":
-                        txt = txt[:MAX_TOOL]
-                    segs.append(Segment(cls, txt[:MAX_SEG]))
-                    total += min(len(txt), MAX_SEG)
+                    txt = txt[:_cap(cls)]
+                    segs.append(Segment(cls, txt))
+                    total += len(txt)
                 if total >= limit_chars:
                     return segs, h.tell(), total
             return segs, h.tell(), total
@@ -239,6 +254,9 @@ class DshSource(Source):
                 return None                       # injected context is not the human
             txt = " ".join(c.get("text", "") for c in (data.get("content") or [])
                            if isinstance(c, dict) and c.get("type") == "text").strip()
+            # Prefix, not substring: `source.kind` above has already decided
+            # provenance, so this is belt-and-braces. (ClaudeCodeSource has no such
+            # label and must match anywhere in the part — see its walk.)
             if not txt or txt.startswith("<system-reminder") or txt.startswith("Current runtime context"):
                 return None
             return Segment("USER", txt)
@@ -281,7 +299,7 @@ class DshSource(Source):
             s = self._classify(d)
             if not s:
                 continue
-            s.text = s.text[:MAX_TOOL if s.cls == "TOOL" else MAX_SEG]
+            s.text = s.text[:_cap(s.cls)]
             segs.append(s)
             total += len(s.text)
             if total >= limit_chars:
