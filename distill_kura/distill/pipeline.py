@@ -746,17 +746,25 @@ class Distiller:
             self._store_text = None
             # The route becomes real only now that the memory does. A staged draft
             # carried its cues as provenance; a TOSSed or quarantined one never
-            # reaches this line, so no unpoured draft can grow a route.
+            # reaches this line, so no unpoured draft can grow a route. A receipt
+            # that cannot be minted does NOT fail the pour — but it is never
+            # silent: the result says so.
+            cue_receipt = "none"
             if man:
                 hexd = man.group(1).split("sha256:", 1)[-1]
                 vm = self.store.load_manifest_verified(hexd)
                 if vm and vm.get("routing_cues"):
                     from ..cues import CueLedger
-                    CueLedger(self.store).issue(
+                    res = CueLedger(self.store).issue(
                         memory_slug=slug_out,
                         evidence_manifest=f"sha256:{hexd}",
                         routing_cues=vm["routing_cues"],
                         accepted_via="extends" if head.get("EXTENDS") else "new")
+                    cue_receipt = "issued" if res["ok"] else f"failed: {res['why']}"
+                    if not res["ok"]:
+                        _log(f"  ⚠ cue receipt refused for {slug_out} — {res['why']}")
+            if cue_receipt != "none":
+                r["cue_receipt"] = cue_receipt
         # `created` already means "the file did not exist"; naming the slug here too
         # overwrote that answer with a string.
         return {**r, "poured_into": slug_out, "extended": bool(head.get("EXTENDS"))}
@@ -1066,6 +1074,7 @@ class Distiller:
 
     def run(self, session: str | None = None, chunks: int = 1) -> dict:
         made, killed, covered, sown, recurred = [], 0, 0, 0, 0
+        cue_receipts = cue_receipt_failures = 0
         for _ in range(chunks):
             got = self.sip_one(session)
             if not got:
@@ -1125,11 +1134,19 @@ class Distiller:
                              "routing_cues_refused": c.get("routing_cues_refused") or {}},
                             path, key)
                         from ..cues import CueLedger
-                        CueLedger(self.store).issue(
+                        res = CueLedger(self.store).issue(
                             memory_slug=target, evidence_manifest=f"sha256:{mdigest}",
                             routing_cues=c["routing_cues"], accepted_via="covered")
-                        _log(f"      ⇢ cue kept for COVERED {target}: "
-                             f"{[x['text'] for x in c['routing_cues']]}")
+                        if res["ok"]:
+                            cue_receipts += 1
+                            _log(f"      ⇢ cue kept for COVERED {target}: "
+                                 f"{[x['text'] for x in c['routing_cues']]}")
+                        else:
+                            # A route that cannot be minted is silence — but never
+                            # silent ABOUT it: the run's numbers and log both say so.
+                            cue_receipt_failures += 1
+                            _log(f"      ⚠ cue receipt refused for COVERED {target} — "
+                                 f"{res['why']}")
                     with open(os.path.join(self.still, "dropped.jsonl"), "a", encoding="utf-8") as f:
                         f.write(json.dumps({**{k: v for k, v in c.items() if k != "evidence"},
                                             "why_dropped": f"COVERED by {target}", "reason": why,
@@ -1162,6 +1179,7 @@ class Distiller:
                 "candidates": len(cands), "gated_kept": len(kept),
                 "gated_dropped": len(dropped), "ideas": len(ideas),
                 "covered": covered, "recurred": recurred, "drafts": drafted,
+                "cue_receipts": cue_receipts, "cue_receipt_failures": cue_receipt_failures,
                 "draft_chars": draft_chars,
                 "draft_tokens_est": estimate("\n".join(draft_text)),
                 "index_tokens_est": estimate(self.store.index_text()),
@@ -1169,7 +1187,8 @@ class Distiller:
         if not made and not killed and not covered and not sown:
             return {"ok": True, "why": "nothing worth drinking"}
         return {"ok": True, "drafts": made, "dropped": killed, "covered": covered,
-                "recurred": recurred, "seeds": sown}
+                "recurred": recurred, "seeds": sown,
+                "cue_receipts": cue_receipts, "cue_receipt_failures": cue_receipt_failures}
 
     def night(self, idle_min: float = 20.0, poll_s: float = 30.0) -> None:
         """Run a pass whenever the journals have been quiet long enough. Never gets in

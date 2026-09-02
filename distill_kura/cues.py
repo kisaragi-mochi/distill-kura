@@ -61,11 +61,29 @@ class CueLedger:
 
     # ── issuing: the one moment a route becomes real ────────────────────
     def issue(self, memory_slug: str, evidence_manifest: str, routing_cues: list,
-              accepted_via: str) -> str | None:
+              accepted_via: str) -> dict:
         """Write the immutable receipt for a callsign association, content-
-        addressed, signed with the gate key. Idempotent: the same receipt is the
-        same file. Returns the receipt digest, or None when the cues are not
-        signable (nothing explodes — the route simply does not come to be)."""
+        addressed, signed with the gate key, DURABLY (write-fsync-rename plus a
+        directory fsync — a receipt is semantic authority now, and a power loss
+        that eats it quietly would thin exactly the relationships this keeps).
+        Idempotent: the same receipt is the same file.
+
+        → {"ok", "digest", "why"}. A refusal is never silent: the caller is
+        expected to surface `why` (pour results, run metrics) — silence over a
+        wrong route, yes, but never silence ABOUT the silence."""
+        if self.store.write_policy == "frozen":
+            # Frozen means the world does not grow — including the ways it may
+            # be called. A COVERED verdict needs no canonical write to mint a
+            # route, so this check is the only thing standing between a frozen
+            # archive and a routing behaviour that keeps evolving.
+            return {"ok": False, "digest": None,
+                    "why": "store is frozen: routing does not grow"}
+        if os.path.islink(self.receipts) or os.path.islink(self.path):
+            from .store import contained as _contained
+            for p in (self.receipts, self.path):
+                if os.path.islink(p) and not _contained(self.store.path, p):
+                    return {"ok": False, "digest": None,
+                            "why": f"the receipt store is a symlink out of the kura ({p})"}
         cues = [{"text": c.get("text"), "class": c.get("class"), "quote": c.get("quote")}
                 for c in (routing_cues or []) if isinstance(c, dict) and c.get("text")]
         receipt = {"schema": RECEIPT_SCHEMA, "memory_slug": memory_slug,
@@ -79,20 +97,23 @@ class CueLedger:
                           ensure_ascii=False, indent=1, sort_keys=True)
         try:
             os.makedirs(self.receipts, exist_ok=True)
-            # Unique even across parallel rebuilds: a shared temp name would let
-            # one writer clobber another's os.replace mid-flight.
-            tmp = os.path.join(self.receipts, f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(blob)
-            os.replace(tmp, os.path.join(self.receipts, f"{digest}.json"))
-        except OSError:
-            return None                     # a route that cannot be proven is no route
+            self.store._replace_file(os.path.join(self.receipts, f"{digest}.json"),
+                                     blob.encode("utf-8"))
+            self.store._fsync_dir(self.receipts)
+        except OSError as e:
+            return {"ok": False, "digest": None, "why": f"receipt write failed: {e}"}
         self._memo = None
-        return digest
+        return {"ok": True, "digest": digest, "why": ""}
 
     # ── verifying: the reader's own mechanical floor ────────────────────
     def receipt_digests(self) -> list[str]:
         try:
+            # A receipt store symlinked out of the kura is not this store's
+            # authority, whatever it contains — containment is membership.
+            if os.path.islink(self.receipts):
+                from .store import contained as _contained
+                if not _contained(self.store.path, self.receipts):
+                    return []
             return sorted(f[:-5] for f in os.listdir(self.receipts)
                           if f.endswith(".json") and _HEX64.match(f[:-5]))
         except OSError:
@@ -138,6 +159,15 @@ class CueLedger:
             return None
         if man.get("routing_cues_version") != 1:
             return None
+        # The association itself, proven: the manifest the gate wrote must name
+        # THIS memory, and must have approved exactly these cues. Without these
+        # two checks a buggy caller could sign a receipt for a slug the manifest
+        # never blessed, with a phrase it never accepted — "the human said it"
+        # would stand in for "the gate accepted it, for this memory".
+        if man.get("memory_slug") != receipt.get("memory_slug"):
+            return None
+        approved = [{k: c.get(k) for k in ("text", "class", "quote")}
+                    for c in (man.get("routing_cues") or []) if isinstance(c, dict)]
         user_quotes = [q.get("text") for q in (man.get("quotes") or [])
                        if isinstance(q, dict) and q.get("class") == "USER"]
         cues = []
@@ -155,6 +185,8 @@ class CueLedger:
                 return None
             if text not in quote:                      # and the cue is part of them
                 return None
+            if {"text": text, "class": "USER", "quote": quote} not in approved:
+                return None                            # the gate never approved THIS cue
             cues.append({"text": text, "class": "USER", "quote": quote})
         if not cues:
             return None

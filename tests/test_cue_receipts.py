@@ -8,6 +8,7 @@ one of those attacks.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import stat
@@ -185,9 +186,13 @@ def test_a_tampered_receipt_routes_nowhere(tmp_path):
         "content no longer hashes to its name; the reader's floor refuses"
 
 
-def test_a_receipt_whose_mark_was_recomputed_by_hand_is_refused(tmp_path):
-    """Recompute the HMAC too (the key sits beside the store — see TRUST.md) and
-    the digest check still refuses: content must hash to its NAME."""
+def test_a_correctly_resigned_receipt_keeps_its_old_name_is_refused(tmp_path):
+    """Honest about the boundary: a principal holding the gate key CAN re-sign
+    content (docs/TRUST.md — the key stops accidents, not the filesystem owner),
+    and a fully re-forged, correctly RENAMED receipt is beyond this floor, like
+    every other mark in the store. What digest-naming does defend — and what
+    this pins — is the cheap attack: re-sign the content, keep the old filename,
+    and the name no longer hashes to the bytes."""
     import hashlib
     s, dis = build(tmp_path)
     cue(tmp_path, dis, "freetoken-hybrid", "全員野球")
@@ -196,13 +201,139 @@ def test_a_receipt_whose_mark_was_recomputed_by_hand_is_refused(tmp_path):
     p = os.path.join(led.receipts, f"{key}.json")
     d = json.load(open(p))
     d["receipt"]["memory_slug"] = "other-memory"
-    blob = json.dumps(d["receipt"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    mark = "0" * 64                                       # even a perfect mark cannot
-    digest = hashlib.sha256(blob.encode()).hexdigest()    # rename the content
-    os.remove(p)
-    json.dump({"receipt": d["receipt"], "mark": mark},
-              open(os.path.join(led.receipts, f"{digest}.json"), "w"))
+    blob = json.dumps(d["receipt"], ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"))
+    mark = hmac.new(s.gate_key(), ("cue-receipt-v1" + blob).encode(),
+                    hashlib.sha256).hexdigest()          # a REAL re-signature
+    json.dump({"receipt": d["receipt"], "mark": mark}, open(p, "w"))
+    assert CueLedger(s).direct(Q) is None, "the name no longer hashes to the content"
+
+
+# ── M3.1: the association itself must be proven ─────────────────────────────
+
+def _manifest_only(tmp_path, dis, slug, cues, quote="例の全員野球でいこう"):
+    src = tmp_path / "journal.jsonl"
+    src.write_text("{}\n", encoding="utf-8")
+    return dis._write_manifest(
+        {"slug": slug, "kind": "project",
+         "evidence": [{"class": "USER", "text": quote}], "classes": ["USER"],
+         "routing_cues": cues}, str(src), "test:cue")
+
+
+def test_a_receipt_for_a_slug_the_manifest_never_blessed_is_refused(tmp_path):
+    """The reader proved the human said the words — but not that the gate
+    accepted them FOR THIS MEMORY. A buggy caller signing a receipt against the
+    wrong slug must not grow a route."""
+    s, dis = build(tmp_path)
+    quote = "例の全員野球でいこう"
+    cues = [{"text": "全員野球", "class": "USER", "quote": quote}]
+    d = _manifest_only(tmp_path, dis, "freetoken-hybrid", cues)  # blessed for THIS one
+    CueLedger(s).issue(memory_slug="other-memory",                  # signed for THAT one
+                       evidence_manifest=f"sha256:{d}",
+                       routing_cues=cues, accepted_via="new")
     assert CueLedger(s).direct(Q) is None
+
+
+def test_a_receipt_cue_the_manifest_never_approved_is_refused(tmp_path):
+    """A phrase inside the human's quote, said by the human — but the gate
+    approved '全員野球', not '全員野球で'. Subset-of-quote is not subset-of-approved."""
+    s, dis = build(tmp_path)
+    quote = "例の全員野球でいこう"
+    d = _manifest_only(tmp_path, dis, "freetoken-hybrid",
+                       [{"text": "全員野球", "class": "USER", "quote": quote}])
+    CueLedger(s).issue(memory_slug="freetoken-hybrid",
+                       evidence_manifest=f"sha256:{d}",
+                       routing_cues=[{"text": "全員野球で", "class": "USER",
+                                      "quote": quote}], accepted_via="new")
+    assert CueLedger(s).direct("全員野球でいこう?") is None
+    assert CueLedger(s).direct(Q) is None
+
+
+# ── M3.1: receipts are persistent authority — policy and durability ─────────
+
+def test_a_frozen_store_refuses_to_grow_routing(tmp_path):
+    """Frozen means the world does not grow, including the ways it may be
+    called. COVERED needs no canonical write to mint a route — this refusal is
+    the only thing standing between a frozen archive and evolving routing."""
+    import pathlib
+    frozen = Store(name="f", path=str(tmp_path / "f"), write_policy="frozen")
+    frozen.init_files()
+    res = CueLedger(frozen).issue(memory_slug="x", evidence_manifest="sha256:" + "0" * 64,
+                                  routing_cues=[{"text": "全員野球", "class": "USER",
+                                                 "quote": "例の全員野球"}],
+                                  accepted_via="covered")
+    assert res["ok"] is False and "frozen" in res["why"]
+
+
+def test_a_receipt_store_symlinked_out_of_the_kura_is_refused(tmp_path):
+    s, dis = build(tmp_path)
+    led = CueLedger(s)
+    os.makedirs(led.receipts)
+    outside = tmp_path / "outside-receipts"
+    outside.mkdir()
+    rmdir = led.receipts
+    os.rmdir(rmdir)
+    os.symlink(outside, rmdir)
+    res = led.issue(memory_slug="freetoken-hybrid",
+                    evidence_manifest="sha256:" + "0" * 64,
+                    routing_cues=[{"text": "全員野球", "class": "USER",
+                                   "quote": "例の全員野球"}], accepted_via="new")
+    assert res["ok"] is False and "symlink" in res["why"]
+    assert led.receipt_digests() == [], "reading through the escape is refused too"
+
+
+def test_receipts_are_written_durably_and_failures_are_visible(tmp_path, monkeypatch):
+    import json as _j
+    s, dis = build(tmp_path)
+    fsynced = []
+    real = s._fsync_dir
+    monkeypatch.setattr(s, "_fsync_dir", lambda p: (fsynced.append(p), real(p))[1])
+
+    def boom(target, data):
+        raise OSError("disk went away")
+    monkeypatch.setattr(s, "_replace_file", boom)
+    res = CueLedger(s).issue(memory_slug="freetoken-hybrid",
+                             evidence_manifest="sha256:" + "0" * 64,
+                             routing_cues=[{"text": "全員野球", "class": "USER",
+                                            "quote": "例の全員野球"}], accepted_via="new")
+    assert res["ok"] is False and "write failed" in res["why"]
+    assert fsynced == [], "a failed write never claims durability"
+
+    monkeypatch.setattr(s, "_replace_file", Store._replace_file.__get__(s))
+    res2 = CueLedger(s).issue(memory_slug="freetoken-hybrid",
+                              evidence_manifest="sha256:" + "0" * 64,
+                              routing_cues=[{"text": "全員野球", "class": "USER",
+                                             "quote": "例の全員野球"}], accepted_via="new")
+    assert res2["ok"] is True and fsynced, "the directory fsync rode along"
+
+
+def test_the_run_and_pour_results_say_when_a_receipt_was_refused(tmp_path, monkeypatch):
+    import json as _j
+    s, dis = build(tmp_path)
+    j = tmp_path / "j.jsonl"
+    j.write_text(_j.dumps({"type": "user", "message": {"content": [
+        {"type": "text", "text": "また知性備蓄部門の話、freetoken-hybrid 続きで"}]}}) + "\n"
+        + _j.dumps({"type": "user", "message": {"content": [
+            {"type": "text", "text": "padding " * 2000}]}}) + "\n", encoding="utf-8")
+    dis._current_source = str(j)
+
+    def brain(task, user, max_tokens=0):
+        if "deserves to become" in task:
+            return _j.dumps([{"topic": "budget", "kind": "project",
+                              "why": "the hybrid freetoken-hybrid",
+                              "callsigns": ["知性備蓄部門"],
+                              "quotes": ["[USER] また知性備蓄部門の話、freetoken-hybrid 続きで"]}])
+        if "actually NEW" in task:
+            return "COVERED freetoken-hybrid\nalready there"
+        return ""
+    dis.brain = brain                                     # type: ignore[method-assign]
+
+    def boom(target, data):
+        raise OSError("no receipts tonight")
+    monkeypatch.setattr(s, "_replace_file", boom)
+    r = dis.run(chunks=1)
+    assert r.get("cue_receipt_failures") == 1 and r.get("cue_receipts") == 0, \
+        "the refusal is counted in the run's numbers, never swallowed"
 
 
 # ── 4: COVERED freshness without a canonical move ───────────────────────────
