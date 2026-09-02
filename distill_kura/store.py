@@ -1042,8 +1042,16 @@ class Store:
                hook: str | None = None, title: str | None = None,
                meta: dict | None = None, tags=None, annotations: dict | None = None,
                signed: bool = False) -> dict:
-        """Write ONE fact; add one index line. Existing file → body replaced and the
-        index line refreshed (a stale index line keeps speaking the old fact).
+        """Write ONE fact; add one index line. Existing file → body replaced and, when
+        the slug has a line of its OWN in the form `- [T](slug.md) — hook`, that line's
+        hook refreshed (a stale index line keeps speaking the old fact).
+
+        A slug that lives on a GROUPED line (`- topic — [A](a.md)/[B](b.md)`, the shape
+        weave.MULTI protects) is left untouched by design: rewriting such a line from
+        one slug would swallow its siblings, and a memory that vanishes from the map is
+        gone as far as the agent is concerned. The result then says `indexed: False`.
+        Nothing else refreshes it either — `tidy` matches the same single-entry shape —
+        so a grouped line's hook is the author's to keep current.
 
         Policy is checked by the callers above; this is the mechanism only."""
         if (r := self._substitution_refusal()):
@@ -1136,6 +1144,8 @@ class Store:
                     new_index = "\n".join(out) + "\n"
                     result = {"ok": True, "slug": slug, "created": False, "indexed": "updated"}
             if new_index is None:
+                # Present but not matched above means a grouped or non-standard line:
+                # deliberately not rewritten (see the docstring), hence indexed: False.
                 if f"({slug}.md)" not in entries:
                     # Title must be a name one can say aloud — never a truncated description.
                     t1 = self._sayable_title(t1, d1 if len(d1) <= 34 else slug)

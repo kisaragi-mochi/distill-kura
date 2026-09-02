@@ -319,3 +319,18 @@ def test_a_write_over_an_escaping_symlink_inherits_no_neighbours_frontmatter(tmp
     # ...and the neighbour it used to borrow from is untouched.
     assert s.frontmatter_exact("alpha-fact")["session"] == "neighbour-session"
     assert s.tags("alpha-fact") == ("decision",)
+
+
+def test_a_grouped_index_line_is_not_rewritten_and_says_so(tmp_path):
+    """The refresh matches a line of the slug's own. A slug sharing a line with its
+    siblings keeps the old hook — rewriting it from one slug would swallow the others
+    — and the result admits it. Pinned so extending the refresh stays a choice."""
+    s = make(tmp_path)
+    s.remember("fact", "old trigger", "old body", title="Fact")
+    with open(s.index_path, "w", encoding="utf-8") as f:
+        f.write("- a family — [Fact](fact.md) — one/[Other](other.md) — two\n")
+    before = s.index_text()
+    r = s.remember("fact", "new trigger", "new body", title="Fact")
+    assert r["ok"] and r["indexed"] is False
+    assert s.index_text() == before          # the siblings are not swallowed
+    assert "new body" in s.read("fact")
