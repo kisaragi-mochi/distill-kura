@@ -21,7 +21,7 @@
     "@deepseek-ai/dsh-tools": "*"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "test": "node --import ./test/register.mjs --test test/plugin.test.mjs"
