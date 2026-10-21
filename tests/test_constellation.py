@@ -8,6 +8,7 @@ claim could quietly become false.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,7 +21,7 @@ from distill_kura.registry import Registry                              # noqa: 
 from distill_kura.store import Store                                    # noqa: E402
 
 
-TODAY = "2026-09-02"
+TODAY = datetime.now(timezone.utc).date().isoformat()
 
 
 def a_sector_store(tmp_path) -> Store:

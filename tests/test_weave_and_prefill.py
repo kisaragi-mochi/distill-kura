@@ -49,7 +49,7 @@ def a_store(tmp_path, n_old: int = 6) -> Store:
     s.remember("about-ken", "prefers plain answers", "body", type_="user")
     s.remember("recent-thing",
                "the run finished at 43.7 t/s after the fans went in, which was the whole point",
-               "body 2026-08-22")
+               f"body {datetime.now(timezone.utc).date().isoformat()}")
     for i in range(n_old):
         s.remember(f"old-{i}",
                    f"an older note number {i} with a long trailing description that keeps "

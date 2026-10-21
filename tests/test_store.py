@@ -228,6 +228,8 @@ def test_a_wal_intent_naming_a_store_kept_file_is_quarantined(tmp_path):
     import hashlib
     import json
     s = make(tmp_path)
+    memory = tmp_path / "t" / "memory.md"
+    original_memory = memory.read_bytes() if memory.exists() else None
     charter = os.path.join(s.path, "charter.md")
     with open(charter, "w", encoding="utf-8") as f:
         f.write("the real charter\n")
@@ -250,7 +252,7 @@ def test_a_wal_intent_naming_a_store_kept_file_is_quarantined(tmp_path):
     assert rep["replayed"] == []
     assert rep["quarantined"] == ["00000000000000000001-1", "00000000000000000002-1"]
     assert open(charter, encoding="utf-8").read() == "the real charter\n"
-    assert not os.path.exists(os.path.join(s.path, "memory.md"))
+    assert (memory.read_bytes() if memory.exists() else None) == original_memory
     assert s.revision() != 99                       # the counter did not honour the promise
     assert s.doctor()["broken_wal"] == rep["quarantined"]     # loud, not swept up
     # One predicate, both doors: every name the writer refuses is a name replay refuses.
